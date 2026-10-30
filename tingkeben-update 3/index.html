@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>听课本</title>
+<meta name="description" content="导入 Moodle 课件，AI 整理中英对照笔记；课堂实时转写和中文翻译。">
+<meta name="theme-color" content="#2C47A5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="听课本">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand"><img src="icon-192.png" alt="">听课本</div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sub">课程</div>
+    <div id="side-courses"></div>
+  </aside>
+  <main><div class="wrap" id="view"></div></main>
+  <nav class="tabbar" id="tabbar"></nav>
+</div>
+<div id="toast" class="toast" hidden></div>
+<div id="modal" class="modal" hidden><div class="box" id="modal-box"></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="db.js"></script>
+<script src="extract.js"></script>
+<script src="ai.js"></script>
+<script src="live.js"></script>
+<script src="study.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
