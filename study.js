@@ -260,12 +260,12 @@ const Board = (() => {
       if (hit) { pv.page.strokes = keep; paintInk(pv); }
     }
     $('[data-act=undo]', host).onclick = () => {
-      const a = undo.pop(); if (!a) return;
+      const a = undo.pop(); if (!a) { toast('没有可以撤销的'); return; }
       if (a.type === 'add') a.page.strokes = a.page.strokes.filter(s => s !== a.stroke); else a.page.strokes.push(...a.strokes);
       redo.push(a); pageViews.forEach(paintInk); persist();
     };
     $('[data-act=redo]', host).onclick = () => {
-      const a = redo.pop(); if (!a) return;
+      const a = redo.pop(); if (!a) { toast('没有可以重做的'); return; }
       if (a.type === 'add') a.page.strokes.push(a.stroke); else a.page.strokes = a.page.strokes.filter(s => !a.strokes.includes(s));
       undo.push(a); pageViews.forEach(paintInk); persist();
     };
@@ -652,7 +652,7 @@ const Chat = (() => {
       busy = null; paint();
       await DB.put(note ? 'notes' : 'courses', store);
     }
-    $('#chat-send', host).onclick = () => { const t = input.value.trim(); if (!t) return; input.value = ''; send(t); };
+    $('#chat-send', host).onclick = () => { const t = input.value.trim(); if (!t) { toast('先在框里输入问题，或者点上面的快捷问题'); input.focus(); return; } input.value = ''; send(t); };
     input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#chat-send', host).click(); } };
     confirmClick($('#chat-clear', host), '确认清空', async () => { store.chat = []; await DB.put(note ? 'notes' : 'courses', store); paint(); });
     $$('[data-s]', host).forEach(b => b.onclick = () => send(b.dataset.s));
@@ -1080,6 +1080,7 @@ const DeskPref = {
 };
 
 async function renderDesk(noteId) {
+  if (location.hash.slice(1) !== 'desk-' + noteId) return; // 已经离开这页了
   const note = await DB.get('notes', noteId);
   if (!note) { location.hash = 'home'; return; }
   const course = await DB.get('courses', note.courseId);
@@ -1239,7 +1240,7 @@ function deskLive(note, course, el) {
       const live = new LiveSession({ course, onUpdate: segs => liveUI.update(segs), onInterim: t => liveUI.interim(t), onStatus: st => liveUI.status(st), onError: m => liveUI.error(m), onLevel: r => liveUI.level(r) });
       live.focusFileId = note.deskFile || (note.sourceFileIds || [])[0];
       try { await live.start(); live.noteId = note.id; State.live = live; renderSide(); deskLive(note, course, el); }
-      catch (e) { btn.disabled = false; toast(e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风。' : e.message, 6000); try { live.capture && live.capture.stop(); } catch (x) {} }
+      catch (e) { btn.disabled = false; toast(e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风。' : e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message, 6000); try { live.capture && live.capture.stop(); } catch (x) {} }
     };
     return;
   }
@@ -1327,7 +1328,8 @@ async function mockExamModal(course) {
       const pool = notes.filter(n => ids.includes(n.id)).flatMap(n => n.study.quiz.map(q => ({ ...q, noteId: n.id, noteTitle: n.title })));
       if (!pool.length) { toast('至少选一篇'); return; }
       const qs = pool.sort(() => Math.random() - .5).slice(0, Math.max(5, Number($('#me-n', box).value) || 20));
-      close(); runExam(course, qs, Math.max(5, Number($('#me-t', box).value) || 30));
+      const mins = Math.max(5, Number($('#me-t', box).value) || 30);
+      close(); runExam(course, qs, mins);
     };
   });
 }

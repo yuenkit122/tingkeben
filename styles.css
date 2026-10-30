@@ -555,8 +555,11 @@ pre.cors { font-family: var(--mono); font-size: 12px; white-space: pre; overflow
 @keyframes prog-shine { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 .prog-sticky { position: sticky; top: 0; z-index: 3; background: var(--sheet); padding: 4px 0 12px; }
 .prog-sticky details { margin-top: 6px; }
-.job-tray { position: fixed; left: max(14px, env(safe-area-inset-left)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 35; width: min(320px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 8px; }
+.job-tray { pointer-events: none; position: fixed; left: max(14px, env(safe-area-inset-left)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 35; width: min(320px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 8px; }
 .job-tray .prog { box-shadow: 0 6px 24px rgba(0,0,0,.14); padding: 10px 12px; gap: 6px; }
 .job-tray .prog-top b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 @media (max-width: 760px) { .job-tray { bottom: calc(80px + env(safe-area-inset-bottom)); } }
 @media (prefers-reduced-motion: reduce) { .prog-bar i::after { animation: none; } }
+
+.cap.flash-hit { animation: hit 1.6s ease; }
+@keyframes hit { 0%, 60% { background: var(--marker); } 100% { background: transparent; } }

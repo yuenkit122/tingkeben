@@ -126,7 +126,7 @@ async function renderHome() {
     ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
   $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
   $$('[data-prep]').forEach(b => b.onclick = () => openDocModal(b.dataset.prep, 'prep'));
-  const dr = $('#dl-refresh'); if (dr) dr.onclick = async () => { dr.disabled = true; await Deadlines.refresh(); renderHome(); };
+  const dr = $('#dl-refresh'); if (dr) dr.onclick = async () => { dr.disabled = true; await Deadlines.refresh(); if (dr.isConnected) renderHome(); };
   const da = $('#dl-add'); if (da) da.onclick = () => Deadlines.addModal(renderHome);
   $$('[data-dl-del]').forEach(b => confirmClick(b, '删', () => { Deadlines.remove(b.dataset.dlDel); renderHome(); }));
   $('#sync-moodle').onclick = () => syncModal();
@@ -226,7 +226,7 @@ async function renderCourse(id, tab) {
       <a class="crumb" href="#home">← 课程主页</a>
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1>${esc(course.name)}</h1><div class="meta">${course.examDate ? `考试 ${esc(course.examDate)} · ${examCountdown(course.examDate)}` : '还没设考试日期'}</div></div>
-        <div class="row"><button class="btn small" id="c-edit">课程设置</button><button class="btn small" id="c-sync">${ICON.up}同步 Moodle</button><button class="btn small" id="c-points">知识点总结</button><button class="btn small" id="c-exam">模拟考试</button><a class="btn small" href="#ask-${id}">${ICON.chat}问 AI</a><button class="btn" id="c-desk">${ICON.mic}上课</button><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
+        <div class="row"><button class="btn small" id="c-edit">课程设置</button><button class="btn small" id="c-sync">${ICON.up}同步 Moodle</button><button class="btn small" id="c-points">知识点总结</button><button class="btn small" id="c-mock">模拟考试</button><a class="btn small" href="#ask-${id}">${ICON.chat}问 AI</a><button class="btn" id="c-desk">${ICON.mic}上课</button><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
       </div>
     </div>
     <div class="tabs">
@@ -240,7 +240,7 @@ async function renderCourse(id, tab) {
   $('#c-sync').onclick = () => syncModal(course.id);
   $('#c-gen').onclick = () => generateModal({ course, preselect: State.selected || [] });
   $('#c-points').onclick = () => coursePointsModal(course);
-  $('#c-exam').onclick = () => mockExamModal(course);
+  $('#c-mock').onclick = () => mockExamModal(course);
   $('#c-desk').onclick = () => startClassModal(course);
   const body = $('#tab-body');
   if (tab === 'files') renderFilesTab(course, body);
@@ -585,10 +585,13 @@ async function generateModal({ course, preselect = [], sessionId = null, noteId 
       if (!ids.length && !sid) { toast('至少选一个课件或一段录音'); return; }
       const title = $('#g-title', box).value.trim() || (sid ? '课堂笔记' : files.find(f => f.id === ids[0]).name.replace(/\.[^.]+$/, ''));
       const style = $('input[name=g-style]:checked', box).value;
+      const extra = $('#g-extra', box).value.trim(); // 关窗之前先读，关了就读不到了
       close();
-      const id = await startGeneration({ course, fileIds: ids, sessionId: sid, title, style, extra: $('#g-extra', box).value.trim(), noteId });
-      State.selected = [];
-      location.hash = 'note-' + id;
+      try {
+        const id = await startGeneration({ course, fileIds: ids, sessionId: sid, title, style, extra, noteId });
+        State.selected = [];
+        location.hash = 'note-' + id;
+      } catch (e) { toast('没能开始生成：' + e.message, 6000); }
     };
   });
 }
@@ -691,6 +694,7 @@ function mountNoteTool(tab, note, course, pane, go) {
   if (tab === 'map') return MindMap.mount(pane, note);
 }
 async function renderNote(id, tab = 'note', opt = {}) {
+  if (!location.hash.slice(1).startsWith('note-' + id)) return; // 已经离开这页了（异步回调晚到），不要把别的页面盖掉
   const note = await DB.get('notes', id);
   if (!note) { location.hash = 'home'; return; }
   const course = await DB.get('courses', note.courseId);
@@ -839,7 +843,7 @@ async function renderLive(courseId) {
       renderLiveRunning();
     } catch (e) {
       btn.disabled = false;
-      const msg = e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风，再试一次。' : e.message;
+      const msg = e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风，再试一次。' : e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message;
       toast(msg, 6000);
       try { sess.capture && sess.capture.stop(); } catch (x) {}
     }
@@ -931,6 +935,7 @@ function renderLiveRunning() {
 
 /* ---------- 录音回看 ---------- */
 async function renderSession(id) {
+  if (location.hash.slice(1) !== 'session-' + id) return; // 已经离开这页了
   const s = await DB.get('sessions', id);
   if (!s) { location.hash = 'home'; return; }
   const course = s.courseId ? await DB.get('courses', s.courseId) : null;
@@ -987,7 +992,7 @@ async function renderSession(id) {
   $$('[data-retry]').forEach(b => b.onclick = () => { const fixBtn = $('#s-fix'); fixBtn && fixBtn.click(); });
   $$('[data-cf]').forEach(row => {
     const c = s.confused[Number(row.dataset.cf)];
-    $('[data-cf-go]', row).onclick = () => { let k = 0; s.segments.forEach((g, i) => { if (g.t <= c.t - 8) k = i; }); const el = $(`.cap[data-i="${k}"]`); if (el) { el.scrollIntoView({ block: 'center' }); el.click(); } };
+    $('[data-cf-go]', row).onclick = () => { let k = 0; s.segments.forEach((g, i) => { if (g.t <= c.t - 8) k = i; }); const el = $(`.cap[data-i="${k}"]`); if (el) { el.scrollIntoView({ block: 'center' }); el.click(); el.classList.add('flash-hit'); setTimeout(() => el.classList.remove('flash-hit'), 1600); if (!s.hasAudio) toast('跳到了 ' + fmtTime(c.t) + '（这节没有保存录音，只能看文字）'); } };
     $('[data-cf-ex]', row).onclick = async () => {
       if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
       const ex = $('.cf-ex', row); ex.hidden = false; ex.className = 'md cf-ex'; ex.innerHTML = '<span class="spin"></span>';
