@@ -3,6 +3,7 @@ const DB = (() => {
   const NAME = 'tingkeben';
   const VERSION = 1;
   const STORES = ['courses', 'files', 'notes', 'sessions', 'audio'];
+  const SYNCED = ['courses', 'files', 'notes', 'sessions'];
   let dbp = null;
 
   function open() {
@@ -52,13 +53,21 @@ const DB = (() => {
 
   return {
     STORES,
-    put: (store, obj) => tx(store, 'readwrite', s => req2p(s.put(obj))),
+    // 课程/课件/笔记/录音改动时记下时间，云同步按这个判断哪边新
+    put(store, obj, opts) {
+      if (SYNCED.includes(store) && !(opts && opts.fromSync)) { obj.updatedAt = Date.now(); typeof Sync !== 'undefined' && Sync.schedule(); }
+      return tx(store, 'readwrite', s => req2p(s.put(obj)));
+    },
     get: (store, id) => tx(store, 'readonly', s => req2p(s.get(id))),
-    del: (store, id) => tx(store, 'readwrite', s => req2p(s.delete(id))),
+    del(store, id, opts) {
+      if (SYNCED.includes(store) && !(opts && opts.fromSync) && typeof Sync !== 'undefined') Sync.tomb(store, id);
+      return tx(store, 'readwrite', s => req2p(s.delete(id)));
+    },
     all: (store) => tx(store, 'readonly', s => req2p(s.getAll())),
     byIndex: (store, index, value) => tx(store, 'readonly', s => req2p(s.index(index).getAll(value))),
     async delByIndex(store, index, value) {
       const items = await this.byIndex(store, index, value);
+      if (SYNCED.includes(store) && typeof Sync !== 'undefined') items.forEach(i => Sync.tomb(store, i.id));
       await tx(store, 'readwrite', s => { items.forEach(i => s.delete(i.id)); });
       return items.length;
     },
@@ -74,13 +83,25 @@ const Settings = (() => {
     deepseekKey: '',
     deepseekModel: 'deepseek-flash',
     deepseekThinking: true,
-    geminiFastModel: 'gemini-3.5-flash-lite',
+    geminiFastModel: 'gemini-3.1-flash-lite',
     geminiSmartModel: 'gemini-3.8-flash',
     liveModel: 'gemini-3.5-transcribe-live',
     liveLanguage: 'en-GB',
     liveMode: 'SMART',
     saveAudio: true,
     translateGap: 6000,
+    translateProvider: 'pool',
+    groqKey: '', groqModel: 'qwen/qwen3.8-27b', groqModel2: 'openai/gpt-oss-120b',
+    cerebrasKey: '', cerebrasModel: 'llama-3.3-70b',
+    mistralKey: '', mistralModel: 'mistral-small-latest',
+    poolOff: {},
+    poolFallback: 'deepseek',
+    draftMode: 'free',
+    maxWaitSec: 6,
+    translatePace: 'balanced',
+    autoStudy: true,
+    micId: '',
+    r2Account: '', r2KeyId: '', r2Secret: '', r2Bucket: 'tingkeben',
     captionView: 'both',
     captionSize: 20,
   };
@@ -90,6 +111,17 @@ const Settings = (() => {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { saved = {}; }
     cache = Object.assign({}, defaults, saved);
+    // 旧版存下的默认值换成新的（3.5 Flash-Lite 免费版实测有时要 20 多秒）
+    if (!cache.migrated2) {
+      if (cache.geminiFastModel === 'gemini-3.5-flash-lite') cache.geminiFastModel = 'gemini-3.1-flash-lite';
+      if (cache.translateProvider === 'gemini') cache.translateProvider = 'pool';
+      cache.migrated2 = true;
+    }
+    if (!cache.migrated3) {
+      if (cache.groqModel === 'llama-3.3-70b-versatile') cache.groqModel = 'qwen/qwen3.8-27b';
+      cache.migrated3 = true;
+      try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch (e) {}
+    }
     return cache;
   }
   function save(patch) {
