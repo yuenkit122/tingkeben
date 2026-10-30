@@ -1,0 +1,837 @@
+/* 听课本 — 界面与流程 */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const view = $('#view');
+
+const ICON = {
+  home: '<svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>',
+  mic: '<svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+  gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+  up: '<svg viewBox="0 0 24 24"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></svg>',
+  spark: '<svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/></svg>',
+  star: '<svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>',
+};
+const COLORS = ['#2C47A5', '#2B7A4B', '#B5532A', '#7A4BB0', '#A23B62', '#1F7A8C', '#8A6D1F'];
+
+const State = { courses: [], live: null, gens: new Map() };
+
+/* ---------- 小工具 ---------- */
+let toastTimer;
+function toast(msg, ms = 2800) {
+  const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+}
+const fmtTime = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const fmtSize = b => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+const fmtDate = t => new Date(t).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const courseCode = name => (name.match(/\b[A-Z]{3,4}\s?\d{4}\b/) || [''])[0].replace(/\s/, '');
+
+function md(text) {
+  const html = DOMPurify.sanitize(marked.parse(text || '', { gfm: true, breaks: false }));
+  return html.replace(/<table>/g, '<div class="tbl"><table>').replace(/<\/table>/g, '</table></div>');
+}
+
+function modal(html, onMount) {
+  const m = $('#modal'), box = $('#modal-box');
+  box.innerHTML = html; m.hidden = false;
+  const close = () => { m.hidden = true; box.innerHTML = ''; };
+  m.onclick = e => { if (e.target === m) close(); };
+  $$('[data-close]', box).forEach(b => b.onclick = close);
+  onMount && onMount(box, close);
+  return close;
+}
+
+/* 删除这类操作：第一次点变成“确认删除”，3 秒内再点才执行 */
+function confirmClick(btn, label, fn) {
+  btn.onclick = async () => {
+    if (btn.dataset.armed) { await fn(); return; }
+    const old = btn.innerHTML; btn.dataset.armed = '1'; btn.textContent = label; btn.classList.add('danger');
+    setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.innerHTML = old; btn.classList.remove('danger'); } }, 3000);
+  };
+}
+
+function download(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+function keysReady() { const s = Settings.load(); return { gemini: !!s.geminiKey, notes: !!s.deepseekKey }; }
+
+/* ---------- 导航 ---------- */
+async function loadCourses() {
+  State.courses = (await DB.all('courses')).sort((a, b) => a.createdAt - b.createdAt);
+  renderSide();
+}
+
+function renderSide() {
+  const r = location.hash.slice(1) || 'home';
+  const items = [['home', '课程主页', ICON.home], ['live', State.live ? '录音中…' : '课堂录音', ICON.mic], ['settings', '设置', ICON.gear]];
+  const isOn = id => r === id || (id === 'live' && r.startsWith('live'));
+  $('#nav').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}">${ic}${label}${id === 'live' && State.live ? ' <span class="pill bad">REC</span>' : ''}</a>`).join('');
+  $('#tabbar').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}">${ic}${label}</a>`).join('');
+  $('#side-courses').innerHTML = State.courses.map(c => `<a class="course-link ${r === 'course-' + c.id ? 'on' : ''}" href="#course-${c.id}" title="${esc(c.name)}">${esc(c.name)}</a>`).join('') ||
+    '<div class="course-link" style="color:var(--faint)">还没有课程</div>';
+}
+
+async function route() {
+  const r = location.hash.slice(1) || 'home';
+  renderSide();
+  window.scrollTo(0, 0);
+  try {
+    if (r === 'home') await renderHome();
+    else if (r === 'settings') renderSettings();
+    else if (r === 'live' || r.startsWith('live-')) await renderLive(r.startsWith('live-') ? r.slice(5) : null);
+    else if (r.startsWith('course-')) { const [id, tab] = r.slice(7).split('~'); await renderCourse(id, tab || 'files'); }
+    else if (r.startsWith('note-')) await renderNote(r.slice(5));
+    else if (r.startsWith('session-')) await renderSession(r.slice(8));
+    else await renderHome();
+  } catch (e) {
+    console.error(e);
+    view.innerHTML = `<div class="empty"><strong>页面出错了</strong>${esc(e.message)}</div>`;
+  }
+}
+window.addEventListener('hashchange', route);
+
+/* ---------- 主页 ---------- */
+async function renderHome() {
+  const [files, notes, sessions] = await Promise.all([DB.all('files'), DB.all('notes'), DB.all('sessions')]);
+  const k = keysReady();
+  const count = (arr, id) => arr.filter(x => x.courseId === id).length;
+  const recent = notes.sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
+  view.innerHTML = `
+    <div class="head">
+      <div><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记</div></div>
+      <div class="row"><a class="btn" href="#live">${ICON.mic}开始录音</a><button class="btn primary" id="new-course">＋ 新建课程</button></div>
+    </div>
+    ${!k.gemini || !k.notes ? `<div class="banner"><div class="grow"><strong>先填 API key</strong><br><span style="font-size:14px;color:var(--muted)">${!k.notes ? '生成笔记需要 DeepSeek 的 key' : ''}${!k.notes && !k.gemini ? '；' : ''}${!k.gemini ? '实时转写翻译需要 Gemini 的 key' : ''}。key 只存在这台设备上。</span></div><a class="btn primary small" href="#settings">去设置</a></div>` : ''}
+    <div class="grid">
+      ${State.courses.map((c, i) => `
+        <a class="card course-card" href="#course-${c.id}" style="--c:${c.color || COLORS[i % COLORS.length]}">
+          <div class="code">${esc(c.code || '课程')}</div>
+          <h3>${esc(c.name)}</h3>
+          ${c.examDate ? `<div class="meta" style="font-size:13px;color:var(--muted)">考试 ${esc(c.examDate)} · ${examCountdown(c.examDate)}</div>` : ''}
+          <div class="stats"><span>课件 ${count(files, c.id)}</span><span>笔记 ${count(notes, c.id)}</span><span>录音 ${count(sessions, c.id)}</span></div>
+        </a>`).join('')}
+      <button class="card course-card new" id="new-course-2">＋ 新建课程</button>
+    </div>
+    ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
+  $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
+}
+function examCountdown(d) {
+  const days = Math.ceil((new Date(d + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
+  return days > 0 ? `还有 ${days} 天` : days === 0 ? '就是今天' : '已结束';
+}
+function noteItem(n) {
+  const c = State.courses.find(x => x.id === n.courseId);
+  const st = n.status === 'generating' || State.gens.has(n.id) ? '<span class="pill">生成中</span>' : n.status === 'error' ? '<span class="pill bad">失败</span>' : '';
+  return `<a class="item" href="#note-${n.id}"><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(c ? c.name : '')} · ${fmtDate(n.createdAt)}</div></div>${st}</a>`;
+}
+
+function courseModal(course) {
+  const isNew = !course;
+  course = course || { name: '', examDate: '', glossary: [] };
+  modal(`
+    <h2>${isNew ? '新建课程' : '课程设置'}</h2>
+    <div class="field"><label for="c-name">课程名称</label><input id="c-name" type="text" value="${esc(course.name)}" placeholder="例如 MMD1010 Accounting 101"><span class="hint">建议用 Moodle 上的名字，带上课程代码</span></div>
+    <div class="field"><label for="c-exam">考试日期（可不填）</label><input id="c-exam" type="date" value="${esc(course.examDate || '')}"></div>
+    <div class="field"><label for="c-terms">专业词（可不填）</label><textarea id="c-terms" placeholder="用逗号分开，例如 accrual basis, double entry, GST">${esc((course.glossary || []).join(', '))}</textarea><span class="hint">实时转写时会优先识别这些词。导入课件后会自动从课件里挑词，这里只需补充漏掉的。</span></div>
+    <div class="row" style="justify-content:space-between">
+      ${isNew ? '<span></span>' : '<button class="btn danger small" id="c-del">删除这门课</button>'}
+      <div class="row"><button class="btn" data-close>取消</button><button class="btn primary" id="c-save">${isNew ? '创建' : '保存'}</button></div>
+    </div>`, (box, close) => {
+    $('#c-name', box).focus();
+    $('#c-save', box).onclick = async () => {
+      const name = $('#c-name', box).value.trim();
+      if (!name) { toast('先填课程名称'); return; }
+      const c = Object.assign(course, {
+        id: course.id || DB.uid('c_'), name, code: courseCode(name), examDate: $('#c-exam', box).value,
+        glossary: $('#c-terms', box).value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean),
+        createdAt: course.createdAt || Date.now(), color: course.color || COLORS[State.courses.length % COLORS.length],
+      });
+      await DB.put('courses', c);
+      await loadCourses(); close();
+      if (isNew) location.hash = 'course-' + c.id; else route();
+    };
+    const del = $('#c-del', box);
+    if (del) confirmClick(del, '再点一次：删除课程和里面所有课件、笔记、录音', async () => {
+      for (const st of ['files', 'notes', 'sessions']) {
+        const items = await DB.byIndex(st, 'courseId', course.id);
+        for (const it of items) { if (st === 'sessions') await DB.delByIndex('audio', 'sessionId', it.id); await DB.del(st, it.id); }
+      }
+      await DB.del('courses', course.id);
+      await loadCourses(); close(); location.hash = 'home';
+    });
+  });
+}
+
+/* ---------- 课程页 ---------- */
+async function renderCourse(id, tab) {
+  const course = await DB.get('courses', id);
+  if (!course) { location.hash = 'home'; return; }
+  const [files, notes, sessions] = await Promise.all([DB.byIndex('files', 'courseId', id), DB.byIndex('notes', 'courseId', id), DB.byIndex('sessions', 'courseId', id)]);
+  view.innerHTML = `
+    <div>
+      <a class="crumb" href="#home">← 课程主页</a>
+      <div class="head" style="margin-top:6px">
+        <div class="grow"><h1>${esc(course.name)}</h1><div class="meta">${course.examDate ? `考试 ${esc(course.examDate)} · ${examCountdown(course.examDate)}` : '还没设考试日期'}</div></div>
+        <div class="row"><button class="btn" id="c-edit">课程设置</button><a class="btn" href="#live-${id}">${ICON.mic}录这门课</a><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
+      </div>
+    </div>
+    <div class="tabs">
+      <button data-tab="files" class="${tab === 'files' ? 'on' : ''}">课件 ${files.length}</button>
+      <button data-tab="notes" class="${tab === 'notes' ? 'on' : ''}">笔记 ${notes.length}</button>
+      <button data-tab="sessions" class="${tab === 'sessions' ? 'on' : ''}">课堂录音 ${sessions.length}</button>
+    </div>
+    <div id="tab-body"></div>`;
+  $$('.tabs button').forEach(b => b.onclick = () => { history.replaceState(null, '', '#course-' + id + '~' + b.dataset.tab); renderCourse(id, b.dataset.tab); });
+  $('#c-edit').onclick = () => courseModal(course);
+  $('#c-gen').onclick = () => generateModal({ course, preselect: State.selected || [] });
+  const body = $('#tab-body');
+  if (tab === 'files') renderFilesTab(course, body);
+  else if (tab === 'notes') {
+    notes.sort((a, b) => b.createdAt - a.createdAt);
+    body.innerHTML = notes.length ? `<div class="card list">${notes.map(noteItem).join('')}</div>`
+      : `<div class="empty"><strong>还没有笔记</strong>先在「课件」里导入 Moodle 课件，勾选后点「生成笔记」。</div>`;
+  } else {
+    sessions.sort((a, b) => b.startedAt - a.startedAt);
+    body.innerHTML = sessions.length ? `<div class="card list">${sessions.map(s => `<a class="item" href="#session-${s.id}"><div class="grow"><div class="t">${esc(s.title)}</div><div class="s">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句</div></div></a>`).join('')}</div>`
+      : `<div class="empty"><strong>还没有课堂录音</strong>上课时点「录这门课」，会实时转写英文并翻译成中文。</div>`;
+  }
+}
+
+function fileIcon(name) {
+  const e = Extract.ext(name);
+  const cls = ['png', 'jpg', 'jpeg', 'webp'].includes(e) ? 'img' : e;
+  return `<div class="ficon ${cls}">${e === 'jpeg' ? 'JPG' : e.toUpperCase()}</div>`;
+}
+function fileStatus(f) {
+  if (f.status === 'extracting') return '<span class="pill"><span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>提取中</span>';
+  if (f.status === 'ocr') return '<span class="pill"><span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>Gemini 识别中</span>';
+  if (f.status === 'scanned') return '<span class="pill warn">扫描件，没读到文字</span>';
+  if (f.status === 'error') return `<span class="pill bad" title="${esc(f.error)}">读取失败</span>`;
+  return `<span class="pill ok">已读取${f.pages ? ' ' + f.pages + ' 页' : ''}</span>`;
+}
+
+async function renderFilesTab(course, body) {
+  State.selected = State.selected || [];
+  const files = (await DB.byIndex('files', 'courseId', course.id)).sort((a, b) => (a.folder || '').localeCompare(b.folder || '') || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  State.selected = State.selected.filter(id => files.some(f => f.id === id));
+  body.innerHTML = `
+    <label class="drop" id="drop">
+      <div style="font-size:30px">📥</div>
+      <div class="grow"><strong>导入 Moodle 课件</strong>
+        <p>支持 PDF、PPTX、DOCX、图片，也可以直接放 Moodle「Download folder」下载的 ZIP。可以一次选多个。</p></div>
+      <span class="btn primary">${ICON.up}选择文件</span>
+      <input type="file" id="file-in" multiple hidden accept=".pdf,.pptx,.docx,.txt,.md,.zip,.png,.jpg,.jpeg,.webp">
+    </label>
+    ${files.length ? `<div class="card files">${files.map(f => `
+      <div class="file" data-id="${f.id}">
+        <input type="checkbox" aria-label="选择 ${esc(f.name)}" ${State.selected.includes(f.id) ? 'checked' : ''} ${f.status !== 'ready' ? 'disabled' : ''}>
+        ${fileIcon(f.name)}
+        <div style="min-width:0"><div class="name">${esc(f.name)}</div>
+          <div class="sub">${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.folder ? `<span>📁 ${esc(f.folder)}</span>` : ''}</div></div>
+        <div class="acts">
+          ${f.status === 'scanned' || f.status === 'error' ? '<button class="btn small" data-act="ocr">用 Gemini 识别</button>' : ''}
+          ${f.status === 'ready' ? '<button class="btn small ghost" data-act="view">看文字</button>' : ''}
+          <button class="btn small ghost" data-act="del">删除</button>
+        </div>
+      </div>`).join('')}</div>` : `<div class="empty"><strong>这门课还没有课件</strong>在 Moodle 打开课程 → 进入 Week 文件夹 → 点「Download folder」下载 ZIP，或者一个个下载 PDF/PPT，然后放到上面。</div>`}
+    <div class="bar noprint" id="selbar" ${State.selected.length ? '' : 'hidden'}>
+      <span class="grow">已选 <b id="selcount">${State.selected.length}</b> 个课件</span>
+      <button class="btn small" id="sel-clear">取消</button>
+      <button class="btn small primary" id="sel-gen">${ICON.spark}用选中的生成笔记</button>
+    </div>`;
+
+  const input = $('#file-in', body), drop = $('#drop', body);
+  input.onchange = () => { importFiles(course, [...input.files]); input.value = ''; };
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => importFiles(course, [...e.dataTransfer.files]));
+
+  const syncBar = () => { $('#selbar', body).hidden = !State.selected.length; $('#selcount', body).textContent = State.selected.length; };
+  $$('.file', body).forEach(row => {
+    const id = row.dataset.id, f = files.find(x => x.id === id);
+    $('input[type=checkbox]', row).onchange = e => {
+      State.selected = e.target.checked ? [...new Set([...State.selected, id])] : State.selected.filter(x => x !== id);
+      syncBar();
+    };
+    const v = $('[data-act=view]', row); if (v) v.onclick = () => modal(`<h2>${esc(f.name)}</h2><pre>${esc((f.text || '').slice(0, 30000))}${(f.text || '').length > 30000 ? '\n\n……（只显示前 30000 字）' : ''}</pre><div class="row" style="justify-content:flex-end"><button class="btn" data-close>关闭</button></div>`);
+    const o = $('[data-act=ocr]', row); if (o) o.onclick = () => ocrFile(course, f);
+    confirmClick($('[data-act=del]', row), '确认删除', async () => { await DB.del('files', id); State.selected = State.selected.filter(x => x !== id); renderCourse(course.id, 'files'); });
+  });
+  $('#sel-clear', body).onclick = () => { State.selected = []; renderFilesTab(course, body); };
+  $('#sel-gen', body).onclick = () => generateModal({ course, preselect: State.selected });
+}
+
+async function importFiles(course, list) {
+  if (!list.length) return;
+  try { navigator.storage?.persist?.(); } catch (e) {}
+  const items = [];
+  for (const f of list) {
+    if (Extract.ext(f.name) === 'zip') {
+      toast('正在拆开 ' + f.name + ' …');
+      try { items.push(...await Extract.unzipFiles(f)); } catch (e) { toast('ZIP 打不开：' + e.message, 4000); }
+    } else if (Extract.isSupported(f.name)) items.push({ file: f, folder: '' });
+    else toast('跳过不支持的文件：' + f.name);
+  }
+  if (!items.length) { toast('没有找到能读取的课件'); return; }
+  const recs = [];
+  for (const { file, folder } of items) {
+    const rec = { id: DB.uid('f_'), courseId: course.id, name: file.name, folder, size: file.size, type: file.type || Extract.MIME[Extract.ext(file.name)] || '', blob: file, text: '', pages: null, status: 'extracting', addedAt: Date.now() };
+    await DB.put('files', rec); recs.push(rec);
+  }
+  toast(`导入 ${recs.length} 个文件，正在读取文字…`);
+  refreshIfOn(course.id);
+  for (const rec of recs) {
+    try {
+      const r = await Extract.fromFile(rec.blob);
+      Object.assign(rec, { text: r.text, pages: r.pages, status: r.scanned ? 'scanned' : 'ready' });
+    } catch (e) { Object.assign(rec, { status: 'error', error: e.message }); }
+    await DB.put('files', rec);
+    refreshIfOn(course.id);
+  }
+  const scanned = recs.filter(r => r.status === 'scanned').length;
+  toast(scanned ? `读取完成。${scanned} 个是扫描件，点「用 Gemini 识别」读出文字。` : '课件读取完成，勾选后就能生成笔记', 4000);
+}
+function refreshIfOn(courseId) {
+  const h = location.hash.slice(1);
+  if (h === 'course-' + courseId || h === 'course-' + courseId + '~files') {
+    const y = window.scrollY;
+    renderCourse(courseId, 'files').then(() => window.scrollTo(0, y));
+  }
+}
+
+async function ocrFile(course, f) {
+  f.status = 'ocr'; await DB.put('files', f); refreshIfOn(course.id);
+  try {
+    const mime = f.type || Extract.MIME[Extract.ext(f.name)];
+    f.text = await AI.ocr(f.blob, mime);
+    f.status = 'ready'; f.error = '';
+    toast('识别完成：' + f.name);
+  } catch (e) { f.status = 'error'; f.error = e.message; toast(e.message, 5000); }
+  await DB.put('files', f); refreshIfOn(course.id);
+}
+
+/* ---------- 生成笔记 ---------- */
+async function generateModal({ course, preselect = [], sessionId = null }) {
+  const files = (await DB.byIndex('files', 'courseId', course.id)).filter(f => f.status === 'ready');
+  const sessions = (await DB.byIndex('sessions', 'courseId', course.id)).sort((a, b) => b.startedAt - a.startedAt);
+  if (!files.length && !sessions.length) { toast('这门课还没有能用的课件或录音，先导入课件'); return; }
+  const firstSel = files.find(f => preselect.includes(f.id));
+  const defTitle = sessionId ? (sessions.find(s => s.id === sessionId)?.title || '课堂笔记') : firstSel ? firstSel.name.replace(/\.[^.]+$/, '') : '';
+  const p = AI.notesProvider();
+  modal(`
+    <h2>生成笔记</h2>
+    <div class="field"><label>用哪些课件</label>
+      ${files.length ? `<div class="checklist">${files.map(f => `<label><input type="checkbox" value="${f.id}" ${preselect.includes(f.id) ? 'checked' : ''}>${esc(f.name)}</label>`).join('')}</div>` : '<span class="hint">这门课还没有已读取的课件</span>'}
+    </div>
+    ${sessions.length ? `<div class="field"><label for="g-sess">加上课堂录音（可选）</label><select id="g-sess"><option value="">不用录音</option>${sessions.map(s => `<option value="${s.id}" ${s.id === sessionId ? 'selected' : ''}>${esc(s.title)} · ${fmtTime(s.duration)}</option>`).join('')}</select><span class="hint">会把老师强调的考试、作业重点单独列出来</span></div>` : ''}
+    <div class="field"><label for="g-title">笔记标题</label><input id="g-title" type="text" value="${esc(defTitle)}" placeholder="例如 Week 1 会计等式"></div>
+    <div class="field"><label>详细程度</label><div class="radios">
+      <label><input type="radio" name="g-style" value="detailed" checked>详细（第一次学）</label>
+      <label><input type="radio" name="g-style" value="brief">精简（考前复习）</label></div></div>
+    <div class="field"><label for="g-extra">额外要求（可不填）</label><input id="g-extra" type="text" placeholder="例如：多给几道计算题"></div>
+    <div class="hint" id="g-est"></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="g-go">${ICON.spark}开始生成</button></div>`, (box, close) => {
+    const est = () => {
+      const ids = $$('.checklist input:checked', box).map(i => i.value);
+      const chars = files.filter(f => ids.includes(f.id)).reduce((n, f) => n + (f.text || '').length, 0);
+      const sid = $('#g-sess', box)?.value;
+      const sChars = sid ? sessions.find(s => s.id === sid).segments.reduce((n, g) => n + g.en.length + g.zh.length, 0) : 0;
+      const tokens = Math.round((chars + sChars) / 3.2) + 1500;
+      const yuan = p.id === 'deepseek' ? (tokens * 2 + 12000 * 8) / 1e6 : null;
+      $('#g-est', box).textContent = `用 ${p.label}（${p.model}）· 材料约 ${Math.round(tokens / 1000)}k tokens` + (yuan !== null ? ` · 预计不到 ¥${Math.max(0.01, yuan).toFixed(2)}（按高峰价估）` : '');
+    };
+    $$('input,select', box).forEach(i => i.addEventListener('change', est)); est();
+    $('#g-go', box).onclick = async () => {
+      const ids = $$('.checklist input:checked', box).map(i => i.value);
+      const sid = $('#g-sess', box)?.value || null;
+      if (!ids.length && !sid) { toast('至少选一个课件或一段录音'); return; }
+      const title = $('#g-title', box).value.trim() || (sid ? '课堂笔记' : files.find(f => f.id === ids[0]).name.replace(/\.[^.]+$/, ''));
+      const style = $('input[name=g-style]:checked', box).value;
+      close();
+      const id = await startGeneration({ course, fileIds: ids, sessionId: sid, title, style, extra: $('#g-extra', box).value.trim() });
+      State.selected = [];
+      location.hash = 'note-' + id;
+    };
+  });
+}
+
+function sessionTranscript(s) {
+  return s.segments.map(g => `[${fmtTime(g.t)}]${g.important ? '【重点】' : ''}${g.starred ? '【学生标记】' : ''} ${g.en}\n　　${g.zh || ''}`).join('\n');
+}
+
+async function startGeneration({ course, fileIds, sessionId, title, style, extra, noteId }) {
+  const files = await Promise.all(fileIds.map(id => DB.get('files', id)));
+  const session = sessionId ? await DB.get('sessions', sessionId) : null;
+  const p = AI.notesProvider();
+  const note = noteId ? await DB.get('notes', noteId) : { id: DB.uid('n_'), courseId: course.id, createdAt: Date.now() };
+  Object.assign(note, { title, sourceFileIds: fileIds, sessionId, style, extra, markdown: '', status: 'generating', model: p.label + ' ' + p.model, error: '' });
+  await DB.put('notes', note);
+  const gen = { text: '', think: '', ctl: new AbortController(), listeners: new Set() };
+  State.gens.set(note.id, gen);
+  const ping = () => gen.listeners.forEach(fn => fn());
+  const user = AI.notesPrompt({
+    courseName: course.name, title,
+    sources: files.filter(Boolean).map(f => ({ name: f.name, text: (f.text || '').slice(0, 600000) })),
+    transcript: session ? sessionTranscript(session) : '',
+    highlights: session ? session.highlights.map(h => `[${fmtTime(h.t)}] ${h.near}`) : [],
+    style, extra,
+  });
+  (async () => {
+    try {
+      const text = await AI.deepseekStream({
+        system: AI.NOTES_SYSTEM, user, signal: gen.ctl.signal,
+        onThinking: t => { gen.think = t; ping(); },
+        onText: t => { gen.text = t; ping(); },
+      });
+      note.markdown = text; note.status = 'done';
+      toast('笔记生成好了：' + title);
+    } catch (e) {
+      note.markdown = gen.text; note.status = gen.text ? 'done' : 'error';
+      note.error = e.name === 'AbortError' ? '已停止' : e.message;
+      if (e.name !== 'AbortError') toast(e.message, 6000);
+    }
+    await DB.put('notes', note);
+    State.gens.delete(note.id);
+    ping();
+  })();
+  return note.id;
+}
+
+/* ---------- 笔记页 ---------- */
+async function renderNote(id) {
+  const note = await DB.get('notes', id);
+  if (!note) { location.hash = 'home'; return; }
+  const course = await DB.get('courses', note.courseId);
+  const files = (await Promise.all((note.sourceFileIds || []).map(f => DB.get('files', f)))).filter(Boolean);
+  const gen = State.gens.get(id);
+  view.innerHTML = `
+    <div class="noprint">
+      <a class="crumb" href="#course-${note.courseId}~notes">← ${esc(course ? course.name : '课程')}</a>
+      <div class="head" style="margin-top:6px">
+        <div class="grow"><h1>${esc(note.title)}</h1>
+          <div class="meta">${fmtDate(note.createdAt)} · ${esc(note.model || '')}${files.length ? ' · 来源：' + files.map(f => esc(f.name)).join('、') : ''}${note.sessionId ? ' · 含课堂录音' : ''}</div></div>
+        <div class="row" id="note-acts"></div>
+      </div>
+    </div>
+    <article class="sheet"><div id="note-body" class="md"></div></article>`;
+  const body = $('#note-body'), acts = $('#note-acts');
+
+  if (gen) {
+    acts.innerHTML = '<button class="btn" id="n-stop">停止生成</button>';
+    $('#n-stop').onclick = () => gen.ctl.abort();
+    let last = 0, timer = null;
+    const paint = () => {
+      if (!body.isConnected) { gen.listeners.delete(paint); return; }
+      if (!State.gens.has(id)) { gen.listeners.delete(paint); renderNote(id); return; }
+      const now = Date.now();
+      if (now - last < 250) { clearTimeout(timer); timer = setTimeout(paint, 260); return; }
+      last = now;
+      body.innerHTML = (gen.text ? md(gen.text) : '') + `<div class="thinking noprint"><span class="spin"></span><div>${gen.text ? '正在写…' : gen.think ? '正在读课件、理清思路…' : '正在连接…'}${gen.think && !gen.text ? `<details><summary>看看它在想什么</summary><pre>${esc(gen.think.slice(-2000))}</pre></details>` : ''}</div></div>`;
+    };
+    gen.listeners.add(paint); paint();
+    return;
+  }
+
+  if (note.status === 'error') {
+    body.innerHTML = `<div class="empty"><strong>生成失败</strong>${esc(note.error)}</div>`;
+  } else {
+    body.innerHTML = md(note.markdown) + (note.error ? `<p class="noprint" style="color:var(--warn)">（${esc(note.error)}，内容可能不完整）</p>` : '');
+  }
+  acts.innerHTML = `
+    <button class="btn small" id="n-edit">编辑</button>
+    <button class="btn small" id="n-copy">复制</button>
+    <button class="btn small" id="n-pdf">导出 PDF</button>
+    <button class="btn small" id="n-regen">重新生成</button>
+    <button class="btn small ghost" id="n-del">删除</button>`;
+  $('#n-copy').onclick = async () => { try { await navigator.clipboard.writeText(note.markdown); toast('已复制 Markdown，可以粘贴到 Goodnotes / Notion'); } catch (e) { toast('复制失败，长按文字手动复制'); } };
+  $('#n-pdf').onclick = () => { toast('在打印窗口选「存储为 PDF」，再导入 Goodnotes 手写批注'); setTimeout(() => window.print(), 300); };
+  $('#n-regen').onclick = async () => {
+    if (!course) return;
+    await startGeneration({ course, fileIds: note.sourceFileIds || [], sessionId: note.sessionId, title: note.title, style: note.style || 'detailed', extra: note.extra, noteId: note.id });
+    renderNote(id);
+  };
+  confirmClick($('#n-del'), '确认删除', async () => { await DB.del('notes', id); location.hash = 'course-' + note.courseId + '~notes'; });
+  $('#n-edit').onclick = () => {
+    body.innerHTML = `<textarea id="n-text" style="min-height:60vh;font-family:var(--mono);font-size:14px">${esc(note.markdown)}</textarea>
+      <div class="row noprint" style="justify-content:flex-end;margin-top:10px"><button class="btn" id="n-cancel">取消</button><button class="btn primary" id="n-save">保存</button></div>`;
+    $('#n-cancel').onclick = () => renderNote(id);
+    $('#n-save').onclick = async () => { note.markdown = $('#n-text').value; await DB.put('notes', note); toast('已保存'); renderNote(id); };
+  };
+}
+
+/* ---------- 实时转写翻译 ---------- */
+async function renderLive(courseId) {
+  const s = Settings.load();
+  if (State.live) return renderLiveRunning();
+  const courses = State.courses;
+  view.innerHTML = `
+    <div class="head"><div><h1>课堂录音</h1><div class="meta">实时转写老师的英文，并翻成中文字幕；结束后可以一键整理成笔记</div></div></div>
+    ${!s.geminiKey ? '<div class="banner"><div class="grow"><strong>还没填 Gemini API key</strong></div><a class="btn primary small" href="#settings">去设置</a></div>' : ''}
+    <div class="card pad" style="display:flex;flex-direction:column;gap:16px">
+      <div class="field"><label for="l-course">这是哪门课</label>
+        <select id="l-course"><option value="">不属于任何课程</option>${courses.map(c => `<option value="${c.id}" ${c.id === courseId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+        <span class="hint">选了课程，会用这门课课件里的专业词提高识别准确度，录音也会存进这门课</span></div>
+      <div class="row">
+        <button class="recbtn" id="l-start" aria-label="开始录音"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg></button>
+        <div><strong>开始录音</strong><div class="hint" style="color:var(--muted);font-size:13px">识别语言：${esc(langLabel(s.liveLanguage))} · 可在设置里改</div></div>
+      </div>
+    </div>
+    <div class="card pad" style="font-size:14px;color:var(--muted);line-height:1.7">
+      <strong style="color:var(--ink)">上课时这样用</strong><br>
+      · 手机或 iPad 放在离老师近一点的桌上，第一次会问你要麦克风权限，点「允许」。<br>
+      · 想一边录一边在 iPad 上手写：用分屏把听课本和 Goodnotes 并排放。听课本完全切到后台时，iPadOS 可能会停掉麦克风（不确定，建议先试一节课）。<br>
+      · 听到老师说重点，点「标记重点」，整理笔记时会单独列出来。<br>
+      · Gemini 免费版有每分钟次数限制，翻译会几句一起翻，所以中文会比英文晚几秒出现，这是正常的。
+    </div>`;
+  $('#l-start').onclick = async () => {
+    const cid = $('#l-course').value;
+    const course = cid ? await DB.get('courses', cid) : null;
+    const btn = $('#l-start'); btn.disabled = true;
+    const sess = new LiveSession({
+      course,
+      onUpdate: segs => liveUI.update(segs),
+      onInterim: t => liveUI.interim(t),
+      onStatus: st => liveUI.status(st),
+      onError: m => { liveUI.error(m); },
+      onLevel: r => liveUI.level(r),
+    });
+    try {
+      await sess.start();
+      State.live = sess;
+      renderSide();
+      renderLiveRunning();
+    } catch (e) {
+      btn.disabled = false;
+      const msg = e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风，再试一次。' : e.message;
+      toast(msg, 6000);
+      try { sess.capture && sess.capture.stop(); } catch (x) {}
+    }
+  };
+}
+const langLabel = c => ({ 'en-GB': '英语（英式/马来西亚口音）', 'en-US': '英语（美式）', 'en-IN': '英语（印度口音）', 'ms-MY': '马来语', 'cmn-Hans-CN': '普通话', 'yue-Hant-HK': '粤语', auto: '自动识别' }[c] || c);
+
+const liveUI = {
+  els: new Map(),
+  follow: true,
+  update(segs) {
+    const box = $('#captions'); if (!box) return;
+    for (const g of segs) {
+      let el = this.els.get(g.id);
+      if (!el || !el.isConnected) {
+        el = document.createElement('div'); el.className = 'cap'; el.dataset.id = g.id;
+        box.appendChild(el); this.els.set(g.id, el);
+      }
+      const html = capHTML(g);
+      if (el._html !== html) { el.innerHTML = html; el._html = html; el.className = 'cap' + (g.important ? ' important' : '') + (g.starred ? ' starred' : ''); const r = $('[data-retry]', el); if (r) r.onclick = () => State.live && State.live.retry(g.id); }
+    }
+    if (this.follow) box.scrollTop = box.scrollHeight;
+  },
+  interim(t) { const el = $('#interim'); if (el) el.textContent = t; },
+  status(st) {
+    const el = $('#l-status'); if (!el) return;
+    const map = { live: ['ok', '实时转写中'], reconnecting: ['warn', '重新连接中…'], rotating: ['ok', '实时转写中'], error: ['bad', '转写已停止'], slow: ['warn', '免费额度紧张，翻译放慢'] };
+    const [cls, txt] = map[st] || ['mute', st];
+    el.className = 'pill ' + cls; el.textContent = txt;
+  },
+  error(m) { toast(m, 7000); const el = $('#l-err'); if (el) { el.hidden = false; el.textContent = m; } },
+  level(r) { const el = $('#l-level'); if (el) el.style.width = Math.min(100, r * 400) + '%'; },
+};
+function capHTML(g) {
+  const zh = g.status === 'done' ? esc(g.zh) : g.status === 'failed' ? `<span class="failed">翻译失败 <button class="btn small ghost" data-retry>重试</button></span>` : '<span class="wait">翻译中…</span>';
+  return `<div class="ts">${fmtTime(g.t)}</div><div><div class="zh">${zh}</div><div class="en">${esc(g.en)}</div></div>`;
+}
+
+function renderLiveRunning() {
+  const sess = State.live, s = Settings.load();
+  liveUI.els = new Map(); liveUI.follow = true;
+  view.innerHTML = `
+    <div class="card live-top">
+      <button class="recbtn on" id="l-stop" aria-label="停止录音"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></svg></button>
+      <div><div class="clock" id="l-clock">0:00</div><div class="row" style="gap:8px"><span class="pill" id="l-status">连接中…</span><div class="level"><i id="l-level"></i></div></div></div>
+      <div class="grow" style="min-width:120px"><strong>${esc(sess.course ? sess.course.name : '课堂录音')}</strong>${sess.vocab.length ? `<div class="hint" style="font-size:12px;color:var(--faint)">已加载 ${sess.vocab.length} 个课程专业词</div>` : ''}</div>
+      <button class="btn" id="l-mark">${ICON.star}标记重点</button>
+      <select id="l-view" style="width:auto;min-height:40px"><option value="both">中英</option><option value="zh">只看中文</option><option value="en">只看英文</option></select>
+      <div class="row" style="gap:4px"><button class="btn small" id="l-minus" aria-label="字小一点">A−</button><button class="btn small" id="l-plus" aria-label="字大一点">A＋</button></div>
+    </div>
+    <div class="banner" id="l-err" hidden></div>
+    <div class="card" style="display:flex;flex-direction:column">
+      <div class="captions" id="captions"></div>
+      <div class="interim" id="interim"></div>
+      <button class="btn small jump" id="l-jump" hidden>↓ 回到最新</button>
+    </div>`;
+  const box = $('#captions');
+  const applyView = () => { box.classList.toggle('only-zh', s.captionView === 'zh'); box.classList.toggle('only-en', s.captionView === 'en'); box.style.setProperty('--cap', s.captionSize + 'px'); $('#interim').style.setProperty('--cap', s.captionSize + 'px'); };
+  $('#l-view').value = s.captionView; applyView();
+  $('#l-view').onchange = e => { Settings.save({ captionView: e.target.value }); s.captionView = e.target.value; applyView(); };
+  $('#l-minus').onclick = () => { s.captionSize = Math.max(14, s.captionSize - 2); Settings.save({ captionSize: s.captionSize }); applyView(); };
+  $('#l-plus').onclick = () => { s.captionSize = Math.min(40, s.captionSize + 2); Settings.save({ captionSize: s.captionSize }); applyView(); };
+  box.addEventListener('scroll', () => {
+    liveUI.follow = box.scrollTop + box.clientHeight > box.scrollHeight - 40;
+    $('#l-jump').hidden = liveUI.follow;
+  });
+  $('#l-jump').onclick = () => { liveUI.follow = true; box.scrollTop = box.scrollHeight; $('#l-jump').hidden = true; };
+  $('#l-mark').onclick = () => { const t = sess.mark(); toast('已标记 ' + fmtTime(t)); };
+  liveUI.update(sess.segments);
+  liveUI.status('live');
+  const tick = setInterval(() => { const c = $('#l-clock'); if (!c || !State.live) { clearInterval(tick); return; } c.textContent = fmtTime(sess.elapsed()); }, 500);
+  $('#l-stop').onclick = async () => {
+    const btn = $('#l-stop'); btn.disabled = true; btn.classList.remove('on');
+    liveUI.status('error'); $('#l-status').textContent = '正在收尾…';
+    const rec = await sess.stop();
+    State.live = null; clearInterval(tick);
+    renderSide();
+    location.hash = 'session-' + rec.id;
+  };
+}
+
+/* ---------- 录音回看 ---------- */
+async function renderSession(id) {
+  const s = await DB.get('sessions', id);
+  if (!s) { location.hash = 'home'; return; }
+  const course = s.courseId ? await DB.get('courses', s.courseId) : null;
+  const failed = s.segments.filter(g => g.status !== 'done').length;
+  const view_ = Settings.load().captionView;
+  view.innerHTML = `
+    <div>
+      <a class="crumb" href="${course ? '#course-' + course.id + '~sessions' : '#live'}">← ${esc(course ? course.name : '课堂录音')}</a>
+      <div class="head" style="margin-top:6px">
+        <div class="grow"><h1 id="s-title">${esc(s.title)}</h1><div class="meta">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句${s.highlights.length ? ' · ' + s.highlights.length + ' 个标记' : ''}</div></div>
+        <div class="row">
+          ${course ? `<button class="btn primary" id="s-gen">${ICON.spark}整理成笔记</button>` : ''}
+          <button class="btn small" id="s-rename">改名</button>
+          <button class="btn small" id="s-copy">复制全文</button>
+          ${s.hasAudio ? '<button class="btn small" id="s-audio">下载录音</button>' : ''}
+          ${failed ? `<button class="btn small" id="s-fix">补翻 ${failed} 句</button>` : ''}
+          <button class="btn small ghost" id="s-del">删除</button>
+        </div>
+      </div>
+    </div>
+    ${!course ? '<div class="banner"><div class="grow">这段录音没有归到课程里。要整理成笔记，先把它放进一门课。</div><select id="s-move" style="width:auto"><option value="">选择课程</option>' + State.courses.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('') + '</select></div>' : ''}
+    ${Object.keys(s.glossary || {}).length ? `<div class="card pad"><div style="font-size:13px;font-weight:700;color:var(--muted);margin-bottom:8px">本节课术语</div><div class="chips">${Object.entries(s.glossary).map(([en, zh]) => `<button class="chip" data-q="${esc(en)}">${esc(en)} <span>${esc(zh)}</span></button>`).join('')}</div></div>` : ''}
+    <div class="row noprint">
+      <input type="text" id="s-search" class="grow" placeholder="搜索转写内容（英文或中文）" style="max-width:420px">
+      <span class="hint" id="s-found"></span>
+      <span class="grow"></span>
+      <select id="s-view" style="width:auto;min-height:40px"><option value="both">中英</option><option value="zh">只看中文</option><option value="en">只看英文</option></select>
+      <button class="btn small" id="s-editmode">修改转写</button>
+    </div>
+    <div class="card seg-list"><div class="captions" id="s-caps" style="max-height:none">${s.segments.map((g, i) => {
+      const gap = i > 0 && g.t - s.segments[i - 1].t > 25;
+      return `${gap ? '<div class="para-gap"></div>' : ''}<div class="cap seek${g.important ? ' important' : ''}${g.starred ? ' starred' : ''}" data-i="${i}">${capHTML(g)}</div>`;
+    }).join('') || '<div class="empty" style="margin:16px">这段录音没有识别到内容</div>'}</div></div>
+    ${s.hasAudio ? `<div class="player noprint" id="player" hidden>
+      <button class="btn small ghost" id="p-back" aria-label="后退 5 秒">↺ 5</button>
+      <button class="btn small primary" id="p-play" aria-label="播放">▶</button>
+      <button class="btn small ghost" id="p-fwd" aria-label="前进 5 秒">5 ↻</button>
+      <span class="clock" id="p-time" style="font-size:13px">0:00</span>
+      <input type="range" id="p-seek" min="0" max="${s.duration}" step="1" value="0" class="grow">
+      <span class="clock" style="font-size:13px">${fmtTime(s.duration)}</span>
+      <button class="btn small" id="p-rate">1x</button>
+    </div>` : ''}`;
+  const gen = $('#s-gen'); if (gen) gen.onclick = () => generateModal({ course, sessionId: s.id });
+
+  $$('[data-retry]').forEach(b => b.onclick = () => { const fixBtn = $('#s-fix'); fixBtn && fixBtn.click(); });
+  // 显示方式
+  const caps = $('#s-caps');
+  const applyView = v => { caps.classList.toggle('only-zh', v === 'zh'); caps.classList.toggle('only-en', v === 'en'); };
+  $('#s-view').value = view_; applyView(view_);
+  $('#s-view').onchange = e => { Settings.save({ captionView: e.target.value }); applyView(e.target.value); };
+
+  // 搜索：高亮命中句子
+  const doSearch = q => {
+    q = q.trim().toLowerCase(); let n = 0, first = null;
+    $$('.cap', caps).forEach(el => {
+      const g = s.segments[el.dataset.i]; const hit = q && ((g.en || '').toLowerCase().includes(q) || (g.zh || '').includes(q));
+      el.classList.toggle('hit', !!hit); if (hit) { n++; first = first || el; }
+    });
+    $('#s-found').textContent = q ? `找到 ${n} 句` : '';
+    if (first) first.scrollIntoView({ block: 'center' });
+  };
+  $('#s-search').addEventListener('input', e => doSearch(e.target.value));
+  $$('.chip').forEach(c => c.onclick = () => { $('#s-search').value = c.dataset.q; doSearch(c.dataset.q); });
+
+  // 修改转写（像 Otter 的 Edit transcript）
+  let editing = false;
+  $('#s-editmode').onclick = async () => {
+    editing = !editing;
+    $$('.cap .zh, .cap .en', caps).forEach(el => { el.contentEditable = editing ? 'true' : 'false'; });
+    caps.classList.toggle('editing', editing);
+    $('#s-editmode').textContent = editing ? '保存修改' : '修改转写';
+    if (!editing) {
+      $$('.cap', caps).forEach(el => { const g = s.segments[el.dataset.i]; g.en = $('.en', el).textContent.trim(); if (g.status === 'done') g.zh = $('.zh', el).textContent.trim(); });
+      await DB.put('sessions', s); toast('转写已保存');
+    } else toast('直接点文字修改，改完点「保存修改」');
+  };
+
+  // 录音回放：点句子跳到那里，播放时高亮当前句（借鉴 Otter）
+  if (s.hasAudio) {
+    let audio = null, url = null, cur = -1;
+    const ensure = async () => {
+      if (audio) return audio;
+      const w = await sessionWav(s.id); if (!w) { toast('这段没有保存录音'); return null; }
+      url = URL.createObjectURL(w); audio = new Audio(url); audio.preload = 'auto';
+      audio.ontimeupdate = () => {
+        if (!$('#p-time')) { audio.pause(); URL.revokeObjectURL(url); return; }
+        $('#p-time').textContent = fmtTime(audio.currentTime); $('#p-seek').value = Math.floor(audio.currentTime);
+        let i = -1; for (let k = 0; k < s.segments.length; k++) { if (s.segments[k].t - 1.5 <= audio.currentTime) i = k; else break; }
+        if (i !== cur) {
+          const old = $(`.cap[data-i="${cur}"]`, caps); old && old.classList.remove('playing');
+          const el = $(`.cap[data-i="${i}"]`, caps); if (el) { el.classList.add('playing'); el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+          cur = i;
+        }
+      };
+      audio.onplay = () => { $('#p-play').textContent = '❚❚'; };
+      audio.onpause = () => { const b = $('#p-play'); if (b) b.textContent = '▶'; };
+      return audio;
+    };
+    $('#player').hidden = false;
+    $('#p-play').onclick = async () => { const a = await ensure(); if (a) a.paused ? a.play() : a.pause(); };
+    $('#p-back').onclick = async () => { const a = await ensure(); if (a) a.currentTime = Math.max(0, a.currentTime - 5); };
+    $('#p-fwd').onclick = async () => { const a = await ensure(); if (a) a.currentTime += 5; };
+    $('#p-seek').oninput = async e => { const a = await ensure(); if (a) a.currentTime = Number(e.target.value); };
+    const rates = [1, 1.25, 1.5, 2, 0.75];
+    $('#p-rate').onclick = async () => { const a = await ensure(); if (!a) return; const r = rates[(rates.indexOf(a.playbackRate) + 1) % rates.length]; a.playbackRate = r; $('#p-rate').textContent = r + 'x'; };
+    caps.addEventListener('click', async e => {
+      if (editing || e.target.closest('button')) return;
+      const el = e.target.closest('.cap'); if (!el) return;
+      const a = await ensure(); if (!a) return;
+      a.currentTime = Math.max(0, s.segments[el.dataset.i].t - 1.5); a.play();
+    });
+  }
+  $('#s-rename').onclick = () => modal(`<h2>改名</h2><input id="r-in" type="text" value="${esc(s.title)}"><div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="r-ok">保存</button></div>`, (box, close) => {
+    $('#r-ok', box).onclick = async () => { s.title = $('#r-in', box).value.trim() || s.title; await DB.put('sessions', s); close(); renderSession(id); };
+  });
+  $('#s-copy').onclick = async () => { try { await navigator.clipboard.writeText(sessionTranscript(s)); toast('已复制'); } catch (e) { toast('复制失败'); } };
+  const au = $('#s-audio'); if (au) au.onclick = async () => { const w = await sessionWav(s.id); if (!w) { toast('没有保存录音'); return; } download(w, s.title.replace(/[\\/:*?"<>|]/g, '_') + '.wav'); };
+  const fx = $('#s-fix'); if (fx) fx.onclick = async () => {
+    fx.disabled = true; fx.textContent = '补翻中…';
+    const todo = s.segments.filter(g => g.status !== 'done');
+    for (let i = 0; i < todo.length; i += 6) {
+      const batch = todo.slice(i, i + 6);
+      try {
+        const r = await AI.translateBatch({ items: batch.map((g, j) => ({ id: 's' + j, en: g.en })), context: [], glossary: s.glossary || {}, courseName: course?.name, vocab: [] });
+        const by = {}; (r.items || []).forEach(it => { by[String(it.id).replace(/[<>]/g, '')] = it; });
+        batch.forEach((g, j) => { const it = by['s' + j]; if (it) { g.zh = it.zh; g.important = !!it.important; g.status = 'done'; } });
+      } catch (e) { toast(e.message, 5000); break; }
+      await new Promise(r => setTimeout(r, Settings.load().translateGap || 6000));
+    }
+    await DB.put('sessions', s); renderSession(id);
+  };
+  confirmClick($('#s-del'), '确认删除', async () => { await DB.delByIndex('audio', 'sessionId', s.id); await DB.del('sessions', s.id); location.hash = course ? 'course-' + course.id + '~sessions' : 'live'; });
+  const mv = $('#s-move'); if (mv) mv.onchange = async () => { if (!mv.value) return; s.courseId = mv.value; await DB.put('sessions', s); toast('已放进课程'); renderSession(id); };
+}
+
+/* ---------- 设置 ---------- */
+function renderSettings() {
+  const s = Settings.load();
+  const keyField = (id, label, val, hint) => `
+    <div class="field"><label for="${id}">${label}</label>
+      <div class="keyrow"><input id="${id}" type="password" autocomplete="off" spellcheck="false" value="${esc(val)}" placeholder="粘贴 API key"><button class="btn small" data-show="${id}">显示</button><button class="btn small" data-test="${id}">测试</button></div>
+      <span class="hint">${hint}</span><div class="result" id="${id}-r"></div></div>`;
+  view.innerHTML = `
+    <div class="head"><div><h1>设置</h1><div class="meta">API key 只保存在这台设备的浏览器里，不会上传到别处。Mac 和 iPad 要各填一次。</div></div></div>
+    <div class="settings">
+      <section class="card pad">
+        <h2>Gemini（实时转写 + 翻译 + 扫描件识别）</h2>
+        <p>在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 免费申请，新 key 以 AQ. 开头。</p>
+        ${keyField('k-gemini', 'Gemini API key', s.geminiKey, '')}
+        <div class="two" style="margin-top:14px">
+          <div class="field"><label for="m-live">实时转写模型</label><input id="m-live" type="text" list="dl-live" value="${esc(s.liveModel)}"></div>
+          <div class="field"><label for="m-fast">翻译模型</label><input id="m-fast" type="text" list="dl-gem" value="${esc(s.geminiFastModel)}"><span class="hint">Flash-Lite 最快、免费额度最多</span></div>
+          <div class="field"><label for="m-smart">扫描件识别模型</label><input id="m-smart" type="text" list="dl-gem" value="${esc(s.geminiSmartModel)}"></div>
+          <div class="field"><label for="l-lang">老师说的语言</label><select id="l-lang">${['en-GB', 'en-US', 'en-IN', 'ms-MY', 'cmn-Hans-CN', 'yue-Hant-HK', 'auto'].map(c => `<option value="${c}" ${s.liveLanguage === c ? 'selected' : ''}>${langLabel(c)}</option>`).join('')}</select></div>
+          <div class="field"><label for="l-mode">转写方式</label><select id="l-mode"><option value="SMART" ${s.liveMode === 'SMART' ? 'selected' : ''}>整理版（去掉 um、uh，数字格式化）</option><option value="VERBATIM" ${s.liveMode === 'VERBATIM' ? 'selected' : ''}>逐字版</option></select></div>
+          <div class="field"><label for="t-gap">翻译最短间隔（秒）</label><input id="t-gap" type="number" min="2" max="30" value="${(s.translateGap || 6000) / 1000}"><span class="hint">免费版建议 6 秒；付费版可以改成 2</span></div>
+        </div>
+        <label class="switch" style="margin-top:14px"><input type="checkbox" id="s-audio" ${s.saveAudio ? 'checked' : ''}>同时保存录音（之后可以下载回听，1 小时约 115MB）</label>
+        <div class="row" style="margin-top:12px"><button class="btn small" id="t-live">测试实时转写连接</button><div class="result" id="t-live-r"></div></div>
+      </section>
+      <section class="card pad">
+        <h2>DeepSeek（生成笔记）</h2>
+        <p>用 V4.1-Flash 读整份课件，生成中英对照笔记。</p>
+        ${keyField('k-deepseek', 'DeepSeek API key', s.deepseekKey, '在 platform.deepseek.com 申请，按用量付费')}
+        <div class="two" style="margin-top:10px">
+          <div class="field"><label for="m-ds">模型</label><input id="m-ds" type="text" list="dl-ds" value="${esc(s.deepseekModel)}"><span class="hint">deepseek-flash = V4.1-Flash-1017</span></div>
+          <label class="switch" style="align-self:end;padding-bottom:10px"><input type="checkbox" id="ds-think" ${s.deepseekThinking ? 'checked' : ''}>先思考再写（更准，慢一点）</label>
+        </div>
+      </section>
+      <section class="card pad">
+        <h2>数据</h2>
+        <p>课件、笔记、录音都存在这台设备里，Mac 和 iPad 之间不会自动同步。可以导出备份，再在另一台设备导入。</p>
+        <div class="row"><button class="btn small" id="b-export">导出备份</button><label class="btn small">导入备份<input type="file" id="b-import" accept=".json" hidden></label><span class="hint" id="b-usage"></span></div>
+      </section>
+    </div>
+    <datalist id="dl-live"><option value="gemini-3.5-transcribe-live"></datalist>
+    <datalist id="dl-gem"><option value="gemini-3.5-flash-lite"><option value="gemini-3.1-flash-lite"><option value="gemini-3.8-flash"><option value="gemini-3.6-flash"></datalist>
+    <datalist id="dl-ds"><option value="deepseek-flash"><option value="deepseek-v4-pro"></datalist>`;
+
+  const bind = (sel, key, fn = v => v) => { const el = $(sel); el.addEventListener('change', () => { Settings.save({ [key]: fn(el.type === 'checkbox' ? el.checked : el.value) }); toast('已保存'); }); };
+  bind('#k-gemini', 'geminiKey', v => v.trim()); bind('#k-deepseek', 'deepseekKey', v => v.trim());
+  bind('#m-live', 'liveModel', v => v.trim()); bind('#m-fast', 'geminiFastModel', v => v.trim()); bind('#m-smart', 'geminiSmartModel', v => v.trim());
+  bind('#m-ds', 'deepseekModel', v => v.trim()); bind('#ds-think', 'deepseekThinking');
+  bind('#l-lang', 'liveLanguage'); bind('#l-mode', 'liveMode'); bind('#s-audio', 'saveAudio');
+  bind('#t-gap', 'translateGap', v => Math.max(2, Math.min(30, Number(v) || 6)) * 1000);
+  $$('[data-show]').forEach(b => b.onclick = () => { const i = $('#' + b.dataset.show); i.type = i.type === 'password' ? 'text' : 'password'; b.textContent = i.type === 'password' ? '显示' : '隐藏'; });
+  $$('[data-test]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.test, r = $('#' + id + '-r');
+    // 先保存输入框里的值
+    const v = $('#' + id).value.trim();
+    Settings.save({ [{ 'k-gemini': 'geminiKey', 'k-deepseek': 'deepseekKey' }[id]]: v });
+    r.className = 'result'; r.textContent = '测试中…'; b.disabled = true;
+    try {
+      if (id === 'k-gemini') {
+        const names = await AI.testGemini(); const st = Settings.load();
+        const want = [st.geminiFastModel, st.geminiSmartModel, st.liveModel];
+        const missing = want.filter(m => !names.includes(m));
+        r.className = 'result ' + (missing.length ? 'bad' : 'ok');
+        r.textContent = missing.length ? `key 可用，但这些模型你的账号用不了：${missing.join('、')}。可用的有：${names.filter(n => /flash|live|transcribe/.test(n)).slice(0, 12).join('、')}` : `可用 ✓（找到 ${names.length} 个模型，包括设置里的 3 个）`;
+      } else {
+        const { names, balance } = await AI.testDeepseek();
+        r.className = 'result ok'; r.textContent = `可用 ✓ 模型：${names.join('、')}${balance ? ` · 余额 ${balance.total_balance} ${balance.currency}` : ''}`;
+      }
+    } catch (e) { r.className = 'result bad'; r.textContent = e.message; }
+    b.disabled = false;
+  });
+  $('#t-live').onclick = () => {
+    const r = $('#t-live-r'); r.className = 'result'; r.textContent = '连接中…';
+    if (!Settings.load().geminiKey) { r.className = 'result bad'; r.textContent = '先填 Gemini key'; return; }
+    const t = new LiveTranscriber({ vocab: [], onStatus: st => { if (st === 'live') { r.className = 'result ok'; r.textContent = '实时转写可以用 ✓'; t.stopping = true; try { t.ws.close(); } catch (e) {} } }, onError: m => { r.className = 'result bad'; r.textContent = m; } });
+    t.start();
+    setTimeout(() => { if (r.textContent === '连接中…') { r.className = 'result bad'; r.textContent = '10 秒内没连上：检查 key，或者你的账号暂时用不了这个实时模型'; t.stopping = true; try { t.ws && t.ws.close(); } catch (e) {} } }, 10000);
+  };
+  $('#b-export').onclick = exportBackup;
+  $('#b-import').onchange = e => { const f = e.target.files[0]; if (f) importBackup(f); };
+  navigator.storage?.estimate?.().then(est => { $('#b-usage') && ($('#b-usage').textContent = `已用 ${fmtSize(est.usage || 0)}`); }).catch(() => {});
+}
+
+/* 备份：课程、笔记、录音文字、课件文字（不含原文件和音频，体积小） */
+async function exportBackup() {
+  const [courses, notes, sessions, files] = await Promise.all(['courses', 'notes', 'sessions', 'files'].map(s => DB.all(s)));
+  const data = { app: 'tingkeben', version: 1, exportedAt: new Date().toISOString(), courses, notes, sessions, files: files.map(({ blob, ...f }) => f) };
+  download(new Blob([JSON.stringify(data)], { type: 'application/json' }), `听课本备份-${new Date().toISOString().slice(0, 10)}.json`);
+  toast('备份已导出（不含原始课件文件和录音音频）', 4000);
+}
+async function importBackup(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (data.app !== 'tingkeben') throw new Error('这不是听课本的备份文件');
+    let n = 0;
+    for (const st of ['courses', 'notes', 'sessions', 'files']) for (const it of data[st] || []) { const old = await DB.get(st, it.id); if (st === 'files' && old?.blob) it.blob = old.blob; await DB.put(st, it); n++; }
+    await loadCourses(); toast(`导入了 ${n} 条记录`); route();
+  } catch (e) { toast('导入失败：' + e.message, 5000); }
+}
+
+/* ---------- 启动 ---------- */
+window.addEventListener('beforeunload', e => { if (State.live) { e.preventDefault(); e.returnValue = '正在录音，离开会停止录音'; } });
+(async () => {
+  if (!window.indexedDB) { view.innerHTML = '<div class="empty"><strong>这个浏览器不能保存数据</strong>请用 Safari 或 Chrome 打开，不要用无痕模式。</div>'; return; }
+  await loadCourses();
+  // 把上次没生成完的笔记标记为中断
+  for (const n of await DB.all('notes')) if (n.status === 'generating') { n.status = n.markdown ? 'done' : 'error'; n.error = '上次生成被中断，点「重新生成」'; await DB.put('notes', n); }
+  route();
+})();

@@ -1,0 +1,15 @@
+{
+  "name": "听课本",
+  "short_name": "听课本",
+  "description": "导入 Moodle 课件，AI 整理中英对照笔记；课堂实时转写和中文翻译。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FBFBF8",
+  "theme_color": "#2C47A5",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
