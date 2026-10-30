@@ -1341,7 +1341,7 @@ function cloudLoginModal(after) {
     pw.onkeydown = e => { if (e.key === 'Enter') go(); };
   });
 }
-const DEFAULT_CLOUD = '';
+const DEFAULT_CLOUD = 'https://tingkeben-cloud.yuenkit122.workers.dev';
 
 function bindR2() {
   const cl = $('#cl-login'); if (cl) cl.onclick = () => cloudLoginModal(renderSettings);
