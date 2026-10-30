@@ -106,7 +106,7 @@ async function renderHome() {
       <div><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记</div></div>
       <div class="row"><a class="btn" href="#live">${ICON.mic}开始录音</a><button class="btn" id="new-course">＋ 新建课程</button><button class="btn primary" id="sync-moodle">${ICON.up}从 Moodle 同步</button></div>
     </div>
-    ${!State.courses.length ? `<div class="banner"><div class="grow"><strong>第一次用？</strong><br><span style="font-size:14px;color:var(--muted)">点「从 Moodle 同步」，4 门课和每周的课件会自动导进来。需要在 Mac 的 Chrome 里装「听课本助手」扩展。</span></div><button class="btn primary small" id="sync-moodle-2">从 Moodle 同步</button></div>` : ''}
+    ${!State.courses.length ? `<div class="banner"><div class="grow"><strong>第一次用？</strong><br><span style="font-size:14px;color:var(--muted)">在 Chrome 打开 Moodle 并登录，点右上角「听课本助手」扩展图标，勾选课程后点「同步到听课本」，4 门课和每周的课件会自动导进来。</span></div><button class="btn primary small" id="sync-moodle-2">怎么装扩展</button></div>` : ''}
     ${!k.gemini || !k.notes ? `<div class="banner"><div class="grow"><strong>先填 API key</strong><br><span style="font-size:14px;color:var(--muted)">${!k.notes ? '生成笔记需要 DeepSeek 的 key' : ''}${!k.notes && !k.gemini ? '；' : ''}${!k.gemini ? '实时转写翻译需要 Gemini 的 key' : ''}。key 只存在这台设备上。</span></div><a class="btn primary small" href="#settings">去设置</a></div>` : ''}
     <div class="grid">
       ${State.courses.map((c, i) => `
@@ -121,7 +121,7 @@ async function renderHome() {
     ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
   $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
   $('#sync-moodle').onclick = () => syncModal();
-  const s2 = $('#sync-moodle-2'); if (s2) s2.onclick = () => syncModal();
+  const s2 = $('#sync-moodle-2'); if (s2) s2.onclick = () => Ext.version() ? modal(`<h2>扩展已经装好了</h2><ol style="margin:0;padding-left:20px;line-height:1.9"><li>Chrome 新开一个标签页，打开 <b>learning.monash.edu</b> 并登录</li><li>点浏览器右上角的「听课本助手」图标（在拼图图标里，可以点图钉固定）</li><li>勾选课程 →「同步到听课本」</li></ol><div class="row" style="justify-content:flex-end"><a class="btn primary" href="${MOODLE}/my/courses.php" target="_blank" rel="noopener">打开 Moodle</a></div>`) : extGuide();
 }
 function examCountdown(d) {
   const days = Math.ceil((new Date(d + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
@@ -340,7 +340,7 @@ function extGuide() {
       <li>Chrome 地址栏输入 <code>chrome://extensions</code> 回车</li>
       <li>打开右上角「开发者模式」</li>
       <li>点「加载已解压的扩展程序」，选解压出来的 <b>tingkeben-helper</b> 文件夹</li>
-      <li>回到这里刷新页面</li>
+      <li>以后：在已登录的 Moodle 页面点右上角「听课本助手」图标 → 勾选课程 →「同步到听课本」</li>
     </ol>
     <div class="row" style="justify-content:flex-end"><button class="btn" data-close>知道了</button><button class="btn primary" id="g-reload">已装好，刷新</button></div>`, box => { $('#g-reload', box).onclick = () => location.reload(); });
 }
@@ -353,7 +353,7 @@ async function syncModal(onlyCourseId) {
   try { courses = await Ext.call('listCourses', {}, 60000); }
   catch (e) {
     close();
-    if (e.code === 'login') modal(`<h2>先登录 Moodle</h2><p style="margin:0">${esc(e.message)}</p><div class="row" style="justify-content:flex-end"><a class="btn" href="${MOODLE}/my/" target="_blank" rel="noopener">打开 Moodle 登录</a><button class="btn primary" data-close>登好了再点同步</button></div>`);
+    if (e.code === 'login') modal(`<h2>先登录 Moodle</h2><p style="margin:0">Moodle 的登录过期了。打开 Moodle 登录后，直接在 Moodle 页面点右上角「听课本助手」图标同步就行。</p><div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><a class="btn primary" href="${MOODLE}/my/courses.php" target="_blank" rel="noopener">打开 Moodle 登录</a></div>`);
     else toast(e.message || '读取 Moodle 失败', 6000);
     return;
   }
@@ -982,6 +982,15 @@ window.addEventListener('beforeunload', e => { if (State.live) { e.preventDefaul
 (async () => {
   if (!window.indexedDB) { view.innerHTML = '<div class="empty"><strong>这个浏览器不能保存数据</strong>请用 Safari 或 Chrome 打开，不要用无痕模式。</div>'; return; }
   await loadCourses();
+  // 接收扩展弹窗（在 Moodle 页面点的）发来的同步任务
+  window.addEventListener('message', e => {
+    if (e.source !== window || !e.data || e.data.tkbFrom !== 'ext' || !e.data.start) return;
+    const { courses, ebook } = e.data.start;
+    if (State.sync) { showSyncProgress(true); return; }
+    if (State.live) { toast('正在录音，先停止录音再同步', 5000); return; }
+    runSync(courses, ebook);
+  });
+  window.postMessage({ tkbAppReady: true }, location.origin);
   // 把上次没生成完的笔记标记为中断
   for (const n of await DB.all('notes')) if (n.status === 'generating') { n.status = n.markdown ? 'done' : 'error'; n.error = '上次生成被中断，点「重新生成」'; await DB.put('notes', n); }
   route();
