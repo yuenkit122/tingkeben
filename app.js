@@ -269,11 +269,12 @@ function phaseOf(f) {
   const src = (f.folder || '') + ' ' + (f.moodleTitle || '') + ' ' + f.name;
   if (/own[\s-]*time|pre[\s-]*(class|reading|work|lecture|session)|prepar|before (the )?class|self[\s-]*(study|paced)|independent/i.test(src)) return '预习';
   if (/real[\s-]*time|in[\s-]*class|lecture|tutorial|workshop|seminar|class activit|live session/i.test(src)) return '正课';
+  if (/wrap[\s-]*up|after (the )?class|post[\s-]*class|review|revision/i.test(src)) return '课后';
   if (/assess|assignment|exam|test\b|quiz|rubric/i.test(src)) return '作业考试';
   return '';
 }
 function sortFiles(list) {
-  const po = { '预习': 0, '正课': 1, '作业考试': 2, '': 3 };
+  const po = { '预习': 0, '正课': 1, '课后': 2, '作业考试': 3, '': 4 };
   return list.sort((a, b) => weekOf(a).n - weekOf(b).n || weekOf(a).label.localeCompare(weekOf(b).label) || po[phaseOf(a)] - po[phaseOf(b)] || (a.addedAt - b.addedAt) || a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
 
@@ -308,7 +309,7 @@ async function renderFilesTab(course, body) {
         <input type="checkbox" aria-label="选择 ${esc(f.name)}" ${State.selected.includes(f.id) ? 'checked' : ''} ${f.status !== 'ready' ? 'disabled' : ''}>
         ${fileIcon(f.name)}
         <div style="min-width:0"><div class="name">${esc(f.name)}</div>
-          <div class="sub">${phaseOf(f) ? `<button class="tag ${phaseOf(f) === '预习' ? 'pre' : phaseOf(f) === '正课' ? 'cls' : 'asm'}" data-act="phase" title="点一下改标签">${phaseOf(f)}</button>` : '<button class="tag none" data-act="phase" title="打标签">＋标签</button>'}${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.moodleTitle && f.moodleTitle !== f.name.replace(/\.[^.]+$/, '') ? `<span>Moodle：${esc(f.moodleTitle)}</span>` : ''}</div></div>
+          <div class="sub">${phaseOf(f) ? `<button class="tag ${phaseOf(f) === '预习' ? 'pre' : phaseOf(f) === '正课' ? 'cls' : phaseOf(f) === '课后' ? 'post' : 'asm'}" data-act="phase" title="点一下改标签">${phaseOf(f)}</button>` : '<button class="tag none" data-act="phase" title="打标签">＋标签</button>'}${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.moodleTitle && f.moodleTitle !== f.name.replace(/\.[^.]+$/, '') ? `<span>Moodle：${esc(f.moodleTitle)}</span>` : ''}</div></div>
         <div class="acts">
           ${f.status === 'scanned' || f.status === 'error' ? '<button class="btn small" data-act="ocr">用 Gemini 识别</button>' : ''}
           ${f.status === 'ready' || /\.pdf$/i.test(f.name) ? '<button class="btn small ghost" data-act="view">打开</button>' : ''}${f.status === 'ready' ? `<button class="btn small ghost" data-act="prep" title="5 分钟预习卡 + 术语表">${f.prep ? '课前包 ✓' : '课前包'}</button>` : ''}${f.status === 'ready' ? '<button class="btn small ghost" data-act="class" title="用这份课件上课：左边课件、中间笔记、右边翻译">上课</button>' : ''}
@@ -340,7 +341,7 @@ async function renderFilesTab(course, body) {
     const o = $('[data-act=ocr]', row); if (o) o.onclick = () => ocrFile(course, f);
     const ph = $('[data-act=phase]', row); if (ph) ph.onclick = async e => {
       e.preventDefault();
-      const order = ['预习', '正课', '作业考试', ''];
+      const order = ['预习', '正课', '课后', '作业考试', ''];
       f.phase = order[(order.indexOf(phaseOf(f)) + 1) % order.length] || 'none';
       await DB.put('files', f); renderFilesTab(course, body);
     };
@@ -558,7 +559,7 @@ async function generateModal({ course, preselect = [], sessionId = null, noteId 
   modal(`
     <h2>生成笔记</h2>
     <div class="field"><label>用哪些课件</label>
-      ${files.length ? `<div class="checklist">${files.map(f => `<label><input type="checkbox" value="${f.id}" ${preselect.includes(f.id) ? 'checked' : ''}><span class="hint" style="min-width:58px">${esc(weekOf(f).label)}</span>${phaseOf(f) ? `<span class="tag ${phaseOf(f) === '预习' ? 'pre' : phaseOf(f) === '正课' ? 'cls' : 'asm'}">${phaseOf(f)}</span>` : ''}${esc(f.name)}</label>`).join('')}</div>` : '<span class="hint">这门课还没有已读取的课件</span>'}
+      ${files.length ? `<div class="checklist">${files.map(f => `<label><input type="checkbox" value="${f.id}" ${preselect.includes(f.id) ? 'checked' : ''}><span class="hint" style="min-width:58px">${esc(weekOf(f).label)}</span>${phaseOf(f) ? `<span class="tag ${phaseOf(f) === '预习' ? 'pre' : phaseOf(f) === '正课' ? 'cls' : phaseOf(f) === '课后' ? 'post' : 'asm'}">${phaseOf(f)}</span>` : ''}${esc(f.name)}</label>`).join('')}</div>` : '<span class="hint">这门课还没有已读取的课件</span>'}
     </div>
     ${sessions.length ? `<div class="field"><label for="g-sess">加上课堂录音（可选）</label><select id="g-sess"><option value="">不用录音</option>${sessions.map(s => `<option value="${s.id}" ${s.id === sessionId ? 'selected' : ''}>${esc(s.title)} · ${fmtTime(s.duration)}</option>`).join('')}</select><span class="hint">会把老师强调的考试、作业重点单独列出来</span></div>` : ''}
     <div class="field"><label for="g-title">笔记标题</label><input id="g-title" type="text" value="${esc(defTitle)}" placeholder="例如 Week 1 会计等式"></div>
