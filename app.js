@@ -110,6 +110,7 @@ async function renderHome() {
       <div><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记</div></div>
       <div class="row"><a class="btn" href="#live">${ICON.mic}开始录音</a><button class="btn" id="new-course">＋ 新建课程</button><button class="btn primary" id="sync-moodle">${ICON.up}从 Moodle 同步</button></div>
     </div>
+    ${!Sync.ready() ? `<div class="banner"><div class="grow"><strong>在别的设备用过听课本？</strong><br><span style="font-size:14px;color:var(--muted)">登录云服务，课程、笔记和所有 API key 会自动出现，不用重新设置。</span></div><button class="btn primary small" id="home-login">登录云服务</button></div>` : ''}
     ${!State.courses.length ? `<div class="banner"><div class="grow"><strong>第一次用？</strong><br><span style="font-size:14px;color:var(--muted)">在 Chrome 打开 Moodle 并登录，点右上角「听课本助手」扩展图标，勾选课程后点「同步到听课本」，4 门课和每周的课件会自动导进来。</span></div><button class="btn primary small" id="sync-moodle-2">怎么装扩展</button></div>` : ''}
     ${!k.gemini || !k.notes ? `<div class="banner"><div class="grow"><strong>先填 API key</strong><br><span style="font-size:14px;color:var(--muted)">${!k.notes ? '生成笔记需要 DeepSeek 的 key' : ''}${!k.notes && !k.gemini ? '；' : ''}${!k.gemini ? '实时转写翻译需要 Gemini 的 key' : ''}。key 只存在这台设备上。</span></div><a class="btn primary small" href="#settings">去设置</a></div>` : ''}
     ${State.courses.length ? homeSummary(notes) + weekPrep(files) : ''}
@@ -125,6 +126,7 @@ async function renderHome() {
     </div>
     ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
   $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
+  const hl = $('#home-login'); if (hl) hl.onclick = () => cloudLoginModal();
   $$('[data-prep]').forEach(b => b.onclick = () => openDocModal(b.dataset.prep, 'prep'));
   const dr = $('#dl-refresh'); if (dr) dr.onclick = async () => { dr.disabled = true; await Deadlines.refresh(); if (dr.isConnected) renderHome(); };
   const da = $('#dl-add'); if (da) da.onclick = () => Deadlines.addModal(renderHome);
@@ -1158,8 +1160,16 @@ function renderSettings() {
           <label class="switch" style="align-self:end;padding-bottom:10px"><input type="checkbox" id="ds-think" ${s.deepseekThinking ? 'checked' : ''}>先思考再写（更准，慢一点）</label>
         </div>
       </section>
+      <section class="card pad" id="cloud">
+        <div class="row" style="justify-content:space-between"><h2>云服务（跨设备同步）</h2><span class="pill ${Sync.mode() === 'cloud' ? 'ok' : 'mute'}" id="cl-st">${Sync.mode() === 'cloud' ? '已登录' : '未登录'}</span></div>
+        <p>登录后，课程、课件、笔记、画板手写、录音转写会自动同步，所有 API key 也存在你自己的云端。换设备只要打开网址、输密码。</p>
+        ${Sync.mode() === 'cloud' ? `<div class="row"><span class="hint">云服务：${esc(s.cloudUrl)}</span></div>
+          <div class="row" style="margin-top:8px"><button class="btn small primary" id="cl-sync">立即同步</button><button class="btn small" id="cl-push">把本机的 key 存到云端</button><button class="btn small" id="r2-all">全部课件下载到本机</button><button class="btn small ghost" id="cl-out">退出登录</button><span class="hint" id="r2-info"></span></div>`
+          : `<div class="row"><button class="btn primary" id="cl-login">登录云服务</button><span class="hint">第一次用？先按「部署说明」在 Cloudflare 建好云服务</span></div>`}
+      </section>
       <section class="card pad" id="r2">
-        <div class="row" style="justify-content:space-between"><h2>云同步（Cloudflare R2）</h2><span class="pill ${Sync.ready() ? 'ok' : 'mute'}" id="r2-st">${Sync.ready() ? '已设置' : '未设置'}</span></div>
+        <details><summary style="font-weight:600;cursor:pointer">高级：不用云服务，直接连 R2（要在每台设备填 key）</summary>
+        <div class="row" style="justify-content:flex-end"><span class="pill ${Sync.mode() === 'r2' ? 'ok' : 'mute'}" id="r2-st">${Sync.mode() === 'r2' ? '已设置' : '未设置'}</span></div>
         <p>Mac 和 iPad 之间自动同步课程、课件、笔记、画板手写和录音转写（录音音频不同步）。直接连你自己的存储桶，不经过别的服务器；key 只存在这台设备里。</p>
         <details ${Sync.ready() ? '' : 'open'}><summary style="font-weight:600;cursor:pointer">第一次设置（Mac 上做一次，约 10 分钟）</summary>
           <ol class="steps">
@@ -1181,14 +1191,16 @@ function renderSettings() {
         <div class="row" style="margin-top:10px">
           <button class="btn small" id="r2-test">测试连接</button>
           <button class="btn small primary" id="r2-sync">立即同步</button>
-          <button class="btn small" id="r2-all" title="默认只在打开课件时才下载，这里可以一次全部下到本机（离线也能看）">全部课件下载到本机</button>
-          <span class="hint" id="r2-info"></span>
+          <button class="btn small" id="r2-all2" title="默认只在打开课件时才下载，这里可以一次全部下到本机（离线也能看）">全部课件下载到本机</button>
+          <span class="hint" id="r2-info2"></span>
         </div>
         <div class="row" style="margin-top:8px">
           <button class="btn small ghost" id="mv-copy">复制设置给另一台设备</button>
           <button class="btn small ghost" id="mv-paste">粘贴设置</button>
           <span class="hint">会带上所有 API key，只发给你自己的设备</span>
         </div>
+      
+        </details>
       </section>
       <section class="card pad" id="costs"></section>
       <section class="card pad">
@@ -1306,15 +1318,45 @@ function renderPool() {
 }
 
 /* 云同步设置 */
+/* 登录云服务的窗口（设置页和主页都用） */
+function cloudLoginModal(after) {
+  const s = Settings.load();
+  modal(`<h2>登录听课本云服务</h2>
+    <div class="field"><label for="cl-url">云服务网址</label><input id="cl-url" type="url" autocomplete="url" spellcheck="false" value="${esc(s.cloudUrl || DEFAULT_CLOUD)}" placeholder="https://tingkeben-cloud.你的名字.workers.dev"></div>
+    <div class="field"><label for="cl-pw">密码</label><input id="cl-pw" type="password" autocomplete="current-password"></div>
+    <div class="hint" id="cl-msg"></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="cl-go">登录</button></div>`, (box, close) => {
+    const pw = $('#cl-pw', box); (s.cloudUrl || DEFAULT_CLOUD ? pw : $('#cl-url', box)).focus();
+    const go = async () => {
+      const url = $('#cl-url', box).value, p = pw.value;
+      if (!url || !p) { $('#cl-msg', box).textContent = '网址和密码都要填'; return; }
+      const b = $('#cl-go', box); b.disabled = true; $('#cl-msg', box).textContent = '登录中…';
+      try {
+        const r = await Sync.login(url, p);
+        close(); toast(r.pulled ? '登录成功，API key 已经从云端拿下来了，正在同步课程…' : '登录成功，本机的 API key 已经存到云端，正在同步…', 5000);
+        await loadCourses(); after ? after() : route();
+      } catch (e) { $('#cl-msg', box).textContent = '✗ ' + e.message; b.disabled = false; }
+    };
+    $('#cl-go', box).onclick = go;
+    pw.onkeydown = e => { if (e.key === 'Enter') go(); };
+  });
+}
+const DEFAULT_CLOUD = '';
+
 function bindR2() {
-  const info = $('#r2-info'); if (!info) return;
-  const paint = st => { if (!info.isConnected) { Sync.listeners.delete(paint); return; } info.textContent = st.running ? '同步中…' : st.err ? '上次出错：' + st.err : st.at ? '上次同步 ' + fmtDate(st.at) : ''; $('#r2-st').className = 'pill ' + (st.ready ? (st.err ? 'bad' : 'ok') : 'mute'); $('#r2-st').textContent = st.ready ? (st.err ? '出错' : '已设置') : '未设置'; };
+  const cl = $('#cl-login'); if (cl) cl.onclick = () => cloudLoginModal(renderSettings);
+  const co = $('#cl-out'); if (co) co.onclick = () => modal(`<h2>退出登录</h2><p style="margin:0">这台设备不再自动同步。课件和笔记还留在这台设备上。</p><label class="switch"><input type="checkbox" id="lo-k" checked>同时清掉这台设备上的 API key（借别人电脑用的话一定要勾）</label><div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="lo-go">退出</button></div>`, (box, close) => { $('#lo-go', box).onclick = () => { Sync.logout($('#lo-k', box).checked); close(); toast('已退出云服务'); renderSettings(); }; });
+  const cs = $('#cl-sync'); if (cs) cs.onclick = async () => { cs.disabled = true; await Sync.syncNow({ onProgress: t => { const i = $('#r2-info'); if (i) i.textContent = t; } }); cs.disabled = false; };
+  const cp = $('#cl-push'); if (cp) cp.onclick = async () => { try { await Sync.pushVault(); toast('已经把这台设备的 API key 存到云端'); } catch (e) { toast(e.message, 6000); } };
+  const info = $('#r2-info') || $('#r2-info2'); if (!info) return;
+  const paint = st => { if (!info.isConnected) { Sync.listeners.delete(paint); return; } info.textContent = st.running ? '同步中…' : st.err ? '上次出错：' + st.err : st.at ? '上次同步 ' + fmtDate(st.at) : ''; };
   Sync.listeners.add(paint); paint(Sync.status());
   [['#r2-acct', 'r2Account'], ['#r2-bucket', 'r2Bucket'], ['#r2-id', 'r2KeyId'], ['#r2-secret', 'r2Secret']].forEach(([id, k]) => $(id).addEventListener('change', e => { Settings.save({ [k]: e.target.value.trim() }); paint(Sync.status()); }));
   $('#r2-cors-copy').onclick = async () => { try { await navigator.clipboard.writeText($('#r2-cors').textContent); toast('已复制，粘贴到 R2 的 CORS 策略里'); } catch (e) { toast('复制失败，手动选中复制'); } };
-  $('#r2-test').onclick = async () => { const b = $('#r2-test'); b.disabled = true; info.textContent = '测试中…'; try { await Sync.test(); info.textContent = '✓ 连接正常，可以同步'; Sync.start(); } catch (e) { info.textContent = '✗ ' + e.message; } b.disabled = false; };
-  $('#r2-sync').onclick = async () => { const b = $('#r2-sync'); b.disabled = true; await Sync.syncNow({ onProgress: t => { info.textContent = t; } }); b.disabled = false; paint(Sync.status()); };
-  $('#r2-all').onclick = async () => { const b = $('#r2-all'); b.disabled = true; try { const n = await Sync.downloadAll(t => { info.textContent = '下载 ' + t; }); toast(n ? `下载了 ${n} 个课件` : '课件都已经在本机了'); } catch (e) { toast(e.message, 6000); } b.disabled = false; paint(Sync.status()); };
+  const info2 = $('#r2-info2');
+  $('#r2-test').onclick = async () => { const b = $('#r2-test'); b.disabled = true; const info = info2; info.textContent = '测试中…'; try { await Sync.test(); info.textContent = '✓ 连接正常，可以同步'; Sync.start(); } catch (e) { info.textContent = '✗ ' + e.message; } b.disabled = false; };
+  $('#r2-sync').onclick = async () => { const b = $('#r2-sync'); b.disabled = true; await Sync.syncNow({ onProgress: t => { info2.textContent = t; } }); b.disabled = false; paint(Sync.status()); };
+  const dlAll = $('#r2-all') || $('#r2-all2'); if (dlAll) dlAll.onclick = async () => { const b = dlAll; b.disabled = true; try { const n = await Sync.downloadAll(t => { info.textContent = '下载 ' + t; }); toast(n ? `下载了 ${n} 个课件` : '课件都已经在本机了'); } catch (e) { toast(e.message, 6000); } b.disabled = false; paint(Sync.status()); };
   $('#mv-copy').onclick = async () => { try { await navigator.clipboard.writeText(Sync.exportSettings()); toast('已复制。用隔空投送或通用剪贴板发到 iPad，再点「粘贴设置」', 5000); } catch (e) { modal(`<h2>复制下面这段</h2><textarea readonly style="min-height:120px">${esc(Sync.exportSettings())}</textarea><div class="row" style="justify-content:flex-end"><button class="btn" data-close>好</button></div>`); } };
   $('#mv-paste').onclick = () => modal(`<h2>粘贴设置</h2><textarea id="mv-t" style="min-height:120px" placeholder="TKB1:……"></textarea><div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="mv-go">导入</button></div>`, (box, close) => {
     navigator.clipboard?.readText?.().then(t => { if (/^TKB1:/.test(t)) $('#mv-t', box).value = t; }).catch(() => {});

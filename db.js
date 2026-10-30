@@ -102,6 +102,7 @@ const Settings = (() => {
     autoStudy: true,
     micId: '',
     r2Account: '', r2KeyId: '', r2Secret: '', r2Bucket: 'tingkeben',
+    cloudUrl: '', cloudToken: '',
     captionView: 'both',
     captionSize: 20,
   };
@@ -127,6 +128,7 @@ const Settings = (() => {
   function save(patch) {
     cache = Object.assign(load(), patch);
     try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch (e) { /* 存不了就只留在内存 */ }
+    if (typeof Sync !== 'undefined') Sync.onSettings(patch);
     return cache;
   }
   return { load, save, defaults };

@@ -16,7 +16,11 @@ const Sync = (() => {
     const s = Settings.load();
     return { acct: (s.r2Account || '').trim(), id: (s.r2KeyId || '').trim(), secret: (s.r2Secret || '').trim(), bucket: (s.r2Bucket || '').trim() };
   }
-  const ready = () => { const c = cfg(); return !!(c.acct && c.id && c.secret && c.bucket); };
+  // 两种连法：① 听课本云服务（Worker，只要密码）② 直接连 R2（要 key，高级）
+  const cloud = () => { const s = Settings.load(); return s.cloudUrl && s.cloudToken ? { url: s.cloudUrl.replace(/\/+$/, ''), token: s.cloudToken } : null; };
+  const direct = () => { const c = cfg(); return !!(c.acct && c.id && c.secret && c.bucket); };
+  const ready = () => !!cloud() || direct();
+  const mode = () => cloud() ? 'cloud' : direct() ? 'r2' : '';
 
   /* AWS Signature V4（R2 兼容 S3），用浏览器自带的 WebCrypto 算 */
   async function signed(method, key, { body = null, query = {}, headers = {}, now = new Date() } = {}) {
@@ -39,6 +43,18 @@ const Sync = (() => {
     return { url: `https://${host}${path}${qs ? '?' + qs : ''}`, headers: h, canon, sig };
   }
   async function req(method, key, opts = {}) {
+    const c = cloud();
+    if (c) {
+      let r;
+      const headers = { Authorization: 'Bearer ' + c.token };
+      const ct = opts.headers && (opts.headers['content-type'] || opts.headers['Content-Type']); if (ct) headers['Content-Type'] = ct;
+      try { r = await fetch(c.url + '/r2/' + key.split('/').map(encodeURIComponent).join('/'), { method, headers, body: opts.body == null ? undefined : opts.body }); }
+      catch (e) { throw new Error('连不上听课本云服务，检查网络。'); }
+      if (r.status === 404 && opts.allow404) return null;
+      if (r.status === 401) { Settings.save({ cloudToken: '' }); emit(); throw new Error('云端登录过期了，到「设置 → 云服务」重新输入密码'); }
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error('云服务出错：' + (j.error || r.status)); }
+      return r;
+    }
     const s = await signed(method, key, opts);
     let r;
     try { r = await fetch(s.url, { method, headers: s.headers, body: opts.body == null ? undefined : opts.body }); }
@@ -69,7 +85,7 @@ const Sync = (() => {
 
   let running = null, timer = null, lastErr = '';
   const listeners = new Set();
-  const status = () => ({ ready: ready(), running: !!running, at: Number(localStorage.getItem(LAST) || 0), err: lastErr });
+  const status = () => ({ ready: ready(), mode: mode(), running: !!running, at: Number(localStorage.getItem(LAST) || 0), err: lastErr });
   const emit = () => listeners.forEach(fn => { try { fn(status()); } catch (e) {} });
 
   function schedule(ms = 15000) {
@@ -78,12 +94,13 @@ const Sync = (() => {
   }
 
   async function syncNow({ silent = false, onProgress } = {}) {
-    if (!ready()) { if (!silent) toast('先在设置里填好 Cloudflare R2'); return; }
+    if (!ready()) { if (!silent) toast('先在「设置 → 云服务」登录'); return; }
     if (running) return running;
     running = (async () => {
       emit();
       const prog = t => { onProgress && onProgress(t); };
       try {
+        if (cloud()) await pullVault().catch(() => {});
         const remote = (await getJSON('tingkeben/index.json')) || { v: 1, items: {} };
         const items = remote.items || {};
         const tb = tombs();
@@ -185,6 +202,49 @@ const Sync = (() => {
     Settings.save(patch); return Object.keys(patch).length;
   }
 
+  /* ---------- 听课本云服务：密码登录 + 云端保管 API key ---------- */
+  const VAULT_KEYS = ['geminiKey', 'deepseekKey', 'groqKey', 'cerebrasKey', 'mistralKey', 'deepseekModel', 'groqModel', 'groqModel2', 'liveLanguage', 'liveMode', 'translatePace', 'draftMode', 'translateProvider', 'poolFallback', 'maxWaitSec', 'autoStudy', 'dsPriceIn', 'dsPriceHit', 'dsPriceOut'];
+  async function login(url, password) {
+    url = String(url || '').trim().replace(/\/+$/, '');
+    if (!/^https:\/\//.test(url) && !/^http:\/\/localhost/.test(url)) throw new Error('云服务网址要以 https:// 开头');
+    let r;
+    try { r = await fetch(url + '/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }); }
+    catch (e) { throw new Error('连不上这个网址。检查网址有没有抄错，Worker 有没有部署。'); }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('登录失败 ' + r.status));
+    Settings.save({ cloudUrl: url, cloudToken: j.token });
+    // 云端有保管的 key 就拿下来；没有就把本机的存上去
+    const v = await getJSON('tingkeben/vault.json');
+    if (v && v.settings) { const patch = {}; VAULT_KEYS.forEach(k => { if (v.settings[k] !== undefined && v.settings[k] !== '') patch[k] = v.settings[k]; }); vaultMute = true; Settings.save(patch); vaultMute = false; }
+    else await pushVault();
+    emit(); started = false; start(); syncNow({ silent: true });
+    return { pulled: !!(v && v.settings) };
+  }
+  function logout(clearKeys) {
+    const patch = { cloudToken: '' };
+    if (clearKeys) VAULT_KEYS.forEach(k => { if (/Key$/.test(k)) patch[k] = ''; });
+    Settings.save(patch); emit();
+  }
+  let vaultMute = false, vaultTimer = null;
+  async function pushVault() {
+    if (!cloud()) return;
+    const s = Settings.load(), o = {}; VAULT_KEYS.forEach(k => { if (s[k] !== undefined) o[k] = s[k]; });
+    await putJSON('tingkeben/vault.json', { at: Date.now(), settings: o });
+  }
+  // 设置里改了 key → 过几秒自动存到云端，别的设备下次登录 / 同步时拿到
+  function onSettings(patch) {
+    if (vaultMute || !cloud() || !Object.keys(patch || {}).some(k => VAULT_KEYS.includes(k))) return;
+    clearTimeout(vaultTimer); vaultTimer = setTimeout(() => pushVault().catch(() => {}), 3000);
+  }
+  async function pullVault() {
+    if (!cloud()) return;
+    const v = await getJSON('tingkeben/vault.json');
+    if (!v || !v.settings) return;
+    const s = Settings.load(), patch = {};
+    VAULT_KEYS.forEach(k => { if (v.settings[k] !== undefined && v.settings[k] !== '' && v.settings[k] !== s[k]) patch[k] = v.settings[k]; });
+    if (Object.keys(patch).length) { vaultMute = true; Settings.save(patch); vaultMute = false; }
+  }
+
   // 打开时同步一次；看得见时每 3 分钟一次；切到后台时把改动推上去
   let started = false;
   function start() {
@@ -197,5 +257,5 @@ const Sync = (() => {
 
   const CORS = (origin) => JSON.stringify([{ AllowedOrigins: [origin, 'https://yuenkit122.github.io', 'http://localhost:8765'].filter((v, i, a) => a.indexOf(v) === i), AllowedMethods: ['GET', 'PUT', 'DELETE', 'HEAD'], AllowedHeaders: ['*'], ExposeHeaders: ['ETag'], MaxAgeSeconds: 3600 }], null, 2);
 
-  return { syncNow, schedule, tomb, ready, status, listeners, ensureBlob, downloadAll, test, exportSettings, importSettings, start, CORS, signed, STORES };
+  return { login, logout, onSettings, pushVault, mode, syncNow, schedule, tomb, ready, status, listeners, ensureBlob, downloadAll, test, exportSettings, importSettings, start, CORS, signed, STORES };
 })();
