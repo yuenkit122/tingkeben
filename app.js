@@ -606,7 +606,19 @@ async function startGeneration({ course, fileIds, sessionId, title, style, extra
   await DB.put('notes', note);
   const gen = { text: '', think: '', ctl: new AbortController(), listeners: new Set() };
   State.gens.set(note.id, gen);
-  const ping = () => gen.listeners.forEach(fn => fn());
+  // 进度条：连接 → 读课件思考 → 写笔记（按已写字数估算）
+  const job = Jobs.start('note:' + note.id, '生成笔记：' + title);
+  const srcChars = files.filter(Boolean).reduce((n, f) => n + (f.text || '').length, 0);
+  const expectWrite = Math.max(3000, Math.min(style === 'brief' ? 6000 : 14000, srcChars * (style === 'brief' ? .35 : .8)));
+  let phase = 0;
+  const ping = () => {
+    if (gen.text && phase < 2) { phase = 2; job.phase('正在写笔记', .35, .98, { expectLen: expectWrite }); }
+    else if (gen.think && phase < 1) { phase = 1; job.phase('正在读课件、理清思路', .05, .35, { expectLen: 4000 }); }
+    if (phase === 2) job.len(gen.text.length).sub(`已写 ${gen.text.length} 字`);
+    else if (phase === 1) job.len(gen.think.length).sub(`已思考 ${gen.think.length} 字`);
+    gen.listeners.forEach(fn => fn());
+  };
+  job.phase('正在连接 DeepSeek', 0, .05, { expectSec: 3 });
   const user = AI.notesPrompt({
     courseName: course.name, title,
     sources: files.filter(Boolean).map(f => ({ name: f.name, text: (f.text || '').slice(0, 600000) })),
@@ -632,6 +644,7 @@ async function startGeneration({ course, fileIds, sessionId, title, style, extra
     }
     await DB.put('notes', note);
     State.gens.delete(note.id);
+    job.done();
     ping();
     if (autoStudy && Settings.load().autoStudy !== false) Study.background(note.id);
   })();
@@ -715,7 +728,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
       const now = Date.now();
       if (now - last < 250) { clearTimeout(timer); timer = setTimeout(paint, 260); return; }
       last = now;
-      body.innerHTML = (gen.text ? md(gen.text) : '') + `<div class="thinking noprint"><span class="spin"></span><div>${gen.text ? '正在写…' : gen.think ? '正在读课件、理清思路…' : '正在连接…'}${gen.think && !gen.text ? `<details><summary>看看它在想什么</summary><pre>${esc(gen.think.slice(-2000))}</pre></details>` : ''}</div></div>`;
+      body.innerHTML = `<div class="noprint prog-sticky">${Jobs.slot('note:' + id)}${gen.think && !gen.text ? `<details class="hint"><summary>看看它在想什么</summary><pre>${esc(gen.think.slice(-2000))}</pre></details>` : ''}</div>` + (gen.text ? md(gen.text) : '');
     };
     gen.listeners.add(paint); paint();
     return;
@@ -766,7 +779,7 @@ async function linkSessionModal(note, after) {
 }
 
 async function runRecap(note, course, after) {
-  const close = modal(`<h2>录音总结 → 笔记</h2><div class="thinking"><span class="spin"></span><div id="rc-st">准备中…</div></div><p class="hint" style="margin:0">会读这节课的录音转写、你标记的重点和画板上的手写（手写用 Gemini 免费识别），整理成笔记下半部分「课堂上老师提到的」。上半部分的课件笔记不会动。</p>`);
+  const close = modal(`<h2>录音总结 → 笔记</h2><div data-job-slot="recap:${note.id}"><div class="thinking"><span class="spin"></span>准备中…</div></div><div id="rc-st" hidden></div><p class="hint" style="margin:0">会读这节课的录音转写、你标记的重点和画板上的手写（手写用 Gemini 免费识别），整理成笔记下半部分「课堂上老师提到的」。上半部分的课件笔记不会动。</p>`);
   try {
     const r = await Recap.run(note, course, { onStatus: t => { const el = $('#rc-st'); if (el) el.textContent = t; } });
     close();

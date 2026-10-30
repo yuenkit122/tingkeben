@@ -52,6 +52,48 @@ function splitPages(text) {
 }
 
 /* ======================================================================
+   进度条：所有 AI 生成任务都登记在这里，页面里和左下角都能看到进度
+   ====================================================================== */
+const Jobs = (() => {
+  const map = new Map(); let tray = null, timer = null;
+  function start(id, label) {
+    const j = { id, label, t0: Date.now(), lo: 0, hi: .05, len: 0, pt0: Date.now(), expectLen: 0, expectSec: 4, phaseLabel: '正在连接…', sub: '' };
+    map.set(id, j); loop();
+    const api = {
+      phase(label, lo, hi, { expectLen = 0, expectSec = 10 } = {}) { j.lo = Math.max(cur(j), lo); j.hi = hi; j.phaseLabel = label; j.expectLen = expectLen; j.expectSec = expectSec; j.len = 0; j.pt0 = Date.now(); return api; },
+      len(n) { j.len = n; return api; },
+      sub(t) { j.sub = t; return api; },
+      done() { map.delete(id); paint(); return api; },
+      get: () => j,
+    };
+    return api;
+  }
+  function cur(j) {
+    const f = j.expectLen ? 1 - Math.exp(-j.len / j.expectLen * 1.6) : 1 - Math.exp(-(Date.now() - j.pt0) / 1000 / j.expectSec * 1.3);
+    return Math.min(.99, j.lo + (j.hi - j.lo) * Math.max(0, f));
+  }
+  const secs = j => Math.round((Date.now() - j.t0) / 1000);
+  function html(id, compact) {
+    const j = map.get(id); if (!j) return '';
+    const p = Math.round(cur(j) * 100);
+    return `<div class="prog${compact ? ' compact' : ''}" data-job="${esc(id)}"><div class="prog-top"><span class="spin"></span><b>${esc(compact ? j.label : j.phaseLabel)}</b><span class="grow"></span><span class="prog-n">${p}% · ${secs(j)} 秒</span></div><div class="prog-bar"><i style="width:${p}%"></i></div>${!compact && j.sub ? `<div class="hint">${esc(j.sub)}</div>` : compact ? `<div class="hint">${esc(j.phaseLabel)}</div>` : ''}</div>`;
+  }
+  /* 页面里的进度块：el 里放一个 [data-job-slot="id"]，这里会自动刷新 */
+  function paint() {
+    $$('[data-job-slot]').forEach(el => { const id = el.dataset.jobSlot; el.innerHTML = map.has(id) ? html(id) : ''; });
+    // 左下角任务托盘：当前页面没显示的任务放这里
+    const shown = new Set($$('[data-job-slot]').map(el => el.dataset.jobSlot));
+    const rest = [...map.keys()].filter(id => !shown.has(id));
+    if (!tray) { tray = document.createElement('div'); tray.className = 'job-tray'; document.body.appendChild(tray); }
+    tray.hidden = !rest.length;
+    tray.innerHTML = rest.map(id => html(id, true)).join('');
+  }
+  function loop() { if (timer) return; timer = setInterval(() => { paint(); if (!map.size) { clearInterval(timer); timer = null; } }, 400); paint(); }
+  const slot = id => `<div data-job-slot="${esc(id)}">${html(id)}</div>`;
+  return { start, slot, has: id => map.has(id), get: id => map.get(id), paint };
+})();
+
+/* ======================================================================
    手写画板：Apple Pencil 写字，手指只滚动；笔落下时手掌碰屏不算
    ====================================================================== */
 const Board = (() => {
@@ -305,18 +347,21 @@ const Study = (() => {
   async function generate(note, el, after) {
     if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
     if (!note.markdown && !(note.sourceFileIds || []).length) { toast('这份笔记还是空的，先生成笔记或选课件'); return; }
-    el.innerHTML = `<div class="thinking"><span class="spin"></span><div>正在出重点、记忆卡片和测验题… <span id="st-n"></span></div></div>`;
+    const job = Jobs.start('study:' + note.id, '出重点和测验：' + note.title);
+    el.innerHTML = Jobs.slot('study:' + note.id);
+    let first = true;
     try {
-      const pack = await AI.studyPack({ title: note.title, markdown: (note.markdown || '').slice(0, 80000), sources: await sourcesExcerpt(note, note.markdown ? 20000 : 60000), onText: t => { const n = $('#st-n'); if (n) n.textContent = `（已写 ${t.length} 字）`; } });
+      const pack = await AI.studyPack({ title: note.title, markdown: (note.markdown || '').slice(0, 80000), sources: await sourcesExcerpt(note, note.markdown ? 20000 : 60000), onText: t => { if (first) { first = false; job.phase('正在出重点、记忆卡片和测验题', .08, .97, { expectLen: 7000 }); } job.len(t.length).sub(`已写 ${t.length} 字`); } });
       if (!pack.points.length) throw new Error('没有生成出知识点，再试一次');
       note.study = pack; note.mastered = {}; note.quizLog = null;
       await DB.put('notes', note);
       toast(`生成了 ${pack.points.length} 个重点、${pack.cards.length} 张卡片、${pack.quiz.length} 道题`);
     } catch (e) { toast(e.message, 6000); }
+    job.done();
     after();
   }
   function emptyGen(note, el, after, what) {
-    if (State.studyGens.has(note.id)) { el.innerHTML = `<div class="thinking"><span class="spin"></span>正在出重点、记忆卡片和测验题，好了会自动显示…</div>`; return; }
+    if (State.studyGens.has(note.id) || Jobs.has('study:' + note.id)) { el.innerHTML = Jobs.slot('study:' + note.id) + '<p class="hint">好了会自动显示，可以先去看别的。</p>'; return; }
     el.innerHTML = `<div class="empty"><strong>还没有${what}</strong>一次生成重点知识点、记忆卡片和测验题（DeepSeek，不开思考，一份笔记大约 ¥0.02–0.05）。<div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" id="st-gen">${ICON.spark}生成复习材料</button></div></div>`;
     $('#st-gen', el).onclick = () => generate(note, el, after);
   }
@@ -410,16 +455,19 @@ const Study = (() => {
   async function background(noteId) {
     if (State.studyGens.has(noteId) || !Settings.load().deepseekKey) return;
     State.studyGens.add(noteId); refreshTabs(noteId);
+    let job = null;
     try {
       const note = await DB.get('notes', noteId);
       if (!note || !note.markdown) return;
-      const pack = await AI.studyPack({ title: note.title, markdown: note.markdown.slice(0, 80000), sources: await sourcesExcerpt(note, 20000) });
+      job = Jobs.start('study:' + noteId, '出重点和测验：' + note.title);
+      let first = true;
+      const pack = await AI.studyPack({ title: note.title, markdown: note.markdown.slice(0, 80000), sources: await sourcesExcerpt(note, 20000), onText: t => { if (first) { first = false; job.phase('正在出重点、记忆卡片和测验题', .08, .97, { expectLen: 7000 }); } job.len(t.length).sub(`已写 ${t.length} 字`); } });
       const fresh = await DB.get('notes', noteId); if (!fresh) return;
       fresh.study = pack; fresh.mastered = {}; fresh.quizLog = null;
       await DB.put('notes', fresh);
       toast(`「${fresh.title}」的重点、记忆卡片和测验题也好了`);
     } catch (e) { toast('出复习材料失败：' + e.message, 5000); }
-    finally { State.studyGens.delete(noteId); refreshTabs(noteId, true); }
+    finally { job && job.done(); State.studyGens.delete(noteId); refreshTabs(noteId, true); }
   }
   function refreshTabs(noteId, done) {
     const h = location.hash.slice(1);
@@ -674,15 +722,21 @@ const Recap = (() => {
     const session = note.sessionId ? await DB.get('sessions', note.sessionId) : null;
     if (!session || !session.segments.length) throw new Error('这份笔记还没有关联课堂录音');
     if (!Settings.load().deepseekKey) throw new Error('先去设置里填 DeepSeek key');
+    const job = Jobs.start('recap:' + note.id, '录音总结：' + note.title);
+    try { return await runInner(note, course, session, job, onStatus); } finally { job.done(); }
+  }
+  async function runInner(note, course, session, job, onStatus) {
+    if (Board.hasInk(note)) job.phase('正在识别画板上的手写', 0, .3, { expectSec: 10 });
     onStatus && onStatus('正在识别手写…');
     const hw = await handwriting(note);
     const body = (note.markdown || '').split(START)[0].trim();
     // 笔记还是空的：直接走完整的笔记生成（课件 + 录音 + 手写一起）
     if (!body) return { full: true, handwriting: hw };
     onStatus && onStatus('正在整理老师讲的内容…');
+    job.phase('正在读录音转写（老师讲了什么）', .3, .4, { expectSec: 8 });
     const user = `课程：${course ? course.name : ''}\n笔记标题：${note.title}\n\n<课件笔记>\n${body.slice(0, 60000)}\n</课件笔记>\n\n<学生标记的重点时间>\n${(session.highlights || []).map(h => `[${fmtTime(h.t)}] ${h.near || ''}`).join('\n') || '（没有）'}\n</学生标记的重点时间>\n\n<学生没听懂的地方（请在「课堂上老师提到的」里加一个小节「我没听懂的地方」，用中文讲清楚）>\n${(session.confused || []).map(c => `[${fmtTime(c.t)}] ${c.near || ''}`).join('\n') || '（没有）'}\n</学生没听懂的地方>\n\n<学生手写>\n${hw || '（没有手写）'}\n</学生手写>\n\n<录音转写>\n${sessionTranscript(session).slice(0, 150000)}\n</录音转写>`;
     let out = '';
-    out = await AI.deepseekStream({ system: SYSTEM, user, thinking: false, maxTokens: 8000, purpose: 'recap', onText: t => { out = t; onStatus && onStatus(`正在写课堂总结…（${t.length} 字）`); } });
+    out = await AI.deepseekStream({ system: SYSTEM, user, thinking: false, maxTokens: 8000, purpose: 'recap', onText: t => { if (!out) job.phase('正在写「课堂上老师提到的」', .4, .97, { expectLen: 3500 }); out = t; job.len(t.length).sub(`已写 ${t.length} 字`); onStatus && onStatus(`正在写课堂总结…（${t.length} 字）`); } });
     note.markdown = `${body}\n\n${START}\n${out.trim()}\n${END}\n`;
     note.recapAt = Date.now();
     await DB.put('notes', note);
@@ -693,17 +747,21 @@ const Recap = (() => {
   async function handwritingMerge(note, course, onStatus) {
     if (!Board.hasInk(note)) throw new Error('画板上还没有手写');
     if (!Settings.load().geminiKey) throw new Error('识别手写要用 Gemini（免费），先去设置里填 Gemini key');
+    const job = Jobs.start('hw:' + note.id, '识别手写：' + note.title).phase('正在识别手写', 0, .5, { expectSec: 10 });
+    try {
     onStatus && onStatus('正在识别手写…');
     const hw = await handwriting(note);
     if (!hw.trim()) throw new Error('没有识别出手写内容');
     let out = hw;
     if (Settings.load().deepseekKey) {
       onStatus && onStatus('正在整理…');
-      out = await AI.deepseekStream({ system: '你在帮英语不好的中国留学生整理他自己上课时的手写笔记。保留他写的内容和意思，只把顺序理清、错字改正、补上缺的英文术语。中文解释，术语写成 中文（English）。不要编他没写的东西。输出 Markdown 要点，不要标题。', user: `课程：${course ? course.name : ''}\n笔记：${note.title}\n\n<课件笔记（参考，用来对上术语）>\n${(note.markdown || '').split(HS)[0].slice(0, 20000)}\n</课件笔记>\n\n<手写识别结果>\n${hw}\n</手写识别结果>`, thinking: false, maxTokens: 4000, purpose: 'recap' });
+      job.phase('正在整理手写笔记', .5, .97, { expectLen: 1500 });
+      out = await AI.deepseekStream({ onText: t => job.len(t.length), system: '你在帮英语不好的中国留学生整理他自己上课时的手写笔记。保留他写的内容和意思，只把顺序理清、错字改正、补上缺的英文术语。中文解释，术语写成 中文（English）。不要编他没写的东西。输出 Markdown 要点，不要标题。', user: `课程：${course ? course.name : ''}\n笔记：${note.title}\n\n<课件笔记（参考，用来对上术语）>\n${(note.markdown || '').split(HS)[0].slice(0, 20000)}\n</课件笔记>\n\n<手写识别结果>\n${hw}\n</手写识别结果>`, thinking: false, maxTokens: 4000, purpose: 'recap' });
     }
     const base = (note.markdown || '').replace(new RegExp(HS + '[\\s\\S]*?' + HE + '\\n?'), '').trimEnd();
     note.markdown = `${base}\n\n${HS}\n## 我的手写笔记\n${out.trim()}\n${HE}\n`;
     await DB.put('notes', note);
+    } finally { job.done(); }
   }
   return { run, START, END, handwritingMerge };
 })();
@@ -715,6 +773,7 @@ const DocTr = (() => {
   const running = new Map();
   async function translate(f, onProgress) {
     if (running.has(f.id)) return running.get(f.id);
+    const job = Jobs.start('tr:' + f.id, '翻译课件：' + f.name);
     const p = (async () => {
       const pages = splitPages(f.text);
       const chunks = []; let cur = '';
@@ -722,13 +781,14 @@ const DocTr = (() => {
       if (cur) chunks.push(cur);
       let done = '';
       for (let i = 0; i < chunks.length; i++) {
-        const piece = await AI.deepseekStream({ system: AI.DOC_TR_SYSTEM, user: AI.docTranslatePrompt(chunks[i]), thinking: false, maxTokens: 8000, purpose: 'doctr', onText: t => onProgress && onProgress(done + t, i + 1, chunks.length) });
+        job.phase(`正在翻译 第 ${i + 1} / ${chunks.length} 段`, i / chunks.length, (i + 1) / chunks.length, { expectLen: chunks[i].length * .8 });
+        const piece = await AI.deepseekStream({ system: AI.DOC_TR_SYSTEM, user: AI.docTranslatePrompt(chunks[i]), thinking: false, maxTokens: 8000, purpose: 'doctr', onText: t => { job.len(t.length); onProgress && onProgress(done + t, i + 1, chunks.length); } });
         done += piece.trim() + '\n\n';
         f.translation = done; await DB.put('files', f);
       }
       f.translation = done; f.translationDone = true; await DB.put('files', f);
       return done;
-    })();
+    })().finally(() => job.done());
     running.set(f.id, p);
     try { return await p; } finally { running.delete(f.id); }
   }
@@ -795,7 +855,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
     if (mode === 'prep') return Prep.mount(body, f, course);
     if (mode === 'zh') {
       if (!f.translation && !DocTr.running.has(f.id)) return trNeeded();
-      body.innerHTML = `<div class="md tr-text">${md(f.translation || '')}</div>${DocTr.running.has(f.id) ? '<div class="thinking"><span class="spin"></span>翻译中…</div>' : ''}`;
+      body.innerHTML = (DocTr.running.has(f.id) ? Jobs.slot('tr:' + f.id) : '') + `<div class="md tr-text">${md(f.translation || '')}</div>`;
       if (DocTr.running.has(f.id)) DocTr.running.get(f.id).then(() => { if (host.isConnected && mode === 'zh') paint(); });
       return;
     }
@@ -808,7 +868,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
     const pageBox = p => pdf ? `<div class="pdfpage" data-p="${p}"><div class="ph">第 ${p} 页</div></div>` : `<div class="docpage" data-p="${p}"><div class="hint">第 ${p} 页</div><div class="doc-text">${esc((textPages.find(x => x.n === p) || {}).text || '')}</div></div>`;
     if (mode === 'pair') {
       if (!f.translation && !DocTr.running.has(f.id) && !Object.keys(refs).length) return trNeeded();
-      body.innerHTML = (f.translation ? '' : `<div class="banner"><div class="grow">还没翻译，右边只显示笔记里引用这一页的内容。</div><button class="btn small primary" id="dv-tr2">翻译整份课件</button></div>`) +
+      body.innerHTML = (DocTr.running.has(f.id) ? Jobs.slot('tr:' + f.id) : '') + (f.translation || DocTr.running.has(f.id) ? '' : `<div class="banner"><div class="grow">还没翻译，右边只显示笔记里引用这一页的内容。</div><button class="btn small primary" id="dv-tr2">翻译整份课件</button></div>`) +
         Array.from({ length: n }, (_, i) => i + 1).map(p => `<div class="pair" data-p="${p}">${pageBox(p)}<div class="pair-zh">${tr[p] ? `<div class="md">${md(tr[p])}</div>` : DocTr.running.has(f.id) ? '<div class="hint">翻译中…</div>' : ''}${refs[p] ? `<div class="pair-note"><div class="hint">笔记里讲到这一页</div>${refs[p].map(t => `<div class="md">${md(t)}</div>`).join('')}</div>` : ''}${!tr[p] && !refs[p] && !DocTr.running.has(f.id) ? '<div class="hint">（这页没有内容）</div>' : ''}</div></div>`).join('');
       const t2 = $('#dv-tr2', body); if (t2) t2.onclick = () => run();
       if (DocTr.running.has(f.id)) DocTr.running.get(f.id).then(() => { if (host.isConnected && mode === 'pair') paint(); });
@@ -830,7 +890,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
   };
   const run = async () => {
     if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
-    const pr = DocTr.translate(f, (t, i, n) => { const el = $('.tr-text', host); if (el && mode === 'zh') el.innerHTML = md(t); const th = $('.thinking', host); if (th) th.innerHTML = `<span class="spin"></span>翻译中… ${i}/${n}`; });
+    const pr = DocTr.translate(f, (t) => { const el = $('.tr-text', host); if (el && mode === 'zh') el.innerHTML = md(t); });
     paint();
     try { await pr; toast('翻译完成：' + f.name); } catch (e) { toast(e.message, 6000); }
     if (host.isConnected) paint();
@@ -853,24 +913,27 @@ const Prep = (() => {
   }
   async function make(f, course, onText) {
     if (running.has(f.id)) return running.get(f.id);
+    const job = Jobs.start('prep:' + f.id, '课前包：' + f.name);
+    let first = true;
     const p = (async () => {
       const full = await DB.get('files', f.id);
-      const pack = await AI.prepPack({ name: full.name, text: full.text || '', courseName: course && course.name, onText });
+      const pack = await AI.prepPack({ name: full.name, text: full.text || '', courseName: course && course.name, onText: t => { if (first) { first = false; job.phase('正在写预习卡和术语表', .08, .97, { expectLen: 4500 }); } job.len(t.length).sub(`已写 ${t.length} 字`); onText && onText(t); } });
       full.prep = pack; await DB.put('files', full); Object.assign(f, { prep: pack });
       return pack;
-    })();
+    })().finally(() => job.done());
     running.set(f.id, p);
     try { return await p; } finally { running.delete(f.id); }
   }
   function mount(el, f, course) {
     const pk = f.prep;
     if (!pk) {
-      if (running.has(f.id)) { el.innerHTML = '<div class="thinking"><span class="spin"></span>正在做课前包…</div>'; running.get(f.id).then(() => el.isConnected && mount(el, f, course)).catch(() => el.isConnected && mount(el, f, course)); return; }
+      if (running.has(f.id)) { el.innerHTML = Jobs.slot('prep:' + f.id); running.get(f.id).then(() => el.isConnected && mount(el, f, course)).catch(() => el.isConnected && mount(el, f, course)); return; }
       el.innerHTML = `<div class="empty"><strong>还没有课前包</strong>上课前 5 分钟看一眼：这节讲什么、3 个关键概念、可能听不懂的地方，再加一份中英术语表（带例句和发音）。DeepSeek 约 ¥0.01–0.03。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="pp-go">${ICON.spark}生成课前包</button></div></div>`;
       $('#pp-go', el).onclick = async () => {
         if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
-        el.innerHTML = '<div class="thinking"><span class="spin"></span><div>正在读课件做课前包… <span id="pp-n"></span></div></div>';
-        try { await make(f, course, t => { const n = $('#pp-n', el); if (n) n.textContent = `（${t.length} 字）`; }); } catch (e) { toast(e.message, 6000); }
+        const pr = make(f, course);
+        el.innerHTML = Jobs.slot('prep:' + f.id);
+        try { await pr; } catch (e) { toast(e.message, 6000); }
         if (el.isConnected) mount(el, f, course);
       };
       return;
@@ -1128,7 +1191,7 @@ function deskNote(note, course, el, again) {
   if (gen) {
     el.innerHTML = '<div class="md" id="dn-body"></div>';
     const b = $('#dn-body', el);
-    const paint = () => { if (!b.isConnected) { gen.listeners.delete(paint); return; } if (!State.gens.has(note.id)) { gen.listeners.delete(paint); DB.get('notes', note.id).then(n => { Object.assign(note, n); again(); }); return; } b.innerHTML = (gen.text ? md(gen.text) : '') + '<div class="thinking"><span class="spin"></span>正在写…</div>'; };
+    const paint = () => { if (!b.isConnected) { gen.listeners.delete(paint); return; } if (!State.gens.has(note.id)) { gen.listeners.delete(paint); DB.get('notes', note.id).then(n => { Object.assign(note, n); again(); }); return; } b.innerHTML = `<div class="prog-sticky">${Jobs.slot('note:' + note.id)}</div>` + (gen.text ? md(gen.text) : ''); };
     gen.listeners.add(paint); paint(); return;
   }
   el.innerHTML = `

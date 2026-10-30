@@ -544,3 +544,19 @@ body.desk-mode .wrap { max-width: none; gap: 0; }
 .steps { margin: 8px 0 0; padding-left: 20px; line-height: 1.8; font-size: 14px; }
 .steps li { margin-bottom: 6px; }
 pre.cors { font-family: var(--mono); font-size: 12px; white-space: pre; overflow-x: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 6px 0; max-height: none; }
+
+/* ---------- 进度条 ---------- */
+.prog { border: 1px solid var(--line); background: var(--sheet); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.prog-top { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.prog-n { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.prog-bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; position: relative; }
+.prog-bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; transition: width .4s ease; position: relative; overflow: hidden; }
+.prog-bar i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent); animation: prog-shine 1.4s linear infinite; }
+@keyframes prog-shine { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.prog-sticky { position: sticky; top: 0; z-index: 3; background: var(--sheet); padding: 4px 0 12px; }
+.prog-sticky details { margin-top: 6px; }
+.job-tray { position: fixed; left: max(14px, env(safe-area-inset-left)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 35; width: min(320px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 8px; }
+.job-tray .prog { box-shadow: 0 6px 24px rgba(0,0,0,.14); padding: 10px 12px; gap: 6px; }
+.job-tray .prog-top b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+@media (max-width: 760px) { .job-tray { bottom: calc(80px + env(safe-area-inset-bottom)); } }
+@media (prefers-reduced-motion: reduce) { .prog-bar i::after { animation: none; } }
