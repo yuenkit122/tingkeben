@@ -163,6 +163,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .files { display: flex; flex-direction: column; }
 .file { display: grid; grid-template-columns: auto 36px 1fr auto; gap: 12px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); }
 .file:last-child { border-bottom: 0; }
+.fgroup { padding: 10px 14px 6px; font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: .03em; background: var(--paper); border-bottom: 1px solid var(--line); }
 .file input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
 .ficon { width: 36px; height: 44px; border-radius: 5px; display: grid; place-items: center; font-size: 10px; font-weight: 800; color: #fff; letter-spacing: .04em; font-family: var(--mono); }
 .ficon.pdf { background: #C9453B; } .ficon.pptx { background: #D2672C; } .ficon.docx { background: #2F62C2; } .ficon.txt, .ficon.md { background: #6B7280; } .ficon.img { background: #3D8B6D; }

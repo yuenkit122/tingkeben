@@ -34,8 +34,8 @@ function md(text) {
 
 function modal(html, onMount) {
   const m = $('#modal'), box = $('#modal-box');
-  box.innerHTML = html; m.hidden = false;
-  const close = () => { m.hidden = true; box.innerHTML = ''; };
+  box.innerHTML = html; m.hidden = false; delete box.dataset.sync;
+  const close = () => { m.hidden = true; box.innerHTML = ''; delete box.dataset.sync; };
   m.onclick = e => { if (e.target === m) close(); };
   $$('[data-close]', box).forEach(b => b.onclick = close);
   onMount && onMount(box, close);
@@ -104,8 +104,9 @@ async function renderHome() {
   view.innerHTML = `
     <div class="head">
       <div><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记</div></div>
-      <div class="row"><a class="btn" href="#live">${ICON.mic}开始录音</a><button class="btn primary" id="new-course">＋ 新建课程</button></div>
+      <div class="row"><a class="btn" href="#live">${ICON.mic}开始录音</a><button class="btn" id="new-course">＋ 新建课程</button><button class="btn primary" id="sync-moodle">${ICON.up}从 Moodle 同步</button></div>
     </div>
+    ${!State.courses.length ? `<div class="banner"><div class="grow"><strong>第一次用？</strong><br><span style="font-size:14px;color:var(--muted)">点「从 Moodle 同步」，4 门课和每周的课件会自动导进来。需要在 Mac 的 Chrome 里装「听课本助手」扩展。</span></div><button class="btn primary small" id="sync-moodle-2">从 Moodle 同步</button></div>` : ''}
     ${!k.gemini || !k.notes ? `<div class="banner"><div class="grow"><strong>先填 API key</strong><br><span style="font-size:14px;color:var(--muted)">${!k.notes ? '生成笔记需要 DeepSeek 的 key' : ''}${!k.notes && !k.gemini ? '；' : ''}${!k.gemini ? '实时转写翻译需要 Gemini 的 key' : ''}。key 只存在这台设备上。</span></div><a class="btn primary small" href="#settings">去设置</a></div>` : ''}
     <div class="grid">
       ${State.courses.map((c, i) => `
@@ -119,6 +120,8 @@ async function renderHome() {
     </div>
     ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
   $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
+  $('#sync-moodle').onclick = () => syncModal();
+  const s2 = $('#sync-moodle-2'); if (s2) s2.onclick = () => syncModal();
 }
 function examCountdown(d) {
   const days = Math.ceil((new Date(d + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
@@ -177,7 +180,7 @@ async function renderCourse(id, tab) {
       <a class="crumb" href="#home">← 课程主页</a>
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1>${esc(course.name)}</h1><div class="meta">${course.examDate ? `考试 ${esc(course.examDate)} · ${examCountdown(course.examDate)}` : '还没设考试日期'}</div></div>
-        <div class="row"><button class="btn" id="c-edit">课程设置</button><a class="btn" href="#live-${id}">${ICON.mic}录这门课</a><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
+        <div class="row"><button class="btn" id="c-edit">课程设置</button><button class="btn" id="c-sync">${ICON.up}同步 Moodle</button><a class="btn" href="#live-${id}">${ICON.mic}录这门课</a><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
       </div>
     </div>
     <div class="tabs">
@@ -188,6 +191,7 @@ async function renderCourse(id, tab) {
     <div id="tab-body"></div>`;
   $$('.tabs button').forEach(b => b.onclick = () => { history.replaceState(null, '', '#course-' + id + '~' + b.dataset.tab); renderCourse(id, b.dataset.tab); });
   $('#c-edit').onclick = () => courseModal(course);
+  $('#c-sync').onclick = () => syncModal(course.id);
   $('#c-gen').onclick = () => generateModal({ course, preselect: State.selected || [] });
   const body = $('#tab-body');
   if (tab === 'files') renderFilesTab(course, body);
@@ -217,7 +221,7 @@ function fileStatus(f) {
 
 async function renderFilesTab(course, body) {
   State.selected = State.selected || [];
-  const files = (await DB.byIndex('files', 'courseId', course.id)).sort((a, b) => (a.folder || '').localeCompare(b.folder || '') || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const files = (await DB.byIndex('files', 'courseId', course.id)).sort((a, b) => (a.folder || '').localeCompare(b.folder || '', undefined, { numeric: true }) || (a.addedAt - b.addedAt) || a.name.localeCompare(b.name, undefined, { numeric: true }));
   State.selected = State.selected.filter(id => files.some(f => f.id === id));
   body.innerHTML = `
     <label class="drop" id="drop">
@@ -227,12 +231,13 @@ async function renderFilesTab(course, body) {
       <span class="btn primary">${ICON.up}选择文件</span>
       <input type="file" id="file-in" multiple hidden accept=".pdf,.pptx,.docx,.txt,.md,.zip,.png,.jpg,.jpeg,.webp">
     </label>
-    ${files.length ? `<div class="card files">${files.map(f => `
+    ${files.length ? `<div class="card files">${files.map((f, i) => `
+      ${f.folder && f.folder !== (files[i - 1] || {}).folder ? `<div class="fgroup">${esc(f.folder)}</div>` : ''}
       <div class="file" data-id="${f.id}">
         <input type="checkbox" aria-label="选择 ${esc(f.name)}" ${State.selected.includes(f.id) ? 'checked' : ''} ${f.status !== 'ready' ? 'disabled' : ''}>
         ${fileIcon(f.name)}
         <div style="min-width:0"><div class="name">${esc(f.name)}</div>
-          <div class="sub">${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.folder ? `<span>📁 ${esc(f.folder)}</span>` : ''}</div></div>
+          <div class="sub">${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.moodleTitle && f.moodleTitle !== f.name.replace(/\.[^.]+$/, '') ? `<span>Moodle：${esc(f.moodleTitle)}</span>` : ''}</div></div>
         <div class="acts">
           ${f.status === 'scanned' || f.status === 'error' ? '<button class="btn small" data-act="ocr">用 Gemini 识别</button>' : ''}
           ${f.status === 'ready' ? '<button class="btn small ghost" data-act="view">看文字</button>' : ''}
@@ -278,12 +283,19 @@ async function importFiles(course, list) {
     else toast('跳过不支持的文件：' + f.name);
   }
   if (!items.length) { toast('没有找到能读取的课件'); return; }
+  toast(`导入 ${items.length} 个文件，正在读取文字…`);
+  const recs = await ingest(course, items);
+  const scanned = recs.filter(r => r.status === 'scanned').length;
+  toast(scanned ? `读取完成。${scanned} 个是扫描件，点「用 Gemini 识别」读出文字。` : '课件读取完成，勾选后就能生成笔记', 4000);
+}
+
+/* 存文件并提取文字；items: [{file, folder, meta}] */
+async function ingest(course, items) {
   const recs = [];
-  for (const { file, folder } of items) {
-    const rec = { id: DB.uid('f_'), courseId: course.id, name: file.name, folder, size: file.size, type: file.type || Extract.MIME[Extract.ext(file.name)] || '', blob: file, text: '', pages: null, status: 'extracting', addedAt: Date.now() };
+  for (const { file, folder, meta } of items) {
+    const rec = Object.assign({ id: DB.uid('f_'), courseId: course.id, name: file.name, folder, size: file.size, type: file.type || Extract.MIME[Extract.ext(file.name)] || '', blob: file, text: '', pages: null, status: 'extracting', addedAt: Date.now() }, meta || {});
     await DB.put('files', rec); recs.push(rec);
   }
-  toast(`导入 ${recs.length} 个文件，正在读取文字…`);
   refreshIfOn(course.id);
   for (const rec of recs) {
     try {
@@ -293,8 +305,147 @@ async function importFiles(course, list) {
     await DB.put('files', rec);
     refreshIfOn(course.id);
   }
-  const scanned = recs.filter(r => r.status === 'scanned').length;
-  toast(scanned ? `读取完成。${scanned} 个是扫描件，点「用 Gemini 识别」读出文字。` : '课件读取完成，勾选后就能生成笔记', 4000);
+  return recs;
+}
+
+/* ---------- 从 Moodle 同步（需要 Chrome 扩展「听课本助手」） ---------- */
+const Ext = {
+  version: () => document.documentElement.dataset.tkbExt || null,
+  call(cmd, args, timeout = 180000) {
+    return new Promise((resolve, reject) => {
+      const id = DB.uid('x_');
+      const t = setTimeout(() => { window.removeEventListener('message', h); reject({ code: 'timeout', message: '扩展太久没回应，重新加载页面再试' }); }, timeout);
+      const h = e => {
+        if (e.source !== window || !e.data || e.data.tkbFrom !== 'ext' || e.data.id !== id) return;
+        window.removeEventListener('message', h); clearTimeout(t);
+        e.data.ok ? resolve(e.data.data) : reject(e.data.error || { message: '扩展出错' });
+      };
+      window.addEventListener('message', h);
+      window.postMessage({ tkbTo: 'ext', id, cmd, args }, location.origin);
+    });
+  },
+};
+const MOODLE = 'https://learning.monash.edu';
+const shortName = n => n.replace(/\s*-\s*(January|February|March|April|May|June|July|August|September|October|November|December)\b.*$/i, '').trim();
+const b64ToBlob = (b64, type) => { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new Blob([u], { type }); };
+State.sync = null;
+
+function extGuide() {
+  const chrome = /Chrome\//.test(navigator.userAgent) && !/Edg\//.test(navigator.userAgent);
+  modal(`
+    <h2>先装「听课本助手」</h2>
+    <p style="margin:0;color:var(--muted)">自动同步 Moodle 要靠这个 Chrome 扩展，它用你自己的 Moodle 登录读取课件，只读不改。${chrome ? '' : '<br><strong style="color:var(--warn)">你现在用的不是 Chrome。同步只能在 Mac 的 Chrome 里做，iPad 用不了。</strong>'}</p>
+    <ol style="margin:0;padding-left:20px;line-height:1.9">
+      <li>把聊天里发给你的 <b>tingkeben-helper.zip</b> 解压</li>
+      <li>Chrome 地址栏输入 <code>chrome://extensions</code> 回车</li>
+      <li>打开右上角「开发者模式」</li>
+      <li>点「加载已解压的扩展程序」，选解压出来的 <b>tingkeben-helper</b> 文件夹</li>
+      <li>回到这里刷新页面</li>
+    </ol>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>知道了</button><button class="btn primary" id="g-reload">已装好，刷新</button></div>`, box => { $('#g-reload', box).onclick = () => location.reload(); });
+}
+
+async function syncModal(onlyCourseId) {
+  if (State.sync) { showSyncProgress(true); return; }
+  if (!Ext.version()) { extGuide(); return; }
+  const close = modal(`<h2>从 Moodle 同步</h2><div class="thinking"><span class="spin"></span>正在读取你的 Moodle 课程…</div>`);
+  let courses;
+  try { courses = await Ext.call('listCourses', {}, 60000); }
+  catch (e) {
+    close();
+    if (e.code === 'login') modal(`<h2>先登录 Moodle</h2><p style="margin:0">${esc(e.message)}</p><div class="row" style="justify-content:flex-end"><a class="btn" href="${MOODLE}/my/" target="_blank" rel="noopener">打开 Moodle 登录</a><button class="btn primary" data-close>登好了再点同步</button></div>`);
+    else toast(e.message || '读取 Moodle 失败', 6000);
+    return;
+  }
+  const local = await DB.all('courses');
+  modal(`
+    <h2>从 Moodle 同步</h2>
+    <p style="margin:0;color:var(--muted);font-size:14px">会自动建好课程、按周归类，已经导入过的文件不会重复下载。</p>
+    <div class="checklist">${courses.map(c => `<label><input type="checkbox" value="${c.id}" ${!onlyCourseId || local.find(l => l.moodleId === c.id && l.id === onlyCourseId) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
+    <label class="switch"><input type="checkbox" id="y-ebook">也同步 E-Book 课本章节（文件大、下载慢）</label>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="y-go">开始同步</button></div>`, (box, close2) => {
+    $('#y-go', box).onclick = () => {
+      const ids = $$('.checklist input:checked', box).map(i => Number(i.value));
+      if (!ids.length) { toast('至少选一门课'); return; }
+      const ebook = $('#y-ebook', box).checked;
+      close2();
+      runSync(courses.filter(c => ids.includes(c.id)), ebook);
+    };
+  });
+}
+
+async function runSync(courses, includeEbook) {
+  const S = State.sync = { total: 0, done: 0, added: 0, skipped: [], failed: [], current: '正在列出文件…', finished: false };
+  showSyncProgress(true);
+  try {
+    // 1. 对应本地课程（没有就建）
+    const plan = [];
+    for (const mc of courses) {
+      let local = (await DB.all('courses')).find(c => c.moodleId === mc.id) || State.courses.find(c => c.code && c.code === courseCode(mc.name) && !c.moodleId);
+      if (!local) {
+        local = { id: DB.uid('c_'), name: shortName(mc.name), code: courseCode(mc.name), examDate: '', glossary: [], createdAt: Date.now(), color: COLORS[State.courses.length % COLORS.length] };
+      }
+      local.moodleId = mc.id;
+      await DB.put('courses', local);
+      await loadCourses();
+      S.current = '正在列出 ' + local.name + ' 的文件…'; showSyncProgress();
+      const files = await Ext.call('listFiles', { courseId: mc.id }, 60000);
+      const have = new Set((await DB.byIndex('files', 'courseId', local.id)).map(f => f.moodleCmid).filter(Boolean));
+      const skip = new Set(local.moodleSkip || []);
+      const todo = files.filter(f => !have.has(f.cmid) && !skip.has(f.cmid) && (includeEbook || !/e-?book/i.test(f.name)));
+      plan.push({ local, todo });
+      S.total += todo.length;
+    }
+    showSyncProgress();
+    // 2. 一个一个下载
+    for (const { local, todo } of plan) {
+      for (const f of todo) {
+        S.current = `${local.name} · ${f.name}`; showSyncProgress();
+        try {
+          const got = await Ext.call('fetchFile', { cmid: f.cmid, module: f.module });
+          const items = [];
+          for (const g of got) {
+            if (g.error) { S.failed.push(`${f.name}：${g.error}`); continue; }
+            if (!Extract.isSupported(g.name)) { S.skipped.push(g.name); continue; }
+            const file = new File([b64ToBlob(g.b64, g.mime || Extract.MIME[Extract.ext(g.name)] || '')], g.name, { type: g.mime || '' });
+            items.push({ file, folder: f.folder, meta: { moodleCmid: f.cmid, moodleCourseId: local.moodleId, moodleTitle: f.name, moodleRevision: g.revision } });
+          }
+          if (items.length) { await ingest(local, items); S.added += items.length; }
+          else if (!got.length) S.failed.push(`${f.name}：没有文件`);
+          else if (got.every(g => !g.error)) { local.moodleSkip = [...(local.moodleSkip || []), f.cmid]; await DB.put('courses', local); } // 全是不支持的类型，下次不再检查
+        } catch (e) {
+          if (e.code === 'login' || e.code === 'busy') { S.failed.push(e.message); throw e; }
+          S.failed.push(`${f.name}：${e.message}`);
+        }
+        S.done++; showSyncProgress();
+      }
+    }
+  } catch (e) {
+    if (!S.failed.includes(e.message)) S.failed.push(e.message || String(e));
+  }
+  S.finished = true; S.current = '';
+  await loadCourses();
+  showSyncProgress(true);
+  toast(`同步完成：新增 ${S.added} 个课件${S.skipped.length ? `，${S.skipped.length} 个类型不支持` : ''}${S.failed.length ? `，${S.failed.length} 个失败` : ''}`, 6000);
+  State.sync = null;
+  if (location.hash.slice(1) === 'home' || !location.hash) route();
+}
+
+function showSyncProgress(force) {
+  const S = State.sync; if (!S) return;
+  const m = $('#modal'), box = $('#modal-box');
+  const open = !m.hidden && box.dataset.sync;
+  if (!open && !force) return;
+  const html = `
+    <h2>${S.finished ? '同步完成' : '正在同步 Moodle'}</h2>
+    <div class="level" style="width:100%;height:8px"><i style="width:${S.total ? Math.round(S.done / S.total * 100) : 3}%"></i></div>
+    <div style="font-size:14px">${S.finished ? `新增 <b>${S.added}</b> 个课件` : `${S.done} / ${S.total || '…'} · ${esc(S.current)}`}</div>
+    ${S.skipped.length ? `<details><summary style="font-size:13px;color:var(--muted)">${S.skipped.length} 个文件类型不支持，已跳过</summary><div class="hint">${S.skipped.map(esc).join('<br>')}</div></details>` : ''}
+    ${S.failed.length ? `<details ${S.finished ? 'open' : ''}><summary style="font-size:13px;color:var(--danger)">${S.failed.length} 个没同步成功</summary><div class="hint">${S.failed.map(esc).join('<br>')}</div></details>` : ''}
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>${S.finished ? '关闭' : '放到后台继续'}</button></div>`;
+  if (!open) modal(html); else box.innerHTML = html;
+  box.dataset.sync = '1';
+  $$('[data-close]', box).forEach(b => b.onclick = () => { m.hidden = true; box.innerHTML = ''; delete box.dataset.sync; });
 }
 function refreshIfOn(courseId) {
   const h = location.hash.slice(1);
