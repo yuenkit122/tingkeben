@@ -505,47 +505,50 @@ ${extra ? '学生的额外要求：' + extra : ''}
   const STUDY_SYSTEM = `你是给英语不好的中国留学生（Monash 马来西亚分校商科 Diploma）做复习材料的助教。只根据给你的笔记和课件出题，不要编材料里没有的内容。
 中英分开：用简体中文写，专业术语写成「中文（English）」，英文原词放在括号里。考试是英文的，所以测验题题干后面附上关键英文原词。
 只输出一个 JSON 对象，不要任何多余文字。`;
-  function studyPrompt({ title, markdown, sources }) {
-    return `给这份笔记生成复习材料，JSON 格式：
+  /* parts：要哪几样，['points','cards','quiz'] 的任意组合，只出要的那几样，省 token */
+  const STUDY_PARTS = {
+    points: { name: '重点知识点', schema: '"points": [ { "id": "p1", "title": "知识点名称，写成 中文（English）", "items": ["要点 1：一句中文，术语写成 中文（English）", "要点 2", "要点 3"], "page": "来源页码，比如 第5页；不知道就空字符串" } ]', rule: '- points 6-12 个知识点，每个 2-4 条要点（短句，能直接背），覆盖整份材料最重要、最可能考的内容，按学习顺序排。' },
+    cards: { name: '记忆卡片', schema: '"cards": [ { "q": "正面：一个问题（中文，可带英文术语）", "a": "背面：简短答案（1-3 句）", "point": "对应的知识点 id" } ]', rule: '- cards 15-25 张，定义、公式、区别、例子都要有；计算类写成「已知…求…」。' },
+    quiz: { name: '测验题', schema: '"quiz": [ { "type": "single", "q": "题目", "options": ["A 选项","B 选项","C 选项","D 选项"], "answer": 0, "explain": "为什么对、其他为什么错（2-3 句）", "point": "知识点 id" } ]', rule: '- quiz 10-15 道单选题，四个选项，干扰项要像真的；至少 1/3 是计算或情景应用题（如果材料有计算）。answer 是正确选项的下标（0-3），正确答案的位置要打乱，别总是同一个。\n- options 里不要写 A. B. 这样的字母前缀；explain 里也不要用字母指代选项，直接说内容（选项顺序会被打乱）。' },
+  };
+  function studyPrompt({ title, markdown, sources, parts = ['points', 'cards', 'quiz'], points: known }) {
+    const want = Object.keys(STUDY_PARTS).filter(k => parts.includes(k));
+    const linkable = want.includes('points') || (known && known.length);
+    const pointRule = (want.includes('cards') || want.includes('quiz'))
+      ? (linkable ? '- 每张卡片、每道题都必须填 point，指向一个知识点 id。' : '- 没有知识点列表，point 填空字符串。') : '';
+    return `给这份材料生成复习材料，只要：${want.map(k => STUDY_PARTS[k].name).join('、')}。JSON 格式：
 {
-  "points": [ { "id": "p1", "title": "知识点名称，写成 中文（English）", "items": ["要点 1：一句中文，术语写成 中文（English）", "要点 2", "要点 3"], "page": "来源页码，比如 第5页；不知道就空字符串" } ],
-  "cards": [ { "q": "正面：一个问题（中文，可带英文术语）", "a": "背面：简短答案（1-3 句）", "point": "对应的知识点 id" } ],
-  "quiz": [ { "type": "single", "q": "题目", "options": ["A 选项","B 选项","C 选项","D 选项"], "answer": 0, "explain": "为什么对、其他为什么错（2-3 句）", "point": "知识点 id" } ]
+  ${want.map(k => STUDY_PARTS[k].schema).join(',\n  ')}
 }
 要求：
-- points 6-12 个知识点，每个 2-4 条要点（短句，能直接背），覆盖整份材料最重要、最可能考的内容，按学习顺序排。
-- cards 15-25 张，定义、公式、区别、例子都要有；计算类写成「已知…求…」。
-- quiz 10-15 道单选题，四个选项，干扰项要像真的；至少 1/3 是计算或情景应用题（如果材料有计算）。answer 是正确选项的下标（0-3），正确答案的位置要打乱，别总是同一个。
-- 每张卡片、每道题都必须填 point，指向上面的一个知识点 id。
-- options 里不要写 A. B. 这样的字母前缀；explain 里也不要用字母指代选项，直接说内容（选项顺序会被打乱）。
-
-笔记标题：${title}
-
-<笔记>
-${markdown}
-</笔记>
-${sources ? `\n<课件原文（节选）>\n${sources}\n</课件原文>` : ''}`;
+${want.map(k => STUDY_PARTS[k].rule).join('\n')}
+${pointRule}
+${!want.includes('points') && known && known.length ? `\n已有的知识点（point 用这些 id）：\n${known.map(p => `${p.id}: ${p.title}`).join('\n')}\n` : ''}
+标题：${title}
+${markdown ? `\n<笔记>\n${markdown}\n</笔记>` : ''}
+${sources ? `\n<课件原文${markdown ? '（节选）' : ''}>\n${sources}\n</课件原文>` : ''}`;
   }
-  async function studyPack({ title, markdown, sources, signal, onText }) {
+  async function studyPack({ title, markdown, sources, signal, onText, parts = ['points', 'cards', 'quiz'], points: known }) {
     let j;
+    const want = Object.keys(STUDY_PARTS).filter(k => parts.includes(k));
+    const maxTokens = 2000 + want.reduce((n, k) => n + ({ points: 4500, cards: 4500, quiz: 6000 })[k], 0);
     for (let attempt = 0; ; attempt++) {
-      const text = await deepseekStream({ system: STUDY_SYSTEM, user: studyPrompt({ title, markdown, sources }), signal, onText, thinking: false, json: true, maxTokens: 16000, purpose: 'study' });
+      const text = await deepseekStream({ system: STUDY_SYSTEM, user: studyPrompt({ title, markdown, sources, parts: want, points: known }), signal, onText, thinking: false, json: true, maxTokens, purpose: 'study' });
       try { j = parseJSON(text); break; } catch (e) { if (attempt >= 1) throw e; } // 偶尔格式坏掉，自动再来一次
     }
-    const points = (j.points || []).filter(p => p && p.title).map((p, i) => ({ id: String(p.id || 'p' + (i + 1)), title: String(p.title), items: (Array.isArray(p.items) ? p.items : [p.detail]).filter(Boolean).map(String), page: String(p.page || '') }));
+    const out = { at: Date.now() };
+    let points = known || [];
+    if (want.includes('points')) points = out.points = (j.points || []).filter(p => p && p.title).map((p, i) => ({ id: String(p.id || 'p' + (i + 1)), title: String(p.title), items: (Array.isArray(p.items) ? p.items : [p.detail]).filter(Boolean).map(String), page: String(p.page || '') }));
     const ids = new Set(points.map(p => p.id));
     const fix = id => ids.has(String(id)) ? String(id) : '';
-    return {
-      points,
-      cards: (j.cards || []).filter(c => c && c.q && c.a).map(c => ({ q: String(c.q), a: String(c.a), point: fix(c.point) })),
-      quiz: (j.quiz || []).filter(q => q && q.q && Array.isArray(q.options) && q.options.length >= 2).map(q => {
-        // 打乱选项顺序（模型爱把正确答案放在 B）；去掉选项开头自带的 "A." 之类
-        const ans = Math.max(0, Math.min(q.options.length - 1, Number(q.answer) || 0));
-        const opts = q.options.map((o, k) => ({ t: String(o).replace(/^\s*[A-F][.、)．]\s*/, ''), ok: k === ans })).sort(() => Math.random() - .5);
-        return { q: String(q.q), options: opts.map(o => o.t), answer: opts.findIndex(o => o.ok), explain: String(q.explain || ''), point: fix(q.point) };
-      }),
-      at: Date.now(),
-    };
+    if (want.includes('cards')) out.cards = (j.cards || []).filter(c => c && c.q && c.a).map(c => ({ q: String(c.q), a: String(c.a), point: fix(c.point) }));
+    if (want.includes('quiz')) out.quiz = (j.quiz || []).filter(q => q && q.q && Array.isArray(q.options) && q.options.length >= 2).map(q => {
+      // 打乱选项顺序（模型爱把正确答案放在 B）；去掉选项开头自带的 "A." 之类
+      const ans = Math.max(0, Math.min(q.options.length - 1, Number(q.answer) || 0));
+      const opts = q.options.map((o, k) => ({ t: String(o).replace(/^\s*[A-F][.、)．]\s*/, ''), ok: k === ans })).sort(() => Math.random() - .5);
+      return { q: String(q.q), options: opts.map(o => o.t), answer: opts.findIndex(o => o.ok), explain: String(q.explain || ''), point: fix(q.point) };
+    });
+    return out;
   }
   function parseJSON(text) {
     const t = String(text).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();

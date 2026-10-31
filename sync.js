@@ -83,83 +83,144 @@ const Sync = (() => {
     return Object.assign(rest, { hasBlob: !!blob || !!r.hasBlob });
   }
 
-  let running = null, timer = null, lastErr = '';
+  let running = null, timer = null, lastErr = '', nextAt = 0, retryN = 0, pending = 0, lastResult = null, counts = null, remoteItems = null;
+  let prog = null; // 正在同步时：{ done, total, label, bytesDone, bytesTotal }
   const listeners = new Set();
-  const status = () => ({ ready: ready(), mode: mode(), running: !!running, at: Number(localStorage.getItem(LAST) || 0), err: lastErr });
+  const AUTO = 'tingkeben.autoSync';
+  const auto = () => localStorage.getItem(AUTO) !== '0';
+  function setAuto(on) { try { localStorage.setItem(AUTO, on ? '1' : '0'); } catch (e) {} if (on) schedule(1000); else { clearTimeout(timer); nextAt = 0; } emit(); }
+  const status = () => ({ ready: ready(), mode: mode(), running: !!running, at: Number(localStorage.getItem(LAST) || 0), err: lastErr, auto: auto(), nextAt, pending, counts, prog, lastResult, online: navigator.onLine !== false });
   const emit = () => listeners.forEach(fn => { try { fn(status()); } catch (e) {} });
 
-  function schedule(ms = 15000) {
-    if (!ready()) return;
-    clearTimeout(timer); timer = setTimeout(() => syncNow({ silent: true }), ms);
+  /* 每类数据：一共几条、已同步几条、没同步几条（要上传 / 要下载）
+     有云端索引时按索引精确比较；还没拿到索引时按「上次同步之后改过的」估算 */
+  let countTimer = null;
+  function recount() {
+    clearTimeout(countTimer);
+    countTimer = setTimeout(async () => {
+      const last = Number(localStorage.getItem(LAST) || 0), tb = tombs(), items = remoteItems;
+      const by = {}, sum = { total: 0, synced: 0, up: 0, down: 0, del: 0, blobs: 0, blobsLocal: 0, blobsCloud: 0 };
+      for (const st of STORES) {
+        const locals = await DB.all(st), ids = new Set(locals.map(r => r.id));
+        const c = { total: 0, synced: 0, up: 0, down: 0 };
+        for (const r of locals) {
+          const rm = items && items[st + '/' + r.id];
+          const needUp = items ? (!rm || rm.u < stamp(r)) : stamp(r) > last;
+          const needDown = !!(items && rm && !rm.d && rm.u > stamp(r));
+          c.total++; if (needUp) c.up++; else if (needDown) c.down++; else c.synced++;
+          if (st === 'files') { sum.blobs++; if (r.blob) sum.blobsLocal++; if (rm && rm.b) sum.blobsCloud++; }
+        }
+        if (items) for (const [key, rm] of Object.entries(items)) {
+          if (!key.startsWith(st + '/') || rm.d) continue;
+          const id = key.slice(st.length + 1);
+          if (!ids.has(id) && !tb[key]) { c.total++; c.down++; }
+        }
+        by[st] = c; sum.total += c.total; sum.synced += c.synced; sum.up += c.up; sum.down += c.down;
+      }
+      sum.del = Object.keys(tb).length;
+      counts = { by, ...sum, exact: !!items };
+      pending = sum.up + sum.del;
+      emit();
+    }, 250);
+  }
+  // 打开同步面板时看一眼云端索引（只读一个小文件），「要下载几条」才准
+  async function peek() {
+    if (!ready() || running) return;
+    try { const r = await getJSON('tingkeben/index.json'); remoteItems = (r && r.items) || {}; recount(); } catch (e) {}
   }
 
-  async function syncNow({ silent = false, onProgress } = {}) {
+  function schedule(ms = 10000) {
+    recount();
+    if (!ready() || !auto()) return;
+    clearTimeout(timer); nextAt = Date.now() + ms; emit();
+    timer = setTimeout(() => { nextAt = 0; syncNow({ silent: true, auto: true }); }, ms);
+  }
+
+  const size = v => v == null ? 0 : v instanceof Blob ? v.size : typeof v === 'string' ? v.length : 0;
+
+  async function syncNow({ silent = false, onProgress, auto: isAuto = false } = {}) {
     if (!ready()) { if (!silent) toast('先在「设置 → 云服务」登录'); return; }
     if (running) return running;
+    if (navigator.onLine === false) { lastErr = '没有网络，联网后会自动同步'; emit(); return; }
+    clearTimeout(timer); nextAt = 0;
     running = (async () => {
-      emit();
-      const prog = t => { onProgress && onProgress(t); };
+      const t0 = Date.now();
+      prog = { done: 0, total: 0, label: '检查云端…', bytesDone: 0, bytesTotal: 0 }; emit();
+      const tick = (label, bytes = 0) => { prog.done++; prog.label = label; prog.bytesDone += bytes; onProgress && onProgress(`${prog.done} / ${prog.total} · ${label}`); emit(); };
       try {
         if (cloud()) await pullVault().catch(() => {});
         const remote = (await getJSON('tingkeben/index.json')) || { v: 1, items: {} };
         const items = remote.items || {};
         const tb = tombs();
-        let up = 0, down = 0, del = 0;
+
+        // ① 先列出要做的事，才知道总共多少、进度条才准
+        const ops = [];
         for (const store of STORES) {
           const locals = await DB.all(store);
           const byId = new Map(locals.map(r => [r.id, r]));
-          // 1. 本机比云端新 → 上传
           for (const r of locals) {
             const key = store + '/' + r.id, rm = items[key];
-            if (rm && !rm.d && rm.u >= stamp(r)) continue;
-            if (rm && rm.d && rm.u >= stamp(r)) continue; // 另一台设备删了，下面处理
-            prog(`上传 ${store} ${++up}`);
-            await putJSON(`tingkeben/db/${key}.json`, pack(store, r));
-            items[key] = { u: stamp(r), b: store === 'files' ? !!(r.blob || (rm && rm.b)) : undefined };
-            if (store === 'files' && r.blob && !(rm && rm.b)) {
-              prog(`上传课件 ${r.name}`);
-              await req('PUT', `tingkeben/blob/${r.id}`, { body: r.blob, headers: { 'content-type': r.type || 'application/octet-stream' } });
-              items[key].b = true;
-            }
+            if (rm && rm.u >= stamp(r)) continue;
+            ops.push({ kind: 'up', store, key, r, rm });
+            if (store === 'files' && r.blob && !(rm && rm.b)) ops.push({ kind: 'blob', store, key, r, bytes: r.blob.size });
           }
-          // 2. 云端比本机新 → 下载；云端已删 → 本机也删
           for (const [key, rm] of Object.entries(items)) {
             if (!key.startsWith(store + '/')) continue;
             const id = key.slice(store.length + 1), loc = byId.get(id);
-            if (rm.d) {
-              if (loc && rm.u >= stamp(loc)) { await DB.del(store, id, { fromSync: true }); if (store === 'sessions') await DB.delByIndex('audio', 'sessionId', id); del++; }
-              continue;
-            }
-            if (tb[key] && tb[key] >= rm.u) continue; // 本机删了，下面处理
+            if (rm.d) { if (loc && rm.u >= stamp(loc)) ops.push({ kind: 'delLocal', store, key, id }); continue; }
+            if (tb[key] && tb[key] >= rm.u) continue;
             if (loc && stamp(loc) >= rm.u) continue;
-            prog(`下载 ${store} ${++down}`);
-            const r = await getJSON(`tingkeben/db/${key}.json`);
-            if (!r) continue;
-            if (store === 'files' && loc && loc.blob) r.blob = loc.blob; // 本机已有原文件就保留
-            await DB.put(store, r, { fromSync: true });
+            ops.push({ kind: 'down', store, key, loc });
           }
         }
-        // 3. 本机删掉的 → 云端标记删除
-        for (const [key, t] of Object.entries(tb)) {
-          const rm = items[key];
-          if (!rm || (!rm.d && t >= rm.u)) {
-            if (rm) { await req('DELETE', `tingkeben/db/${key}.json`).catch(() => {}); if (rm.b) await req('DELETE', `tingkeben/blob/${key.split('/')[1]}`).catch(() => {}); }
-            items[key] = { u: t, d: 1 };
+        for (const [key, t] of Object.entries(tb)) { const rm = items[key]; if (!rm || (!rm.d && t >= rm.u)) ops.push({ kind: 'delRemote', key, t, rm }); }
+        prog.total = ops.length; prog.bytesTotal = ops.reduce((a, o) => a + (o.bytes || 0), 0);
+        prog.label = ops.length ? '开始同步' : '已经是最新'; emit();
+
+        // ② 一件一件做
+        const NAMES = { courses: '课程', files: '课件', notes: '笔记', sessions: '录音转写' };
+        const nameOf = (store, r) => (r && (r.name || r.title)) || NAMES[store];
+        let up = 0, down = 0, del = 0;
+        for (const o of ops) {
+          if (o.kind === 'up') {
+            await putJSON(`tingkeben/db/${o.key}.json`, pack(o.store, o.r));
+            items[o.key] = { u: stamp(o.r), b: o.store === 'files' ? !!(o.rm && o.rm.b) : undefined };
+            up++; tick(`上传${NAMES[o.store]} · ${nameOf(o.store, o.r)}`);
+          } else if (o.kind === 'blob') {
+            await req('PUT', `tingkeben/blob/${o.r.id}`, { body: o.r.blob, headers: { 'content-type': o.r.type || 'application/octet-stream' } });
+            items[o.key].b = true;
+            tick(`上传课件原文件 · ${o.r.name}`, o.bytes);
+          } else if (o.kind === 'down') {
+            const r = await getJSON(`tingkeben/db/${o.key}.json`);
+            if (r) { if (o.store === 'files' && o.loc && o.loc.blob) r.blob = o.loc.blob; await DB.put(o.store, r, { fromSync: true }); down++; }
+            tick(`下载${NAMES[o.store]} · ${nameOf(o.store, r)}`);
+          } else if (o.kind === 'delLocal') {
+            await DB.del(o.store, o.id, { fromSync: true }); if (o.store === 'sessions') await DB.delByIndex('audio', 'sessionId', o.id); del++;
+            tick(`删除${NAMES[o.store]}（另一台设备删的）`);
+          } else if (o.kind === 'delRemote') {
+            if (o.rm) { await req('DELETE', `tingkeben/db/${o.key}.json`).catch(() => {}); if (o.rm.b) await req('DELETE', `tingkeben/blob/${o.key.split('/')[1]}`).catch(() => {}); }
+            items[o.key] = { u: o.t, d: 1 };
+            tick('删除云端的旧数据');
           }
         }
         try { localStorage.setItem(TOMB, '{}'); } catch (e) {}
-        remote.items = items; remote.at = Date.now();
-        await putJSON('tingkeben/index.json', remote);
-        try { localStorage.setItem(LAST, String(Date.now())); } catch (e) {}
-        lastErr = '';
+        if (ops.length) { remote.items = items; remote.at = Date.now(); await putJSON('tingkeben/index.json', remote); }
+        remoteItems = items;
+        try { localStorage.setItem(LAST, String(t0)); } catch (e) {}
+        lastErr = ''; retryN = 0; lastResult = { up, down, del, at: Date.now() };
         if (down || del) { await loadCourses(); const h = location.hash.slice(1); if (!h.startsWith('desk-') && !State.live && !/~board/.test(h)) route(); }
-        if (!silent) toast(`同步完成：上传 ${up}、下载 ${down}${del ? '、删除 ' + del : ''}`);
+        if (!silent) toast(ops.length ? `同步完成：上传 ${up}、下载 ${down}${del ? '、删除 ' + del : ''}` : '已经是最新，不用同步');
         return { up, down, del };
       } catch (e) {
         lastErr = e.message;
         if (!silent) toast(e.message, 7000);
+        // 出错自动重试：30 秒、1 分钟、2 分钟、5 分钟…
+        if (auto() && !/登录过期/.test(e.message)) { const wait = [30, 60, 120, 300, 600][Math.min(retryN++, 4)] * 1000; clearTimeout(timer); nextAt = Date.now() + wait; timer = setTimeout(() => { nextAt = 0; syncNow({ silent: true, auto: true }); }, wait); }
         throw e;
-      } finally { running = null; emit(); }
+      } finally {
+        running = null; prog = null; recount(); emit();
+        if (!lastErr) for (const st of STORES) { if ((await DB.all(st)).some(r => stamp(r) > t0)) { schedule(3000); break; } }
+      }
     })();
     return running.catch(() => null);
   }
@@ -203,7 +264,7 @@ const Sync = (() => {
   }
 
   /* ---------- 听课本云服务：密码登录 + 云端保管 API key ---------- */
-  const VAULT_KEYS = ['geminiKey', 'deepseekKey', 'groqKey', 'cerebrasKey', 'mistralKey', 'deepseekModel', 'groqModel', 'groqModel2', 'liveLanguage', 'liveMode', 'translatePace', 'draftMode', 'translateProvider', 'poolFallback', 'maxWaitSec', 'autoStudy', 'dsPriceIn', 'dsPriceHit', 'dsPriceOut'];
+  const VAULT_KEYS = ['geminiKey', 'deepseekKey', 'groqKey', 'cerebrasKey', 'mistralKey', 'deepseekModel', 'groqModel', 'groqModel2', 'liveLanguage', 'liveMode', 'translatePace', 'draftMode', 'translateProvider', 'poolFallback', 'maxWaitSec', 'dsPriceIn', 'dsPriceHit', 'dsPriceOut'];
   async function login(url, password) {
     url = String(url || '').trim().replace(/\/+$/, '');
     if (!/^https:\/\//.test(url) && !/^http:\/\/localhost/.test(url)) throw new Error('云服务网址要以 https:// 开头');
@@ -245,17 +306,21 @@ const Sync = (() => {
     if (Object.keys(patch).length) { vaultMute = true; Settings.save(patch); vaultMute = false; }
   }
 
-  // 打开时同步一次；看得见时每 3 分钟一次；切到后台时把改动推上去
+  // 自动同步：打开时一次；看得见时每 3 分钟一次；改了东西 10 秒后；切到后台时推一次；断网恢复后马上补
   let started = false;
   function start() {
+    recount();
     if (!ready() || started) return;
     started = true;
-    setTimeout(() => syncNow({ silent: true }), 1500);
-    setInterval(() => { if (document.visibilityState === 'visible') syncNow({ silent: true }); }, 180000);
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') syncNow({ silent: true }); else schedule(2000); });
+    const go = () => auto() && syncNow({ silent: true, auto: true });
+    setTimeout(go, 1500);
+    setInterval(() => { if (document.visibilityState === 'visible' && !running) go(); }, 180000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') go(); else schedule(2000); });
+    window.addEventListener('online', () => { lastErr = ''; schedule(1000); });
+    window.addEventListener('offline', () => { lastErr = '没有网络，联网后会自动同步'; emit(); });
   }
 
   const CORS = (origin) => JSON.stringify([{ AllowedOrigins: [origin, 'https://yuenkit122.github.io', 'http://localhost:8765'].filter((v, i, a) => a.indexOf(v) === i), AllowedMethods: ['GET', 'PUT', 'DELETE', 'HEAD'], AllowedHeaders: ['*'], ExposeHeaders: ['ETag'], MaxAgeSeconds: 3600 }], null, 2);
 
-  return { login, logout, onSettings, pushVault, mode, syncNow, schedule, tomb, ready, status, listeners, ensureBlob, downloadAll, test, exportSettings, importSettings, start, CORS, signed, STORES };
+  return { auto, setAuto, recount, peek, login, logout, onSettings, pushVault, mode, syncNow, schedule, tomb, ready, status, listeners, ensureBlob, downloadAll, test, exportSettings, importSettings, start, CORS, signed, STORES };
 })();

@@ -99,7 +99,7 @@ const Settings = (() => {
     draftMode: 'free',
     maxWaitSec: 6,
     translatePace: 'balanced',
-    autoStudy: true,
+    autoStudy: false,
     micId: '',
     r2Account: '', r2KeyId: '', r2Secret: '', r2Bucket: 'tingkeben',
     cloudUrl: '', cloudToken: '',
@@ -118,6 +118,8 @@ const Settings = (() => {
       if (cache.translateProvider === 'gemini') cache.translateProvider = 'pool';
       cache.migrated2 = true;
     }
+    // 生成笔记不再默认连带出重点和测验（用户要求，省算力）
+    if (!cache.migrated4) { cache.autoStudy = false; cache.migrated4 = true; try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch (e) {} }
     if (!cache.migrated3) {
       if (cache.groqModel === 'llama-3.3-70b-versatile') cache.groqModel = 'qwen/qwen3.8-27b';
       cache.migrated3 = true;
