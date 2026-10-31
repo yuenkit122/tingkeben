@@ -379,15 +379,17 @@ async function importFiles(course, list) {
 
 /* 存文件并提取文字；items: [{file, folder, meta}] */
 async function ingest(course, items) {
-  const recs = [];
+  const recs = [], srcs = new Map();
   for (const { file, folder, meta } of items) {
-    const rec = Object.assign({ id: DB.uid('f_'), courseId: course.id, name: file.name, folder, size: file.size, type: file.type || Extract.MIME[Extract.ext(file.name)] || '', blob: file, text: '', pages: null, status: 'extracting', addedAt: Date.now() }, meta || {});
+    const rec = Object.assign({ id: DB.uid('f_'), courseId: course.id, name: file.name, folder, size: file.size, type: file.type || Extract.MIME[Extract.ext(file.name)] || '', hasBlob: true, text: '', pages: null, status: 'extracting', addedAt: Date.now() }, meta || {});
+    await DB.putBlob(rec.id, file); // 原文件单独存，列课件时不会被读进内存
+    srcs.set(rec.id, file);
     await DB.put('files', rec); recs.push(rec);
   }
   refreshIfOn(course.id);
   for (const rec of recs) {
     try {
-      const r = await Extract.fromFile(rec.blob);
+      const r = await Extract.fromFile(srcs.get(rec.id));
       Object.assign(rec, { text: r.text, pages: r.pages, status: r.scanned ? 'scanned' : 'ready' });
     } catch (e) { Object.assign(rec, { status: 'error', error: e.message }); }
     await DB.put('files', rec);
@@ -550,8 +552,10 @@ async function ocrFile(course, f) {
   f.status = 'ocr'; await DB.put('files', f); refreshIfOn(course.id);
   try {
     const mime = f.type || Extract.MIME[Extract.ext(f.name)];
-    if (!f.blob) Object.assign(f, await Sync.ensureBlob(f));
-    f.text = await AI.ocr(f.blob, mime);
+    let blob = await DB.getBlob(f.id);
+    if (!blob) { await Sync.ensureBlob(f); blob = await DB.getBlob(f.id); }
+    if (!blob) throw new Error('课件原文件还不在本机，连上网再试');
+    f.text = await AI.ocr(blob, mime);
     f.status = 'ready'; f.error = '';
     toast('识别完成：' + f.name);
   } catch (e) { f.status = 'error'; f.error = e.message; toast(e.message, 5000); }
@@ -1451,7 +1455,7 @@ async function importBackup(file) {
     const data = JSON.parse(await file.text());
     if (data.app !== 'tingkeben') throw new Error('这不是听课本的备份文件');
     let n = 0;
-    for (const st of ['courses', 'notes', 'sessions', 'files']) for (const it of data[st] || []) { const old = await DB.get(st, it.id); if (st === 'files' && old?.blob) it.blob = old.blob; await DB.put(st, it); n++; }
+    for (const st of ['courses', 'notes', 'sessions', 'files']) for (const it of data[st] || []) { await DB.put(st, it); n++; }
     await loadCourses(); toast(`导入了 ${n} 条记录`); route();
   } catch (e) { toast('导入失败：' + e.message, 5000); }
 }
@@ -1618,13 +1622,13 @@ const SyncUI = (() => {
       <section class="sd-card">
         <div class="row" style="justify-content:space-between"><b>Mac ⇄ iPad 云同步</b><span class="pill ${{ ok: 'ok', run: '', wait: 'warn', bad: 'bad', off: 'mute' }[x.k]}">${esc(x.title)}</span></div>
         ${st.ready ? `
-        <div class="sd-last"><span>最近同步</span><b>${when(st.at)}</b>${lr ? `<small>上传 ${lr.up} · 下载 ${lr.down}${lr.del ? ' · 删除 ' + lr.del : ''}</small>` : ''}</div>
+        <div class="sd-last"><span>最近同步</span><b>${when(st.at)}</b>${lr ? `<small>上传 ${lr.up} · 下载 ${lr.down}${lr.del ? ' · 删除 ' + lr.del : ''}${lr.failed ? ` · <span class="sd-bad">失败 ${lr.failed}</span>` : ''}</small>` : ''}</div>
         ${st.running ? `<div class="sb-bar big"><i style="width:${pct(p)}%"></i></div>
           <div class="hint">${p && p.total ? `第 ${p.done} / ${p.total} 个` : '正在检查云端…'}${p && p.bytesTotal ? ` · 课件 ${mb(p.bytesDone)} / ${mb(p.bytesTotal)}` : ''}　${esc(p ? p.label : '')}</div>`
           : st.err ? `<div class="hint" style="color:var(--danger)">${esc(x.sub)}</div>` : ''}
         ${table(c)}
         <label class="switch"><input type="checkbox" id="sd-auto" ${st.auto ? 'checked' : ''}>自动同步${st.auto && st.nextAt && !st.running ? `<span class="hint">（${secs(st.nextAt)} 秒后）</span>` : ''}</label>
-        <div class="hint">打开听课本时、每 3 分钟、改完东西 10 秒后、切到后台时都会自动同步；断网恢复后马上补上，出错会自己重试。</div>
+        <div class="hint">打开听课本时、每 30 秒、改完东西 2 秒后、切到后台时都会自动同步；断网恢复后马上补上，出错会自己重试；个别条目失败只跳过它，其余照常同步。</div>
         <div class="row" style="margin-top:4px"><button class="btn small primary" id="sd-now" ${st.running ? 'disabled' : ''}>${st.running ? '同步中…' : '立即同步'}</button><button class="btn small ghost" id="sd-set">云服务设置</button></div>`
         : `<div class="hint">${esc(x.sub)}</div><div class="row"><button class="btn small primary" id="sd-login">登录云服务</button></div>`}
       </section>

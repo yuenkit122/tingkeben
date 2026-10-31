@@ -7,10 +7,11 @@ const Pdf = (() => {
   async function doc(fileId) {
     if (!docs.has(fileId)) {
       docs.set(fileId, (async () => {
-        let f = await DB.get('files', fileId);
-        if (f && !f.blob) f = await Sync.ensureBlob(f);
-        if (!f || !f.blob) throw new Error(f && f.hasBlob ? '课件还在云端，连上网再打开' : '找不到这个课件的原文件');
-        return pdfjsLib.getDocument({ data: await f.blob.arrayBuffer() }).promise;
+        const f = await DB.get('files', fileId);
+        let blob = await DB.getBlob(fileId);
+        if (!blob && f) { await Sync.ensureBlob(f); blob = await DB.getBlob(fileId); }
+        if (!blob) throw new Error(f && f.hasBlob ? '课件还在云端，连上网再打开' : '找不到这个课件的原文件');
+        return pdfjsLib.getDocument({ data: await blob.arrayBuffer() }).promise;
       })());
     }
     try { return await docs.get(fileId); } catch (e) { docs.delete(fileId); throw e; }
@@ -102,12 +103,13 @@ const Board = (() => {
   const pref = () => { try { return JSON.parse(localStorage.getItem('tingkeben.board') || '{}'); } catch (e) { return {}; } };
   const savePref = p => { try { localStorage.setItem('tingkeben.board', JSON.stringify(Object.assign(pref(), p))); } catch (e) {} };
 
-  function drawStroke(ctx, s, scale) {
+  function drawStroke(ctx, s, scale, ocr) {
     const pts = s.pts; if (!pts.length) return;
     ctx.save();
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     if (s.tool === 'hl') {
-      ctx.globalAlpha = 0.35; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * scale;
+      // 交给 AI 识别时荧光笔要画实一点，不然只剩一层几乎看不见的淡黄
+      ctx.globalAlpha = ocr ? .85 : 0.35; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * scale;
       ctx.beginPath(); ctx.moveTo(pts[0][0] * scale, pts[0][1] * scale);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * scale, pts[i][1] * scale);
       ctx.stroke();
@@ -353,6 +355,43 @@ const Board = (() => {
     for (const s of page.strokes) drawStroke(ctx, s, sc);
     return c;
   }
+  /* 只画笔迹、自动裁到有字的区域：识别手写用这个。
+     原来是把整页（含课件印刷体）压到 1000px 宽再识别，笔迹只有 1–2 像素，
+     模型基本认不出来；裁到笔迹范围再放大，同样一张图能清楚好几倍。 */
+  function inkBox(page) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of page.strokes || []) for (const p of s.pts || []) {
+      if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+    }
+    return isFinite(x0) ? { x0, y0, x1, y1 } : null;
+  }
+  function inkImage(page, targetW = 1600, maxPx = 4.2e6) {
+    const b = inkBox(page); if (!b) return null;
+    const pad = 40;
+    const x0 = Math.max(0, b.x0 - pad), y0 = Math.max(0, b.y0 - pad);
+    const x1 = Math.min(W, b.x1 + pad), y1 = Math.min(page.h || 1414, b.y1 + pad);
+    const bw = Math.max(80, x1 - x0), bh = Math.max(80, y1 - y0);
+    let sc = targetW / bw;
+    if (bw * bh * sc * sc > maxPx) sc = Math.sqrt(maxPx / (bw * bh)); // 别超过 iOS 的 canvas 上限
+    sc = Math.max(sc, 0.8);
+    const c = document.createElement('canvas');
+    c.width = Math.round(bw * sc); c.height = Math.round(bh * sc);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.translate(-x0 * sc, -y0 * sc);
+    for (const s of page.strokes) drawStroke(ctx, s, sc, true);
+    return c;
+  }
+  /* iOS Safari 对没挂在页面上的 canvas 调 toDataURL 有时会返回全白，先挂上去再截 */
+  function shoot(canvas, mime, quality) {
+    canvas.style.cssText = 'position:fixed;left:-99999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
+    document.body.appendChild(canvas);
+    let out;
+    try { out = canvas.toDataURL(mime, quality); } finally { canvas.remove(); }
+    return out;
+  }
+
   async function exportImages(note) {
     const pages = (note.board?.pages || []).filter(p => p.strokes.length || p.bg);
     if (!pages.length) { toast('画板还是空的'); return; }
@@ -365,7 +404,7 @@ const Board = (() => {
     w.document.close();
   }
   const hasInk = note => (note.board?.pages || []).some(p => p.strokes.length);
-  return { mount, pageImage, hasInk, drawStroke, INK };
+  return { mount, pageImage, inkImage, shoot, hasInk, drawStroke, INK };
 })();
 
 /* ======================================================================
@@ -772,17 +811,50 @@ const Recap = (() => {
 ### 这节课讲了课件的哪些部分
 每条后面标时间，例如（12:30）。拿不准的标「（不确定）」。简洁，用要点。`;
 
+  const HW_PROMPT = '上面每张图（图前的「[第N页]」是对应页码）是学生上课时在 iPad 上用 Apple Pencil 手写的笔记，一份一张图。只转写学生手写的内容（笔迹、字、公式、圈画、箭头、下划线），图里印刷的课件文字不用抄。手写是在圈/划某个印刷词时，写成「圈出：某词」。荧光笔只标了重点没有写字时，写「（高亮）」。中英文按原样保留，公式写成普通文字（例如 x^2、a/b）。看不清的字写（看不清），不要猜。每页用「[第N页]」开头。';
+
   async function handwriting(note) {
-    const pages = (note.board?.pages || []).filter(p => p.strokes.length);
-    if (!pages.length || !Settings.load().geminiKey) return '';
-    const parts = [];
-    for (const p of pages.slice(0, 12)) {
-      const c = await Board.pageImage(p, 1000, true);
-      parts.push({ inlineData: { mimeType: 'image/jpeg', data: c.toDataURL('image/jpeg', .85).split(',')[1] } });
+    const s = Settings.load();
+    if (!s.geminiKey) throw new Error('识别手写要用 Gemini（免费），先到「设置 → AI 和 API key」填 Gemini key');
+    const pages = (note.board?.pages || []).map((p, i) => ({ p, n: i + 1 })).filter(x => x.p.strokes && x.p.strokes.length);
+    if (!pages.length) return '';
+
+    // 手写识别比翻译难，用「聪明」那档模型，不是 fastest 那档
+    const strong = s.geminiSmartModel || 'gemini-3.8-flash';
+    const fast = s.geminiFastModel || 'gemini-3.1-flash-lite';
+    const imgs = [];
+    let budget = 8.5 * 1024 * 1024; // base64 总量控制，别把请求撑爆
+    for (const { p, n } of pages.slice(0, 10)) {
+      const c = Board.inkImage(p, 1600);
+      if (!c) continue;
+      const data = Board.shoot(c, 'image/png').split(',')[1];
+      if (!data || data.length > budget) continue;
+      budget -= data.length;
+      imgs.push({ n, data });
     }
-    parts.push({ text: '这些是学生上课时在 iPad 上的手写笔记（有些写在课件页上）。只转写学生手写的部分（笔迹、圈画、批注），印刷的课件文字不用抄，但如果手写是在圈某个印刷词，写成「圈出：某词」。中英文按原样，公式用普通文字。每页用「[第N页]」开头。看不清的写（看不清）。' });
-    try { return await AI.gemini({ model: Settings.load().geminiFastModel || 'gemini-3.1-flash-lite', parts, temperature: 0.1 }); }
-    catch (e) { toast('手写识别失败（' + e.message.slice(0, 60) + '），先只用录音整理', 5000); return ''; }
+    if (!imgs.length) return '';
+
+    async function once(model) {
+      const parts = [];
+      for (const it of imgs) {
+        parts.push({ text: `[第${it.n}页]` });
+        parts.push({ inlineData: { mimeType: 'image/png', data: it.data } });
+      }
+      parts.push({ text: HW_PROMPT });
+      return (await AI.gemini({ model, parts, temperature: 0.05, maxTokens: 4096 })) || '';
+    }
+
+    let out = '';
+    try { out = await once(strong); }
+    catch (e) {
+      // 强模型不可用（模型名改了 / 额度用完）就退回快模型，而不是直接失败
+      try { out = await once(fast); } catch (e2) { throw new Error('手写识别失败：' + (e2.message || e.message)); }
+    }
+    if (out.trim().length < 3) {
+      try { out = await once(fast); } catch (e) { /* 还是空的就报下面那句 */ }
+    }
+    if (out.trim().length < 3) throw new Error('手写识别失败：模型没有返回内容，换个清楚的页再试一次');
+    return out;
   }
 
   async function run(note, course, { onStatus } = {}) {
@@ -795,7 +867,9 @@ const Recap = (() => {
   async function runInner(note, course, session, job, onStatus) {
     if (Board.hasInk(note)) job.phase('正在识别画板上的手写', 0, .3, { expectSec: 10 });
     onStatus && onStatus('正在识别手写…');
-    const hw = await handwriting(note);
+    let hw = '';
+    try { hw = await handwriting(note); }
+    catch (e) { toast('手写识别没成功（' + String(e.message).slice(0, 70) + '），这次先用录音整理', 6000); }
     const body = (note.markdown || '').split(START)[0].trim();
     // 笔记还是空的：直接走完整的笔记生成（课件 + 录音 + 手写一起）
     if (!body) return { full: true, handwriting: hw };

@@ -108,9 +108,10 @@ const AI = (() => {
   }
 
   /* ---------- Gemini：普通请求 ---------- */
-  async function gemini({ model, parts, json, schema, temperature = 0.3, signal }) {
+  async function gemini({ model, parts, json, schema, temperature = 0.3, signal, maxTokens }) {
     const key = needKey('gemini');
     const generationConfig = { temperature };
+    if (maxTokens) generationConfig.maxOutputTokens = maxTokens;
     if (json) { generationConfig.responseMimeType = 'application/json'; if (schema) generationConfig.responseSchema = schema; }
     const res = await fetch(`${GEMINI}/models/${model}:generateContent`, {
       method: 'POST', signal,

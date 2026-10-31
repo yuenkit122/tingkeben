@@ -42,14 +42,33 @@ const Sync = (() => {
     h.authorization = `AWS4-HMAC-SHA256 Credential=${c.id}/${scope}, SignedHeaders=${names.join(';')}, Signature=${sig}`;
     return { url: `https://${host}${path}${qs ? '?' + qs : ''}`, headers: h, canon, sig };
   }
+  /* 每个请求都带超时：教室 WiFi 很差，没有超时的话一次卡住的请求会让整场同步
+     永久挂住（running 一直不清空，之后所有自动同步都静默失效）。 */
+  function timed(signal, ms) {
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), ms);
+    const ab = () => ac.abort();
+    if (signal) signal.addEventListener('abort', ab, { once: true });
+    return { signal: ac.signal, done() { clearTimeout(to); if (signal) signal.removeEventListener('abort', ab); } };
+  }
+  const TIMEOUT_JSON = 30000, TIMEOUT_BIG = 180000;
   async function req(method, key, opts = {}) {
+    const big = opts.body && typeof opts.body !== 'string' && (opts.body.size || 0) > 2e6;
+    const t = timed(opts.signal, opts.timeout || (big ? TIMEOUT_BIG : TIMEOUT_JSON));
+    try { return await req2(method, key, opts, t.signal); }
+    catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('网络太慢，这次请求超时了（' + key + '）');
+      throw e;
+    } finally { t.done(); }
+  }
+  async function req2(method, key, opts = {}, signal) {
     const c = cloud();
     if (c) {
       let r;
       const headers = { Authorization: 'Bearer ' + c.token };
       const ct = opts.headers && (opts.headers['content-type'] || opts.headers['Content-Type']); if (ct) headers['Content-Type'] = ct;
-      try { r = await fetch(c.url + '/r2/' + key.split('/').map(encodeURIComponent).join('/'), { method, headers, body: opts.body == null ? undefined : opts.body }); }
-      catch (e) { throw new Error('连不上听课本云服务，检查网络。'); }
+      try { r = await fetch(c.url + '/r2/' + key.split('/').map(encodeURIComponent).join('/'), { method, headers, body: opts.body == null ? undefined : opts.body, signal }); }
+      catch (e) { if (e && e.name === 'AbortError') throw e; throw new Error('连不上听课本云服务，检查网络。'); }
       if (r.status === 404 && opts.allow404) return null;
       if (r.status === 401) { Settings.save({ cloudToken: '' }); emit(); throw new Error('云端登录过期了，到「设置 → 云服务」重新输入密码'); }
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error('云服务出错：' + (j.error || r.status)); }
@@ -57,8 +76,8 @@ const Sync = (() => {
     }
     const s = await signed(method, key, opts);
     let r;
-    try { r = await fetch(s.url, { method, headers: s.headers, body: opts.body == null ? undefined : opts.body }); }
-    catch (e) { throw new Error('连不上 R2。最常见的原因是存储桶的 CORS 没设好（看设置里的第 4 步），或者 Account ID 填错了。'); }
+    try { r = await fetch(s.url, { method, headers: s.headers, body: opts.body == null ? undefined : opts.body, signal }); }
+    catch (e) { if (e && e.name === 'AbortError') throw e; throw new Error('连不上 R2。最常见的原因是存储桶的 CORS 没设好（看设置里的第 4 步），或者 Account ID 填错了。'); }
     if (r.status === 404 && opts.allow404) return null;
     if (!r.ok) {
       const t = await r.text().catch(() => '');
@@ -70,6 +89,28 @@ const Sync = (() => {
   }
   const getJSON = async key => { const r = await req('GET', key, { allow404: true }); return r ? r.json() : null; };
   const putJSON = (key, obj) => req('PUT', key, { body: JSON.stringify(obj), headers: { 'content-type': 'application/json' } });
+
+  const TOMB_TTL = 60 * 864e5; // 云端墓碑留 60 天，之后清掉，索引才不会被越撑越大
+
+  /* 写云端索引前，重新读一次再合并。原来是把开始时读到的那份索引整份写回去，
+     另一台设备在这期间上传的记录就会被覆盖掉（表现：某条笔记在两台设备上「消失」）。 */
+  async function mergeIndex(mine) {
+    let fresh = null;
+    try { fresh = await getJSON('tingkeben/index.json'); } catch (e) { fresh = null; }
+    if (!fresh || !fresh.items) return mine;
+    const out = Object.assign({}, fresh.items);
+    for (const [k, v] of Object.entries(mine)) {
+      const o = out[k];
+      if (!o) { out[k] = v; continue; }
+      if ((v.u || 0) > (o.u || 0)) out[k] = v;
+      else if ((v.u || 0) === (o.u || 0)) {
+        const m = Object.assign({}, o, v);
+        if (o.b || v.b) m.b = true; else delete m.b;
+        out[k] = m;
+      }
+    }
+    return out;
+  }
 
   /* 本机删除记录（墓碑），同步时告诉另一台设备也删 */
   const tombs = () => { try { return JSON.parse(localStorage.getItem(TOMB) || '{}'); } catch (e) { return {}; } };
@@ -100,7 +141,9 @@ const Sync = (() => {
     countTimer = setTimeout(async () => {
       const last = Number(localStorage.getItem(LAST) || 0), tb = tombs(), items = remoteItems;
       const by = {}, sum = { total: 0, synced: 0, up: 0, down: 0, del: 0, blobs: 0, blobsLocal: 0, blobsCloud: 0 };
+      const haveBlobs = await DB.blobIds();
       for (const st of STORES) {
+        if (st === 'blobs') continue;
         const locals = await DB.all(st), ids = new Set(locals.map(r => r.id));
         const c = { total: 0, synced: 0, up: 0, down: 0 };
         for (const r of locals) {
@@ -108,7 +151,7 @@ const Sync = (() => {
           const needUp = items ? (!rm || rm.u < stamp(r)) : stamp(r) > last;
           const needDown = !!(items && rm && !rm.d && rm.u > stamp(r));
           c.total++; if (needUp) c.up++; else if (needDown) c.down++; else c.synced++;
-          if (st === 'files') { sum.blobs++; if (r.blob) sum.blobsLocal++; if (rm && rm.b) sum.blobsCloud++; }
+          if (st === 'files') { sum.blobs++; if (haveBlobs.has(r.id)) sum.blobsLocal++; if (rm && rm.b) sum.blobsCloud++; }
         }
         if (items) for (const [key, rm] of Object.entries(items)) {
           if (!key.startsWith(st + '/') || rm.d) continue;
@@ -129,7 +172,7 @@ const Sync = (() => {
     try { const r = await getJSON('tingkeben/index.json'); remoteItems = (r && r.items) || {}; recount(); } catch (e) {}
   }
 
-  function schedule(ms = 10000) {
+  function schedule(ms = 2000) {
     recount();
     if (!ready() || !auto()) return;
     clearTimeout(timer); nextAt = Date.now() + ms; emit();
@@ -162,7 +205,7 @@ const Sync = (() => {
             const key = store + '/' + r.id, rm = items[key];
             if (rm && rm.u >= stamp(r)) continue;
             ops.push({ kind: 'up', store, key, r, rm });
-            if (store === 'files' && r.blob && !(rm && rm.b)) ops.push({ kind: 'blob', store, key, r, bytes: r.blob.size });
+            if (store === 'files' && r.hasBlob && !(rm && rm.b)) ops.push({ kind: 'blob', store, key, r, bytes: r.size || 0 });
           }
           for (const [key, rm] of Object.entries(items)) {
             if (!key.startsWith(store + '/')) continue;
@@ -177,40 +220,92 @@ const Sync = (() => {
         prog.total = ops.length; prog.bytesTotal = ops.reduce((a, o) => a + (o.bytes || 0), 0);
         prog.label = ops.length ? '开始同步' : '已经是最新'; emit();
 
-        // ② 一件一件做
+        // ② 同时做 6 条；任何一条失败都只影响它自己，不会拖垮整场同步
         const NAMES = { courses: '课程', files: '课件', notes: '笔记', sessions: '录音转写' };
         const nameOf = (store, r) => (r && (r.name || r.title)) || NAMES[store];
         let up = 0, down = 0, del = 0;
-        for (const o of ops) {
+        const failed = [];
+
+        async function doOp(o) {
           if (o.kind === 'up') {
             await putJSON(`tingkeben/db/${o.key}.json`, pack(o.store, o.r));
             items[o.key] = { u: stamp(o.r), b: o.store === 'files' ? !!(o.rm && o.rm.b) : undefined };
             up++; tick(`上传${NAMES[o.store]} · ${nameOf(o.store, o.r)}`);
           } else if (o.kind === 'blob') {
-            await req('PUT', `tingkeben/blob/${o.r.id}`, { body: o.r.blob, headers: { 'content-type': o.r.type || 'application/octet-stream' } });
-            items[o.key].b = true;
+            const blob = await DB.getBlob(o.r.id);
+            if (!blob) return; // 这台设备只同步过文字，原文件在另一台设备上，等它传
+            await req('PUT', `tingkeben/blob/${o.r.id}`, { body: blob, headers: { 'content-type': o.r.type || 'application/octet-stream' } });
+            // 并行时「上传课件」这条可能还没跑完，索引条目要自己兜底
+            items[o.key] = Object.assign({ u: stamp(o.r) }, items[o.key] || {}, { b: true });
             tick(`上传课件原文件 · ${o.r.name}`, o.bytes);
           } else if (o.kind === 'down') {
             const r = await getJSON(`tingkeben/db/${o.key}.json`);
-            if (r) { if (o.store === 'files' && o.loc && o.loc.blob) r.blob = o.loc.blob; await DB.put(o.store, r, { fromSync: true }); down++; }
+            if (r) { await DB.put(o.store, r, { fromSync: true }); down++; }
             tick(`下载${NAMES[o.store]} · ${nameOf(o.store, r)}`);
           } else if (o.kind === 'delLocal') {
             await DB.del(o.store, o.id, { fromSync: true }); if (o.store === 'sessions') await DB.delByIndex('audio', 'sessionId', o.id); del++;
             tick(`删除${NAMES[o.store]}（另一台设备删的）`);
           } else if (o.kind === 'delRemote') {
-            if (o.rm) { await req('DELETE', `tingkeben/db/${o.key}.json`).catch(() => {}); if (o.rm.b) await req('DELETE', `tingkeben/blob/${o.key.split('/')[1]}`).catch(() => {}); }
+            // 不再吞错误：删不掉的墓碑要留着，否则下次会「删掉的笔记又回来了」
+            if (o.rm) {
+              await req('DELETE', `tingkeben/db/${o.key}.json`);
+              if (o.rm.b) await req('DELETE', `tingkeben/blob/${o.key.split('/')[1]}`).catch(() => {});
+            }
             items[o.key] = { u: o.t, d: 1 };
+            del++;
             tick('删除云端的旧数据');
           }
         }
-        try { localStorage.setItem(TOMB, '{}'); } catch (e) {}
-        if (ops.length) { remote.items = items; remote.at = Date.now(); await putJSON('tingkeben/index.json', remote); }
-        remoteItems = items;
+
+        const LIMIT = 6;
+        const queue = ops.slice();
+        let qi = 0;
+        await Promise.all(Array.from({ length: Math.min(LIMIT, queue.length) }, async () => {
+          while (qi < queue.length) {
+            const o = queue[qi++];
+            try { await doOp(o); }
+            catch (e) {
+              failed.push({ kind: o.kind, key: o.key, msg: (e && e.message) || String(e) });
+              tick('跳过 ' + (nameOf(o.store, o.r || o.loc) || o.key), 0);
+            }
+          }
+        }));
+
+        // 只清掉成功的墓碑；失败的下次接着删
+        const tbLeft = {};
+        for (const f of failed) if (f.kind === 'delRemote') tbLeft[f.key] = tombs()[f.key] || Date.now();
+        try { localStorage.setItem(TOMB, JSON.stringify(tbLeft)); } catch (e) {}
+
+        // 写索引前重新读一次云端再合并：两台设备同时同步时不互相覆盖
+        let nextItems = items;
+        if (ops.length) {
+          nextItems = await mergeIndex(items);
+          for (const [k, v] of Object.entries(nextItems)) if (v.d && Date.now() - (v.u || 0) > TOMB_TTL) delete nextItems[k];
+          remote.items = nextItems; remote.at = Date.now();
+          try { await putJSON('tingkeben/index.json', remote); }
+          catch (e) { await new Promise(r => setTimeout(r, 800)); await putJSON('tingkeben/index.json', remote); }
+        }
+        remoteItems = nextItems;
         try { localStorage.setItem(LAST, String(t0)); } catch (e) {}
-        lastErr = ''; retryN = 0; lastResult = { up, down, del, at: Date.now() };
-        if (down || del) { await loadCourses(); const h = location.hash.slice(1); if (!h.startsWith('desk-') && !State.live && !/~board/.test(h)) route(); }
-        if (!silent) toast(ops.length ? `同步完成：上传 ${up}、下载 ${down}${del ? '、删除 ' + del : ''}` : '已经是最新，不用同步');
-        return { up, down, del };
+        retryN = 0; lastResult = { up, down, del, failed: failed.length, at: Date.now() };
+        if (failed.length) {
+          // 大部分都成功了，只是几条没过去：不当作整体失败，只排队重试那几条
+          lastErr = `${failed.length} 条没同步成功（${failed[0].msg}），会自动重试`;
+          if (!silent) toast(`同步完成：成功 ${up + down + del} 条，${failed.length} 条失败，稍后自动重试`, 6000);
+          schedule(20000);
+        } else {
+          lastErr = '';
+          if (!silent) toast(ops.length ? `同步完成：上传 ${up}、下载 ${down}${del ? '、删除 ' + del : ''}` : '已经是最新，不用同步');
+        }
+        // 刷新界面只是「顺手做的事」，它出错了不能算同步失败
+        if (down || del) {
+          try {
+            await loadCourses();
+            const h = location.hash.slice(1);
+            if (!h.startsWith('desk-') && !State.live && !/~board/.test(h)) route();
+          } catch (e) { console.warn('[sync] 界面刷新失败，不影响数据', e); }
+        }
+        return { up, down, del, failed: failed.length };
       } catch (e) {
         lastErr = e.message;
         if (!silent) toast(e.message, 7000);
@@ -228,21 +323,20 @@ const Sync = (() => {
   /* 课件原文件：本机没有就从 R2 拿（iPad 打开课件时才下载） */
   const fetching = new Map();
   async function ensureBlob(f) {
-    if (f.blob) return f;
+    if (await DB.getBlob(f.id)) return f;
     if (!f.hasBlob || !ready()) return f;
     if (!fetching.has(f.id)) fetching.set(f.id, (async () => {
       toast('正在从云端下载 ' + f.name + ' …');
       const r = await req('GET', `tingkeben/blob/${f.id}`);
       const blob = await r.blob();
-      const full = await DB.get('files', f.id) || f;
-      full.blob = new Blob([blob], { type: f.type || blob.type });
-      await DB.put('files', full, { fromSync: true });
-      return full;
+      await DB.putBlob(f.id, new Blob([blob], { type: f.type || blob.type }));
+      return f;
     })().finally(() => fetching.delete(f.id)));
     return fetching.get(f.id);
   }
   async function downloadAll(onProgress) {
-    const files = (await DB.all('files')).filter(f => !f.blob && f.hasBlob);
+    const have = await DB.blobIds();
+    const files = (await DB.all('files')).filter(f => f.hasBlob && !have.has(f.id));
     let i = 0;
     for (const f of files) { onProgress && onProgress(`${++i} / ${files.length} · ${f.name}`); await ensureBlob(f); }
     return files.length;
@@ -284,7 +378,7 @@ const Sync = (() => {
   function logout(clearKeys) {
     const patch = { cloudToken: '' };
     if (clearKeys) VAULT_KEYS.forEach(k => { if (/Key$/.test(k)) patch[k] = ''; });
-    Settings.save(patch); emit();
+    Settings.save(patch); started = false; emit();
   }
   let vaultMute = false, vaultTimer = null;
   async function pushVault() {
@@ -306,7 +400,7 @@ const Sync = (() => {
     if (Object.keys(patch).length) { vaultMute = true; Settings.save(patch); vaultMute = false; }
   }
 
-  // 自动同步：打开时一次；看得见时每 3 分钟一次；改了东西 10 秒后；切到后台时推一次；断网恢复后马上补
+  // 自动同步：打开时一次；看得见时每 30 秒一次；改了东西 2 秒后；切到后台时推一次；断网恢复后马上补
   let started = false;
   function start() {
     recount();
@@ -314,7 +408,7 @@ const Sync = (() => {
     started = true;
     const go = () => auto() && syncNow({ silent: true, auto: true });
     setTimeout(go, 1500);
-    setInterval(() => { if (document.visibilityState === 'visible' && !running) go(); }, 180000);
+    setInterval(() => { if (document.visibilityState === 'visible' && !running) go(); }, 30000);
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') go(); else schedule(2000); });
     window.addEventListener('online', () => { lastErr = ''; schedule(1000); });
     window.addEventListener('offline', () => { lastErr = '没有网络，联网后会自动同步'; emit(); });

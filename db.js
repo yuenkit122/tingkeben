@@ -1,8 +1,11 @@
-/* 听课本 — 本地数据库（IndexedDB）。所有数据只存在这台设备的浏览器里。 */
+/* 听课本 — 本地数据库（IndexedDB）。所有数据只存在这台设备的浏览器里。
+   v2（2026-10-31）：课件原文件从 files 表搬到单独的 blobs 表。
+   原因：files 表原来把整份 PDF 和学习记录塞在同一条里，任何一次「列出所有课件」
+   都会把上百个 PDF 一起读进内存（这台机器上有 180 多个课件），同步和首页都会被拖死。 */
 const DB = (() => {
   const NAME = 'tingkeben';
-  const VERSION = 1;
-  const STORES = ['courses', 'files', 'notes', 'sessions', 'audio'];
+  const VERSION = 2;
+  const STORES = ['courses', 'files', 'notes', 'sessions', 'audio', 'blobs'];
   const SYNCED = ['courses', 'files', 'notes', 'sessions'];
   let dbp = null;
 
@@ -10,7 +13,7 @@ const DB = (() => {
     if (dbp) return dbp;
     dbp = new Promise((resolve, reject) => {
       const req = indexedDB.open(NAME, VERSION);
-      req.onupgradeneeded = () => {
+      req.onupgradeneeded = ev => {
         const db = req.result;
         if (!db.objectStoreNames.contains('courses')) db.createObjectStore('courses', { keyPath: 'id' });
         if (!db.objectStoreNames.contains('files')) {
@@ -29,20 +32,78 @@ const DB = (() => {
           const s = db.createObjectStore('audio', { keyPath: 'id' });
           s.createIndex('sessionId', 'sessionId');
         }
+        if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'id' });
+
+        // v1 → v2：把每条 files.blob 搬进 blobs，再从 files 里删掉（同一个事务，要么全成要么全不成）。
+        // 一次最多搬 200MB：搬的过程原文件会短暂存在两份，iPad 存储紧张时可能不够，
+        // 所以搬不完的就留在 files 里（DB.getBlob 仍然能读到），下次打开再接着搬。
+        if (ev.oldVersion >= 1) {
+          try {
+            const files = req.transaction.objectStore('files');
+            const blobs = req.transaction.objectStore('blobs');
+            let moved = 0;
+            const CAP = 200 * 1024 * 1024;
+            files.openCursor().onsuccess = e => {
+              const c = e.target.result;
+              if (!c) return;
+              const v = c.value;
+              if (v && v.blob) {
+                if (moved + (v.blob.size || 0) > CAP) { c.continue(); return; }
+                moved += v.blob.size || 0;
+                try { blobs.put({ id: v.id, blob: v.blob }); } catch (_) {}
+                delete v.blob;
+                v.hasBlob = true;
+                c.update(v);
+              }
+              c.continue();
+            };
+          } catch (_) { /* 老库结构不对就跳过，原文件还能从云端重新下回来 */ }
+        }
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        // 浏览器随时可能关掉这条连接（另一个标签页升级数据库、iPad 回收内存、清除存储）。
+        // 关掉之后必须把缓存清掉重新开，否则之后每一次读写都在用一个死连接，
+        // 报 "The database connection is closing"，整个 app 到刷新前都好不了。
+        db.onversionchange = () => { try { db.close(); } catch (e) {} dbp = null; };
+        try { db.onclose = () => { dbp = null; }; } catch (e) {}
+        resolve(db);
+      };
+      req.onerror = () => { dbp = null; reject(req.error); };
+      req.onblocked = () => {
+        dbp = null;
+        try { if (typeof toast === 'function') toast('听课本在另一个标签页里开着，先关掉那个页面再来', 8000); } catch (e) {}
+        reject(new Error('数据库被另一个标签页占用，关掉其他听课本页面再刷新'));
+      };
     });
     return dbp;
   }
 
   async function tx(store, mode, fn) {
+    try {
+      return await txOnce(store, mode, fn);
+    } catch (e) {
+      // 连接失效：重开一次再试，用户完全不用管
+      const dead = e && (/closing|InvalidState|not open|被另一个标签页占用/i.test((e.name || '') + ' ' + (e.message || '')));
+      if (dead) {
+        dbp = null;
+        await new Promise(r => setTimeout(r, 60));
+        return await txOnce(store, mode, fn);
+      }
+      throw e;
+    }
+  }
+
+  async function txOnce(store, mode, fn) {
     const db = await open();
     return new Promise((resolve, reject) => {
-      const t = db.transaction(store, mode);
+      let t;
+      try { t = db.transaction(store, mode); }
+      catch (e) { dbp = null; reject(e); return; }
       const s = t.objectStore(store);
       let result;
-      Promise.resolve(fn(s)).then(r => { result = r; });
+      // 请求失败时必须显式 reject：原来只写了 .then，失败时会留下没人处理的 rejection
+      Promise.resolve(fn(s)).then(r => { result = r; }, err => reject(err));
       t.oncomplete = () => resolve(result);
       t.onerror = () => reject(t.error);
       t.onabort = () => reject(t.error);
@@ -61,7 +122,8 @@ const DB = (() => {
     get: (store, id) => tx(store, 'readonly', s => req2p(s.get(id))),
     del(store, id, opts) {
       if (SYNCED.includes(store) && !(opts && opts.fromSync) && typeof Sync !== 'undefined') Sync.tomb(store, id);
-      return tx(store, 'readwrite', s => req2p(s.delete(id)));
+      const p = tx(store, 'readwrite', s => req2p(s.delete(id)));
+      return store === 'files' ? p.then(() => this.delBlob(id).catch(() => {})) : p;
     },
     all: (store) => tx(store, 'readonly', s => req2p(s.getAll())),
     byIndex: (store, index, value) => tx(store, 'readonly', s => req2p(s.index(index).getAll(value))),
@@ -69,8 +131,16 @@ const DB = (() => {
       const items = await this.byIndex(store, index, value);
       if (SYNCED.includes(store) && typeof Sync !== 'undefined') items.forEach(i => Sync.tomb(store, i.id));
       await tx(store, 'readwrite', s => { items.forEach(i => s.delete(i.id)); });
+      if (store === 'files') for (const i of items) await this.delBlob(i.id).catch(() => {});
       return items.length;
     },
+    /* ---- 课件原文件（单独一张表，列课件时不会把它们读进内存） ---- */
+    getBlob: id => tx('blobs', 'readonly', s => req2p(s.get(id)))
+      .then(r => (r && r.blob) || null)
+      .then(b => b || tx('files', 'readonly', s => req2p(s.get(id))).then(f => (f && f.blob) || null)), // 还没搬过来的老数据
+    putBlob(id, blob) { return tx('blobs', 'readwrite', s => req2p(s.put({ id, blob }))); },
+    delBlob: id => tx('blobs', 'readwrite', s => req2p(s.delete(id))),
+    blobIds: () => tx('blobs', 'readonly', s => req2p(s.getAllKeys())).then(ks => new Set(ks || [])),
     uid: (p = '') => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
   };
 })();

@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="styles.css?v=10311430">
+<link rel="stylesheet" href="styles.css?v=10312541">
 </head>
 <body>
 <div class="app">
@@ -35,13 +35,19 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="device.js?v=10311430"></script>
-<script src="db.js?v=10311430"></script>
-<script src="sync.js?v=10311430"></script>
-<script src="extract.js?v=10311430"></script>
-<script src="ai.js?v=10311430"></script>
-<script src="live.js?v=10311430"></script>
-<script src="study.js?v=10311430"></script>
-<script src="app.js?v=10311430"></script>
+<script src="device.js?v=10312541"></script>
+<script src="db.js?v=10312541"></script>
+<script src="sync.js?v=10312541"></script>
+<script src="extract.js?v=10312541"></script>
+<script src="ai.js?v=10312541"></script>
+<script src="live.js?v=10312541"></script>
+<script src="study.js?v=10312541"></script>
+<script src="app.js?v=10312541"></script>
+<script>
+/* 离线缓存：断网 / 教室 WiFi 很差时也能打开。见 sw.js */
+if ('serviceWorker' in navigator) {
+  addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+</script>
 </body>
 </html>
