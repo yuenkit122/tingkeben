@@ -141,5 +141,41 @@ const Extract = (() => {
       .map(([k]) => k);
   }
 
-  return { fromFile, unzipFiles, isSupported, vocabulary, ext, MIME };
+  /* ---------- 判断这份材料是什么 ----------
+     只看文件名和所在文件夹不够（Moodle 上经常叫 "Week 3"），所以拿到正文之后
+     再按前几页的内容修正一次：比如出现 "Answer Key" 就标成参考答案。 */
+  const KINDS = [
+    { id: 'answer', label: '参考答案', name: /\b(answer|answers|solution|solutions|suggested|worked\s+answers?)\b/i, body: /\b(answer key|solutions?\b|suggested answers?|marking guide)\b/i },
+    { id: 'exam', label: '考试', name: /\b(exam|mid-?term|final\s+test|test\s+\d|quiz)\b/i, body: /\b(instructions to candidates|examination|duration:?\s*\d+\s*minutes)\b/i },
+    { id: 'tutorial', label: '练习题', name: /\b(tutorial|workshop|exercise|practice|problem\s+set|review\s+questions?|questions?)\b/i, body: /\b(question\s*1\b|attempt all|exercise\s*\d)\b/i },
+    { id: 'assignment', label: '作业', name: /\b(assignment|homework|task\s*\d|project|group work)\b/i, body: /\b(submission|due date|word limit|assessment task)\b/i },
+    { id: 'reading', label: '阅读材料', name: /\b(reading|readings|chapter|textbook|article|case\s+study)\b/i, body: /\b(journal|article|chapter\s*\d)\b/i },
+    { id: 'guide', label: '课程说明', name: /\b(unit\s+guide|syllabus|outline|handbook|schedule|course\s+information)\b/i, body: /\b(learning outcomes|assessment\s+overview|unit\s+schedule)\b/i },
+    { id: 'slides', label: '课件', name: /\b(slides?|lecture|notes?|week\s*\d|topic\s*\d)\b/i, body: /\b(lecture|slide|learning objectives)\b/i },
+    { id: 'video', label: '视频', name: /\b(video|recording|webinar|youtube|vimeo|lecture\s+capture)\b/i, body: null },
+    { id: 'link', label: '链接', name: /\bhttps?:\/\//i, body: null },
+  ];
+  function classify(name, folder, text) {
+    const hay = `${folder || ''} ${name || ''}`;
+    const body = String(text || '').slice(0, 4000);
+    for (const k of KINDS) {
+      if (k.name && k.name.test(hay)) return { id: k.id, label: k.label };
+      if (k.body && body && k.body.test(body)) return { id: k.id, label: k.label };
+    }
+    return { id: 'file', label: '' };
+  }
+  /* 链接属于哪一类：能直接播放的还是外链 */
+  function linkInfo(url) {
+    const u = String(url || '');
+    if (/(?:youtube\.com|youtu\.be)/i.test(u)) {
+      const m = u.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([\w-]{6,})/);
+      return { provider: 'youtube', id: m ? m[1] : '', label: 'YouTube' };
+    }
+    if (/vimeo\.com/i.test(u)) { const m = u.match(/vimeo\.com\/(\d+)/); return { provider: 'vimeo', id: m ? m[1] : '', label: 'Vimeo' }; }
+    if (/(echo360|panopto|kaltura|mediaspace|zoom\.us)/i.test(u)) return { provider: 'video', id: '', label: '课堂录像' };
+    if (/learning\.monash\.edu/i.test(u)) return { provider: 'moodle', id: '', label: 'Moodle 页面' };
+    return { provider: 'web', id: '', label: '网页' };
+  }
+
+  return { fromFile, unzipFiles, isSupported, vocabulary, ext, MIME, classify, linkInfo };
 })();

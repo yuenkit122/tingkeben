@@ -3,7 +3,7 @@
    发布新版本时：把下面的 V 和 index.html 里所有 ?v= 改成同一个新数字。
    （就算忘了改这里，只要你改了 index.html 的 ?v=，也不会读到旧文件。） */
 
-const V = '11011003';
+const V = '11011019';
 const CACHE = 'tkb-' + V;
 
 const BASE = self.location.href.replace(/sw\.js.*$/, '');

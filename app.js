@@ -95,6 +95,9 @@ async function route() {
     else if (r.startsWith('note-')) { const [id, tab] = r.slice(5).split('~'); await renderNote(id, tab || 'note'); }
     else if (r.startsWith('desk-')) await renderDesk(r.slice(5));
     else if (r === 'review' || r.startsWith('review~')) await renderReview(r.split('~')[1] || '');
+    else if (r === 'vocab' || r.startsWith('vocab~')) { const p = r.split('~'); await renderVocab(p[1] || '', p[2] || 'card'); }
+    else if (r === 'wrong') await renderWrong();
+    else if (r === 'marks' || r.startsWith('marks~')) await renderMarks(r.split('~')[1] || '');
     else if (r.startsWith('review-')) { const [id, tab] = r.slice(7).split('~'); await renderReviewNote(id, tab || 'note'); }
     else if (r === 'ask' || r.startsWith('ask-')) await renderAsk(r.slice(4) || null);
     else if (r.startsWith('session-')) await renderSession(r.slice(8));
@@ -121,11 +124,9 @@ async function renderHome() {
       <div class="grow"><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记；没有课件也能先手写、先录音</div></div>
       <div class="row"><button class="btn" id="new-course">＋ 新建课程</button><button class="btn primary" id="sync-moodle">${ICON.up}从 Moodle 同步</button></div>
     </div>
-    ${!Sync.ready() ? `<div class="banner"><div class="grow"><strong>在别的设备用过听课本？</strong><br><span style="font-size:14px;color:var(--muted)">登录云服务，课程、笔记和所有 API key 会自动出现，不用重新设置。</span></div><button class="btn primary small" id="home-login">登录云服务</button></div>` : ''}
-    ${!State.courses.length ? `<div class="banner"><div class="grow"><strong>第一次用？</strong><br><span style="font-size:14px;color:var(--muted)">在 Chrome 打开 Moodle 并登录，点右上角「听课本助手」扩展图标，勾选课程后点「同步到听课本」，4 门课和每周的课件会自动导进来。</span></div><button class="btn primary small" id="sync-moodle-2">怎么装扩展</button></div>` : ''}
-    ${!k.gemini || !k.notes ? `<div class="banner"><div class="grow"><strong>先填 API key</strong><br><span style="font-size:14px;color:var(--muted)">${!k.notes ? '生成笔记需要 DeepSeek 的 key' : ''}${!k.notes && !k.gemini ? '；' : ''}${!k.gemini ? '实时转写翻译需要 Gemini 的 key' : ''}。key 只存在这台设备上。</span></div><a class="btn primary small" href="#settings~ai">去设置</a></div>` : ''}
+    ${homeHint(k)}
     ${State.courses.length ? scheduleCard() : ''}
-    ${State.courses.length ? homeSummary(notes) + weekPrep(files) : ''}
+    ${State.courses.length ? homeSummary(notes) + learnStrip(notes) : ''}
     <div class="grid">
       ${State.courses.map((c, i) => `
         <a class="card course-card" href="#course-${c.id}" style="--c:${c.color || COLORS[i % COLORS.length]}">
@@ -133,27 +134,81 @@ async function renderHome() {
           <h3>${esc(c.name)}</h3>
           ${c.examDate ? `<div class="meta" style="font-size:13px;color:var(--muted)">考试 ${esc(c.examDate)} · ${examCountdown(c.examDate)}</div>` : ''}
           <div class="stats"><span>课件 ${count(files, c.id)}</span><span>笔记 ${count(notes, c.id)}</span><span>录音 ${count(sessions, c.id)}</span></div>
+          <button class="del-x" data-del-course="${c.id}" title="删除这门课" aria-label="删除这门课"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12M9 7V4h6v3"/></svg></button>
         </a>`).join('')}
       <button class="card course-card new" id="new-course-2">＋ 新建课程</button>
     </div>
-    ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
+    ${recent.length ? `<h2 class="sec-h">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}
+    ${State.courses.length ? weekPrep(files) : ''}`;
   $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
-  const hl = $('#home-login'); if (hl) hl.onclick = () => cloudLoginModal();
-  $$('[data-study]').forEach(b => b.onclick = () => studyFlow({ courseId: b.dataset.study || null }));
+  const hs = $('[data-hint]');
+  if (hs) {
+    const id = hs.dataset.hint;
+    $('[data-hint-x]', hs).onclick = () => {
+      let done = {}; try { done = JSON.parse(localStorage.getItem('tingkeben.hints') || '{}'); } catch (e) {}
+      done[id] = 1; localStorage.setItem('tingkeben.hints', JSON.stringify(done)); renderHome();
+    };
+    const act = $('[data-hint-act]', hs);
+    if (act) act.onclick = () => { if (act.dataset.hintAct === 'login') cloudLoginModal(); else extGuide(); };
+  }
+  $$('[data-study]').forEach(b => b.onclick = () => {
+    const c = State.courses.find(x => x.id === b.dataset.study) || State.courses[0];
+    if (c) openClassroom(c);
+  });
   $$('[data-prep]').forEach(b => b.onclick = () => openDocModal(b.dataset.prep, 'prep'));
   const dr = $('#dl-refresh'); if (dr) dr.onclick = async () => { dr.disabled = true; await Deadlines.refresh(); if (dr.isConnected) renderHome(); };
   const da = $('#dl-add'); if (da) da.onclick = () => Deadlines.addModal(renderHome);
   $$('[data-dl-del]').forEach(b => confirmClick(b, '删', () => { Deadlines.remove(b.dataset.dlDel); renderHome(); }));
+  $$('[data-dl-done]').forEach(b => b.onclick = () => { const d = Deadlines.load(); const it = d.items.find(x => x.id === b.dataset.dlDone); if (it) { it.done = true; try { localStorage.setItem('tingkeben.deadlines', JSON.stringify(d)); } catch (e) {} } toast('已完成，拿掉了', 1500); renderHome(); });
   $('#sync-moodle').onclick = () => syncModal();
   const sAdd = $('#sched-add'); if (sAdd) sAdd.onclick = () => Schedule.addModal(renderHome);
   const sList = $('#sched-list'); if (sList) sList.onclick = () => scheduleModal();
-  const s2 = $('#sync-moodle-2'); if (s2) s2.onclick = () => Ext.version() ? modal(`<h2>扩展已经装好了</h2><ol style="margin:0;padding-left:20px;line-height:1.9"><li>Chrome 新开一个标签页，打开 <b>learning.monash.edu</b> 并登录</li><li>点浏览器右上角的「听课本助手」图标（在拼图图标里，可以点图钉固定）</li><li>勾选课程 →「同步到听课本」</li></ol><div class="row" style="justify-content:flex-end"><a class="btn primary" href="${MOODLE}/my/courses.php" target="_blank" rel="noopener">打开 Moodle</a></div>`) : extGuide();
 }
+/* 主页只留一条提示：按「最挡路」的顺序挑一条，点 × 关掉就不再烦 */
+function homeHint(k) {
+  let done = {};
+  try { done = JSON.parse(localStorage.getItem('tingkeben.hints') || '{}'); } catch (e) {}
+  const items = [];
+  if (!State.courses.length) items.push({ id: 'start', t: '第一次用？', s: '在 Chrome 打开 Moodle 并登录，点右上角「听课本助手」，勾选课程同步进来；也可以先在电脑上新建一门课。', cta: '怎么装扩展', act: 'ext' });
+  if (!k.notes || !k.gemini) items.push({ id: 'key', t: '先把 API key 填上', s: `${!k.notes ? '生成笔记要 DeepSeek' : ''}${!k.notes && !k.gemini ? '，' : ''}${!k.gemini ? '实时转写要 Gemini' : ''}。key 只存在这台设备上。`, cta: '去设置', href: '#settings~ai' });
+  if (!Sync.ready()) items.push({ id: 'sync', t: '云同步没开', s: '登录之后 Mac 和 iPad 的课程、笔记、录音会自动对上（没登录也能正常用）。', cta: '登录', act: 'login' });
+  const pick = items.find(x => !done[x.id]);
+  if (!pick) return '';
+  return `<div class="hint-strip" data-hint="${pick.id}">
+    <span class="pill mute">提示</span>
+    <div class="grow"><b>${esc(pick.t)}</b> <span class="hint">${esc(pick.s)}</span></div>
+    ${pick.href ? `<a class="btn small primary" href="${pick.href}">${esc(pick.cta)}</a>` : `<button class="btn small primary" data-hint-act="${pick.act}">${esc(pick.cta)}</button>`}
+    <button class="btn small ghost" data-hint-x aria-label="不再提示">✕</button>
+  </div>`;
+}
+
+/* 主页：今天的三个动作（背生词 / 清待办 / 刷错题），有东西才显示 */
+function learnStrip(notes) {
+  const todo = notes.reduce((a, n) => a + (n.todo || []).filter(x => !x.done).length, 0);
+  const wrong = notes.reduce((a, n) => a + (n.wrong || []).length, 0);
+  const host = document.createElement('div');
+  host.id = 'learn-strip';
+  if (!todo && !wrong) { host.hidden = true; }
+  host.innerHTML = `<div class="card pad learn-strip noprint">
+    <span class="grow"><b>今天</b> · <a href="#vocab" id="ls-w">生词 —</a>${todo ? ` · <a href="#wrong">${todo} 条待办没搞懂</a>` : ''}${wrong ? ` · <a href="#wrong">${wrong} 道错题</a>` : ''}</span>
+    <a class="btn small" href="#vocab">背生词</a><a class="btn small" href="#wrong">刷错题</a><a class="btn small" href="#marks">考前重点</a>
+  </div>`;
+  (async () => {
+    let due = 0;
+    for (const c of State.courses) { try { due += Learn.vstats(await Learn.vocab(c.id)).due; } catch (e) {} }
+    const w = document.querySelector('#ls-w');
+    if (w) w.textContent = due ? `${due} 个生词要背` : '生词今天清完了';
+    const live = document.querySelector('#learn-strip');
+    if (live && !due && !todo && !wrong) live.hidden = true;
+  })();
+  return host.outerHTML;
+}
+
 /* 主页：下一节课（借鉴 Otter 的日历联动） */
 function scheduleCard() {
   const list = Schedule.load();
   const head = `<div class="row" style="justify-content:space-between;align-items:flex-start"><div class="grow"><b>课表</b><div class="hint">填好每周上课时间，开课前 10 分钟提醒开录，录音自动归到那门课</div></div><button class="btn small" id="sched-add">＋ 添加</button></div>`;
-  if (!list.length) return `<div class="card pad sched">${head}</div>`;
+  if (!list.length) return '';   // 没填课表就不占首页位置（课表在「设置 → 课表与提醒」里还能填）
   const n = Schedule.next();
   if (!n) return `<div class="card pad sched">${head.replace('填好每周上课时间，开课前 10 分钟提醒开录，录音自动归到那门课', '接下来两周没有课，去检查一下课表')}</div>`;
   const c = State.courses.find(x => x.id === n.entry.courseId);
@@ -161,7 +216,7 @@ function scheduleCard() {
     <div class="sched-row">
       <div class="sched-when"><span class="pill ${n.live ? 'ok' : 'mute'}">${n.live ? '正在上课' : Schedule.when(n)}</span><span class="hint">${Schedule.countdown(n)}</span></div>
       <div class="grow sched-name-box"><div class="sched-name">${esc(Schedule.courseName(n.entry))}</div><div class="hint">${esc(n.entry.start)}–${esc(n.entry.end)}${n.entry.room ? ' · ' + esc(n.entry.room) : ''}</div></div>
-      <div class="row" style="gap:8px"><button class="btn small ghost" id="sched-list">课表</button><button class="btn small ${n.live ? 'primary' : ''}" data-study="${esc(n.entry.courseId || '')}">${ICON.mic}${n.live ? '开始上课' : '提前进课堂'}</button></div>
+      <div class="row" style="gap:8px"><button class="btn small ghost" id="sched-list">课表</button><button class="btn small ${n.live ? 'primary' : ''}" data-study="${esc(n.entry.courseId || '')}" title="直接进三栏课堂：左课件、中画板、右录音">${ICON.mic}${n.live ? '进入课堂' : '一键进课堂'}${!n.live && n.inMs < 90 * 60e3 ? ' · ' + Schedule.countdown(n).replace('还有 ', '') : ''}</button></div>
     </div>
   </div>`;
 }
@@ -196,6 +251,31 @@ function weekPrep(files) {
   return `<div class="card pad"><div class="row" style="justify-content:space-between"><b>课前 5 分钟预习</b><span class="hint">每门课最新一周的课件，点开看预习卡和术语表</span></div>
     <div class="prep-grid">${rows.map(r => `<div class="prep-course"><div class="hint"><b style="color:var(--ink)">${esc(r.c.code || r.c.name)}</b> · Week ${r.wk}</div>${r.fs.map(f => `<button class="prep-file" data-prep="${f.id}">${phaseOf(f) ? `<span class="tag ${phaseOf(f) === '预习' ? 'pre' : 'cls'}">${phaseOf(f)}</span>` : ''}<span class="grow">${esc(f.name.replace(/\.[^.]+$/, ''))}</span>${f.prep ? '<span class="pill ok">已备好</span>' : '<span class="pill mute">生成</span>'}</button>`).join('')}</div>`).join('')}</div></div>`;
 }
+/* 难度预判：哪 3 页最难、为什么、怎么读 */
+function diffModal(f, course) {
+  const h = f.hard;
+  if (!h) return;
+  modal(`<h2>这份课件最难的地方</h2>
+    <p class="hint" style="margin:0">${esc(h.overall || '')}</p>
+    <div class="hard-list">${h.pages.map(p => `<div class="hard-item"><span class="hard-p">P${p.page}</span><div class="grow"><b>为什么难</b><div class="hint">${esc(p.why)}</div></div><button class="btn small" data-page="${p.page}">打开这一页</button></div>`).join('')}</div>
+    ${h.tips && h.tips.length ? `<div class="hard-tips"><b>怎么读这几页</b><ul>${h.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>知道了</button></div>`, (box, close) => {
+    $$('[data-page]', box).forEach(b => b.onclick = () => {
+      const page = Number(b.dataset.page);
+      close();
+      openDocModal(f.id);
+      // 阅读器是异步渲染的，等它把页画出来再滚过去
+      let tries = 0;
+      const jump = () => {
+        const el = document.querySelector(`#dv-host .pdfpage[data-p="${page}"]`);
+        if (el) { el.scrollIntoView({ block: 'start', behavior: 'smooth' }); return; }
+        if (tries++ < 20) setTimeout(jump, 200);
+      };
+      setTimeout(jump, 300);
+    });
+  });
+}
+
 async function openDocModal(fileId, mode) {
   const full = await DB.get('files', fileId); if (!full) return;
   const course = await DB.get('courses', full.courseId);
@@ -209,14 +289,15 @@ function homeSummary(notes) {
   return `<div class="home-sum">
     <div class="card pad">
       <div class="row" style="justify-content:space-between"><b>即将到来</b><div class="row" style="gap:4px"><button class="btn small ghost" id="dl-add">＋ 添加</button>${Ext.version() ? '<button class="btn small ghost" id="dl-refresh">从 Moodle 更新</button>' : ''}</div></div>
-      ${up.length ? `<div class="dl-list">${up.map(d => `<div class="dl"><div class="dl-when ${d.due - Date.now() < 3 * 86400e3 ? 'soon' : ''}">${Deadlines.left(d.due)}</div><div class="grow"><div class="t">${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)}</a>` : esc(d.name)}</div><div class="hint">${esc(shortName(d.course || ''))} · ${new Date(d.due).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' })}</div></div>${d.manual ? `<button class="btn small ghost" data-dl-del="${esc(d.id)}" aria-label="删除">✕</button>` : ''}</div>`).join('')}</div>`
+      ${up.length ? `<div class="dl-list">${up.map(d => `<div class="dl"><div class="dl-when ${d.due - Date.now() < 3 * 86400e3 ? 'soon' : ''}">${Deadlines.left(d.due)}</div><div class="grow"><div class="t">${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)}</a>` : esc(d.name)}</div><div class="hint">${esc(shortName(d.course || ''))} · ${new Date(d.due).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' })}${d.todo ? ` · <span class="pill ${/submi|add/i.test(d.todo) ? 'warn' : 'mute'}">${esc(/add submission|submit/i.test(d.todo) ? '还没交' : /attempt/i.test(d.todo) ? '还没做' : d.todo)}</span>` : ''}</div></div><button class="btn small ghost" data-dl-done="${esc(d.id)}" title="做完了，从列表里拿掉" aria-label="完成">✓</button>${d.manual ? `<button class="btn small ghost" data-dl-del="${esc(d.id)}" aria-label="删除">✕</button>` : ''}</div>`).join('')}</div>`
         : `<div class="hint" style="margin-top:6px">${dl.at ? '最近没有要交的东西 🎉' : Ext.version() ? '点「从 Moodle 更新」读取作业和测验的截止日期' : '装好「听课本助手」扩展后可以自动读取 Moodle 的截止日期，也可以手动添加'}</div>`}
     </div>
     <div class="card pad">
       <b>学习进度</b>
-      <div style="margin-top:6px"><span style="font-size:28px;font-weight:800">${tot.d}</span> <span class="hint">/ ${tot.t} 个知识点已掌握</span></div>
+      <div style="margin-top:6px"><span style="font-size:28px;font-weight:800">${tot.t ? Math.round(tot.d / tot.t * 100) : 0}%</span> <span class="hint">的知识点已经掌握 · 本周 ${Math.round(Learn.week(notes).rate * 100)}%（${Learn.week(notes).n} 份笔记）</span></div>
       <div class="level" style="width:100%;height:6px"><i style="width:${tot.t ? Math.round(tot.d / tot.t * 100) : 0}%"></i></div>
-      ${byCourse.map(x => `<div class="row" style="justify-content:space-between;font-size:13px;margin-top:6px"><a href="#course-${x.c.id}~notes" style="color:var(--ink);text-decoration:none">${esc(x.c.code || x.c.name)}</a><span class="hint">${x.d}/${x.t}</span></div>`).join('') || '<div class="hint" style="margin-top:6px">在「生成」里勾选「重点」就会出知识点，标「已掌握」后算进这里</div>'}
+      <div class="hint" style="margin-top:6px">${tot.t ? `一共 ${tot.t} 个知识点，已经拿下 ${tot.d} 个 —— 本周新学的先看「复习」页的「今天先看什么」` : '在「生成」里勾选「重点」就会出知识点，标「已掌握」后算进这里'}</div>
+      ${byCourse.map(x => `<div class="row" style="justify-content:space-between;font-size:13px;margin-top:6px"><a href="#course-${x.c.id}~notes" style="color:var(--ink);text-decoration:none">${esc(x.c.code || x.c.name)}</a><span class="hint">${Math.round(x.d / x.t * 100)}%（${x.d}/${x.t}）</span></div>`).join('')}
     </div>
   </div>`;
 }
@@ -228,7 +309,7 @@ function noteItem(n) {
   const c = State.courses.find(x => x.id === n.courseId);
   const st = n.status === 'generating' || State.gens.has(n.id) ? '<span class="pill">生成中</span>' : n.status === 'error' ? '<span class="pill bad">失败</span>' : '';
   const pg = Study.progress(n);
-  return `<a class="item" href="#note-${n.id}"><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(c ? c.name : '')} · ${fmtDate(n.createdAt)}${pg.total ? ` · 知识点 ${pg.done}/${pg.total}` : ''}${n.sessionId ? ' · 含录音' : ''}</div></div>${st}</a>`;
+  return `<a class="item" href="#note-${n.id}"><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(c ? c.name : '')} · ${fmtDate(n.createdAt)}${pg.total ? ` · 掌握 ${Math.round(pg.done / pg.total * 100)}%` : ''}${n.sessionId ? ' · 含录音' : ''}</div></div>${st}<button class="del-x" data-del-note="${n.id}" title="删除这份笔记" aria-label="删除这份笔记"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12M9 7V4h6v3"/></svg></button></a>`;
 }
 
 function courseModal(course) {
@@ -257,14 +338,7 @@ function courseModal(course) {
       if (isNew) location.hash = 'course-' + c.id; else route();
     };
     const del = $('#c-del', box);
-    if (del) confirmClick(del, '再点一次：删除课程和里面所有课件、笔记、录音', async () => {
-      for (const st of ['files', 'notes', 'sessions']) {
-        const items = await DB.byIndex(st, 'courseId', course.id);
-        for (const it of items) { if (st === 'sessions') await DB.delByIndex('audio', 'sessionId', it.id); await DB.del(st, it.id); }
-      }
-      await DB.del('courses', course.id);
-      await loadCourses(); close(); location.hash = 'home';
-    });
+    if (del) confirmClick(del, '再点一次：删除课程和里面所有课件、笔记、录音', async () => { await deleteCourse(course.id); close(); });
   });
 }
 
@@ -278,7 +352,7 @@ async function renderCourse(id, tab) {
       <a class="crumb" href="#home">← 课程主页</a>
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1>${esc(course.name)}</h1><div class="meta">${course.examDate ? `考试 ${esc(course.examDate)} · ${examCountdown(course.examDate)}` : '还没设考试日期'}</div></div>
-        <div class="row"><button class="btn small" id="c-edit">课程设置</button><button class="btn small" id="c-sync">${ICON.up}同步 Moodle</button><button class="btn small" id="c-points">知识点总结</button><button class="btn small" id="c-mock">模拟考试</button><a class="btn small" href="#ask-${id}">${ICON.chat}问 AI</a><button class="btn" id="c-desk">${ICON.mic}上课</button><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
+        <div class="row"><button class="btn small" id="c-edit">课程设置</button><button class="btn small ghost danger-text" data-del-course="${id}" title="删除这门课">删除课程</button><button class="btn small" id="c-sync">${ICON.up}同步 Moodle</button><button class="btn small" id="c-points">知识点总结</button><button class="btn small" id="c-mock">模拟考试</button><a class="btn small" href="#ask-${id}">${ICON.chat}问 AI</a><button class="btn" id="c-desk">${ICON.mic}上课</button><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
       </div>
     </div>
     <div class="tabs">
@@ -293,7 +367,7 @@ async function renderCourse(id, tab) {
   $('#c-gen').onclick = () => generateModal({ course, preselect: State.selected || [] });
   $('#c-points').onclick = () => coursePointsModal(course);
   $('#c-mock').onclick = () => mockExamModal(course);
-  $('#c-desk').onclick = () => studyFlow({ courseId: course.id });
+  $('#c-desk').onclick = () => openClassroom(course);
   const body = $('#tab-body');
   if (tab === 'files') renderFilesTab(course, body);
   else if (tab === 'notes') {
@@ -339,7 +413,14 @@ function fileIcon(name) {
   const cls = ['png', 'jpg', 'jpeg', 'webp'].includes(e) ? 'img' : e;
   return `<div class="ficon ${cls}">${e === 'jpeg' ? 'JPG' : e.toUpperCase()}</div>`;
 }
+function linkIcon(f) {
+  const p = (f.kind && f.kind.provider) || 'web';
+  const t = p === 'youtube' ? 'YT' : p === 'vimeo' ? 'VM' : p === 'video' ? 'VID' : p === 'moodle' ? 'M' : 'URL';
+  return `<div class="ficon ${p}">${t}</div>`;
+}
 function fileStatus(f) {
+  if (f.status === 'link') return `<span class="pill mute">${esc((f.kind && f.kind.label) || '链接')}</span>`;
+  if (f.url && f.status === 'ready') return '<span class="pill ok">网页 · 已读取</span>';
   if (f.status === 'extracting') return '<span class="pill"><span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>提取中</span>';
   if (f.status === 'ocr') return '<span class="pill"><span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>Gemini 识别中</span>';
   if (f.status === 'scanned') return '<span class="pill warn">扫描件，没读到文字</span>';
@@ -359,16 +440,18 @@ async function renderFilesTab(course, body) {
       <span class="btn primary">${ICON.up}选择文件</span>
       <input type="file" id="file-in" multiple hidden accept=".pdf,.pptx,.docx,.txt,.md,.zip,.png,.jpg,.jpeg,.webp">
     </label>
+    <div class="row" style="justify-content:flex-end;margin:10px 0 6px"><button class="btn small ghost" id="add-link" title="Moodle 里的视频、YouTube、网页都可以挂在这里">🔗 添加视频 / 链接</button></div>
     ${files.length ? `<div class="card files">${files.map((f, i) => `
       ${weekOf(f).label !== (files[i - 1] ? weekOf(files[i - 1]).label : null) ? `<div class="fgroup">${esc(weekOf(f).label)}</div>` : ''}
       <div class="file" data-id="${f.id}">
         <input type="checkbox" aria-label="选择 ${esc(f.name)}" ${State.selected.includes(f.id) ? 'checked' : ''} ${f.status !== 'ready' ? 'disabled' : ''}>
-        ${fileIcon(f.name)}
+        ${f.status === 'link' ? linkIcon(f) : fileIcon(f.name)}
         <div style="min-width:0"><div class="name">${esc(f.name)}</div>
-          <div class="sub">${phaseOf(f) ? `<button class="tag ${phaseOf(f) === '预习' ? 'pre' : phaseOf(f) === '正课' ? 'cls' : phaseOf(f) === '课后' ? 'post' : 'asm'}" data-act="phase" title="点一下改标签">${phaseOf(f)}</button>` : '<button class="tag none" data-act="phase" title="打标签">＋标签</button>'}${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.moodleTitle && f.moodleTitle !== f.name.replace(/\.[^.]+$/, '') ? `<span>Moodle：${esc(f.moodleTitle)}</span>` : ''}</div></div>
+          <div class="sub">${phaseOf(f) ? `<button class="tag ${phaseOf(f) === '预习' ? 'pre' : phaseOf(f) === '正课' ? 'cls' : phaseOf(f) === '课后' ? 'post' : 'asm'}" data-act="phase" title="点一下改标签">${phaseOf(f)}</button>` : '<button class="tag none" data-act="phase" title="打标签">＋标签</button>'}${f.kind && f.kind.label ? `<span class="tag kind-${esc(f.kind.id)}" title="导入时按文件名和内容判断的">${esc(f.kind.label)}</span>` : ''}${fileStatus(f)}<span>${fmtSize(f.size)}</span>${f.moodleTitle && f.moodleTitle !== f.name.replace(/\.[^.]+$/, '') ? `<span>Moodle：${esc(f.moodleTitle)}</span>` : ''}${f.hard && f.hard.pages.length ? `<button class="tag hard" data-act="diff" title="${esc(f.hard.pages.map(p => 'P' + p.page + '：' + p.why).join('\n'))}">最难 ${f.hard.pages.map(p => 'P' + p.page).join(' ')}</button>` : ''}</div></div>
         <div class="acts">
           ${f.status === 'scanned' || f.status === 'error' ? '<button class="btn small" data-act="ocr">用 Gemini 识别</button>' : ''}
-          ${f.status === 'ready' || /\.pdf$/i.test(f.name) ? '<button class="btn small ghost" data-act="view">打开</button>' : ''}${f.status === 'ready' ? `<button class="btn small ghost" data-act="prep" title="5 分钟预习卡 + 术语表">${f.prep ? '课前包 ✓' : '课前包'}</button>` : ''}${f.status === 'ready' ? '<button class="btn small ghost" data-act="class" title="用这份课件上课：左边课件、中间笔记、右边翻译">上课</button>' : ''}
+          ${f.status === 'link' || (f.url && f.status === 'ready') ? '<button class="btn small primary" data-act="openlink">打开网页</button>' : ''}
+          ${f.status === 'ready' || /\.pdf$/i.test(f.name) ? '<button class="btn small ghost" data-act="view">打开</button>' : ''}${f.status === 'ready' ? `<button class="btn small ghost" data-act="prep" title="5 分钟预习卡 + 术语表">${f.prep ? '课前包 ✓' : '课前包'}</button>` : ''}${f.status === 'ready' && !f.hard ? '<button class="btn small ghost" data-act="diffgo" title="AI 标出这份课件最难的 3 页">难度</button>' : ''}${f.status === 'ready' ? '<button class="btn small ghost" data-act="class" title="用这份课件上课：左边课件、中间笔记、右边翻译">上课</button>' : ''}
           <button class="btn small ghost" data-act="del">删除</button>
         </div>
       </div>`).join('')}</div>` : `<div class="empty"><strong>这门课还没有课件</strong>
@@ -380,6 +463,19 @@ async function renderFilesTab(course, body) {
       <button class="btn small" id="sel-clear">取消</button>
       <button class="btn small primary" id="sel-gen">${ICON.spark}用选中的生成笔记</button>
     </div>`;
+
+  // 老数据：没判断过内容的，打开列表时补一次（纯本地规则，不花钱）
+  (async () => {
+    let changed = false;
+    for (const f of files) {
+      if (f.status === 'ready' && !f.kind) { f.kind = Extract.classify(f.name, f.folder, f.text); changed = true; }
+      else if (f.status === 'link' && (!f.kind || !f.kind.provider)) { f.kind = Object.assign(Extract.linkInfo(f.url || ''), { id: 'video' }); changed = true; }
+    }
+    if (changed) { for (const f of files) await DB.put('files', f); if (body.isConnected) renderFilesTab(course, body); }
+  })();
+
+  const al = $('#add-link', body); if (al) al.onclick = () => addLinkModal(course);
+  $$('[data-act=openlink]', body).forEach(b => b.onclick = e => { e.preventDefault(); const f = files.find(x => x.id === b.closest('.file').dataset.id); if (f) openLink(f); });
 
   const input = $('#file-in', body), drop = $('#drop', body);
   const nbStudy = $('#nb-study', body); if (nbStudy) nbStudy.onclick = () => studyFlow({ courseId: course.id });
@@ -397,6 +493,8 @@ async function renderFilesTab(course, body) {
     };
     const v = $('[data-act=view]', row); if (v) v.onclick = () => openDocModal(f.id);
     const pp = $('[data-act=prep]', row); if (pp) pp.onclick = () => openDocModal(f.id, 'prep');
+    const dg = $('[data-act=diffgo]', row); if (dg) dg.onclick = async () => { dg.disabled = true; dg.textContent = '…'; try { await Learn.diffFile(f, course.name); toast('标出最难的 ' + f.hard.pages.length + ' 页了'); renderFilesTab(course, body); } catch (e) { toast(e.message, 6000); dg.disabled = false; dg.textContent = '难度'; } };
+    const df = $('[data-act=diff]', row); if (df) df.onclick = e => { e.preventDefault(); diffModal(f, course); };
     const cl = $('[data-act=class]', row); if (cl) cl.onclick = () => startClass(course, [f.id], f.name.replace(/\.[^.]+$/, ''));
     const o = $('[data-act=ocr]', row); if (o) o.onclick = () => ocrFile(course, f);
     const ph = $('[data-act=phase]', row); if (ph) ph.onclick = async e => {
@@ -409,6 +507,51 @@ async function renderFilesTab(course, body) {
   });
   $('#sel-clear', body).onclick = () => { State.selected = []; renderFilesTab(course, body); };
   $('#sel-gen', body).onclick = () => generateModal({ course, preselect: State.selected });
+}
+
+/* Moodle 里除了文件还有视频和网页：挂成一条链接，点开就能看 */
+function addLinkModal(course, after) {
+  modal(`<h2>添加视频 / 链接</h2>
+    <p class="hint" style="margin:0">Moodle 里的 YouTube、课堂录像（Echo360 / Panopto）、网页说明都可以放这儿，一条一行。课件列表、工作台左栏都会出现。</p>
+    <div class="field"><label for="lk-u">网址（可以一次贴多行）</label><textarea id="lk-u" rows="4" placeholder="https://www.youtube.com/watch?v=…&#10;https://learning.monash.edu/mod/page/view.php?id=…"></textarea></div>
+    <div class="row"><div class="field grow"><label for="lk-t">标题（可不填，多行时忽略）</label><input id="lk-t" type="text" placeholder="例如 Week 3 课堂录像"></div>
+      <div class="field grow"><label for="lk-w">哪一周</label><input id="lk-w" type="text" placeholder="Week 3"></div></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="lk-go">加进去</button></div>`, (box, close) => {
+    $('#lk-go', box).onclick = async () => {
+      const urls = $('#lk-u', box).value.split(/\n+/).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x));
+      if (!urls.length) { toast('先贴一个网址'); return; }
+      const title = $('#lk-t', box).value.trim(), week = $('#lk-w', box).value.trim();
+      const recs = [];
+      for (const url of urls) {
+        const info = Extract.linkInfo(url);
+        let name = title;
+        if (!name || urls.length > 1) {
+          // 没填标题时给个好认的名字：YouTube 视频 / Moodle 页面 / 域名
+          if (info.provider === 'youtube') name = 'YouTube 视频' + (info.id ? ' · ' + info.id.slice(0, 6) : '');
+          else if (info.provider === 'vimeo') name = 'Vimeo 视频' + (info.id ? ' · ' + info.id : '');
+          else if (info.provider === 'moodle') name = 'Moodle 页面 · ' + ((url.match(/id=(\d+)/) || [])[1] || '');
+          else { try { name = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { name = url.slice(0, 40); } }
+        }
+        recs.push({ id: DB.uid('f_'), courseId: course.id, name, url, folder: week, size: 0, status: 'link', pages: null,
+          kind: { id: info.provider === 'web' || info.provider === 'moodle' ? 'link' : 'video', label: info.label, provider: info.provider, vid: info.id },
+          addedAt: Date.now() });
+      }
+      for (const r of recs) await DB.put('files', r);
+      close(); toast(`加了 ${recs.length} 条链接`);
+      after ? after() : renderCourse(course.id, 'files');
+    };
+  });
+}
+function openLink(f) {
+  const p = (f.kind && f.kind.provider) || 'web', vid = f.kind && f.kind.vid;
+  if ((p === 'youtube' || p === 'vimeo') && vid) {
+    const src = p === 'youtube' ? `https://www.youtube.com/embed/${vid}` : `https://player.vimeo.com/video/${vid}`;
+    modal(`<div class="row"><h2 class="grow">${esc(f.name)}</h2><a class="btn small" href="${esc(f.url)}" target="_blank" rel="noopener">在浏览器打开</a><button class="btn small" data-close>关闭</button></div>
+      <div class="video-wrap"><iframe src="${esc(src)}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>`, box => box.classList.add('wide'));
+    return;
+  }
+  window.open(f.url, '_blank', 'noopener');
+  toast(p === 'video' ? '课堂录像要在 Moodle 里看，已经在新标签页打开了' : '已经在新标签页打开');
 }
 
 async function importFiles(course, list) {
@@ -427,6 +570,9 @@ async function importFiles(course, list) {
   const recs = await ingest(course, items);
   const scanned = recs.filter(r => r.status === 'scanned').length;
   toast(scanned ? `读取完成。${scanned} 个是扫描件，点「用 Gemini 识别」读出文字。` : '课件读取完成，勾选后就能生成笔记', 4000);
+  // 顺手扫一遍难度：先标出这份课件最难的 3 页（一次最多 8 份）
+  const n = Learn.diffAuto(recs, course.name);
+  if (n) toast(`正在标出这 ${n} 份课件最难的 3 页（后台跑，不影响你用）`, 5000);
 }
 
 /* 存文件并提取文字；items: [{file, folder, meta}] */
@@ -443,12 +589,169 @@ async function ingest(course, items) {
     try {
       const r = await Extract.fromFile(srcs.get(rec.id));
       Object.assign(rec, { text: r.text, pages: r.pages, status: r.scanned ? 'scanned' : 'ready' });
+      // 导进来顺手判断这是什么：课件 / 练习题 / 参考答案 / 阅读 / 作业 / 考试…
+      rec.kind = Extract.classify(rec.name, rec.folder, r.text);
     } catch (e) { Object.assign(rec, { status: 'error', error: e.message }); }
     await DB.put('files', rec);
     refreshIfOn(course.id);
   }
   return recs;
 }
+
+/* ---------- 扩展直接推过来的同步数据 ----------
+   同步整个在插件里跑（列表、下载、截止日期），这里只负责写进本地库。
+   以前是页面反过来一条条向扩展要，扩展/页面任一没就位就同步不了。 */
+const ExtPush = (() => {
+  const byMoodle = new Map();
+  async function ensureCourse(c) {
+    let local = (await DB.all('courses')).find(x => x.moodleId === c.id || (x.code && x.code === courseCode(c.name) && !x.moodleId));
+    if (!local) local = { id: DB.uid('c_'), name: shortName(c.name), code: courseCode(c.name), examDate: '', glossary: [], createdAt: Date.now(), color: COLORS[State.courses.length % COLORS.length] };
+    local.moodleId = c.id;
+    await DB.put('courses', local);
+    byMoodle.set(c.id, local.id);
+    await loadCourses();
+    return local;
+  }
+  /* 文字类条目的「类型」：作业 / 测验 / 每周说明 / 课程简介 / 成绩，导入时就标好 */
+  const KIND_BY_MODULE = { assign: { id: 'assignment', label: '作业' }, quiz: { id: 'exam', label: '测验' }, section: { id: 'guide', label: '每周说明' }, overview: { id: 'guide', label: '课程说明' }, grades: { id: 'guide', label: '成绩' }, lti: { id: 'video', label: '课堂录像 / 外部工具' }, turnitintooltwo: { id: 'assignment', label: '作业（Turnitin）' }, assignfile: { id: 'assignment', label: '作业附件' } };
+  /* 写进本地库：同一门课里 cmid + 文件名一样的就是同一个东西 —— 有就更新，没有才新建（以前每同步一次就多一份） */
+  async function findSame(courseId, it) {
+    const list = await DB.byIndex('files', 'courseId', courseId);
+    return list.find(f => f.moodleCmid && f.moodleCmid === it.cmid && (it.link || f.name === it.name));
+  }
+  // 文件解析排队做，一次一个（几十个 PDF 同时解析 iPad / 小内存 Mac 会卡死）
+  let extractQ = Promise.resolve();
+  const queueExtract = (rec, file, courseId) => {
+    extractQ = extractQ.then(async () => {
+      try {
+        const r = await Extract.fromFile(file);
+        Object.assign(rec, { text: r.text, pages: r.pages, status: r.scanned ? 'scanned' : 'ready' });
+        rec.kind = (rec.module && KIND_BY_MODULE[rec.module]) || Extract.classify(rec.name, rec.folder, r.text);
+      } catch (e) { Object.assign(rec, { status: 'error', error: e.message }); }
+      await DB.put('files', rec);
+      refreshIfOn(courseId);
+    });
+    return extractQ;
+  };
+  async function writeItem(courseId, it) {
+    const old = await findSame(courseId, it);
+    if (it.link) {
+      const info = Extract.linkInfo(it.url || '');
+      const hasText = (it.text || '').trim().length > 40;
+      const k0 = KIND_BY_MODULE[it.module];
+      const kind = hasText ? Object.assign(k0 || Extract.classify(it.name, it.folder, it.text), { provider: info.provider, vid: info.id, url: true })
+        : (k0 ? Object.assign({}, k0, { provider: info.provider, vid: info.id }) : { id: info.provider === 'web' || info.provider === 'moodle' ? 'link' : 'video', label: info.label, provider: info.provider, vid: info.id });
+      if (old) {
+        if (old.text === (hasText ? it.text : '') && old.name === it.name && old.url === it.url) return 'same';
+        Object.assign(old, { name: it.name || old.name, url: it.url, folder: it.folder || old.folder, text: hasText ? it.text : old.text, status: hasText ? 'ready' : old.status, kind: Object.assign({}, old.kind || {}, kind), due: it.due || old.due || 0 });
+        await DB.put('files', old);
+        return 'updated';
+      }
+      await DB.put('files', { id: DB.uid('f_'), courseId, name: it.name || it.url, url: it.url, folder: it.folder || '', size: 0,
+        status: hasText ? 'ready' : 'link', text: hasText ? it.text : '', pages: null, addedAt: Date.now(), moodleCmid: it.cmid || null, module: it.module || '', due: it.due || 0, kind });
+      return 'added';
+    }
+    const bin = atob(it.b64 || ''); const u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    const file = new File([u], it.name, { type: it.mime || Extract.MIME[Extract.ext(it.name)] || '' });
+    if (!Extract.isSupported(it.name)) return 'same';
+    // Moodle 上换了新版本：原地替换文件，笔记、标注、难度标记都还挂在这条上
+    const id = old ? old.id : DB.uid('f_');
+    await DB.putBlob(id, file);
+    const rec = Object.assign(old || { id, courseId, addedAt: Date.now() }, { name: it.name, folder: it.folder || (old && old.folder) || '', size: file.size, type: it.mime || '', hasBlob: true,
+      status: 'extracting', moodleCmid: it.cmid || null, moodleRevision: it.revision || '', moodleTitle: it.moodleTitle || '', module: it.module || '' });
+    if (old) rec.updatedFromMoodle = Date.now();
+    await DB.put('files', rec);
+    queueExtract(rec, file, courseId);
+    return old ? 'updated' : 'added';
+  }
+  /* 本机已有：{ moodle 课程 id: ['cmid|文件名|版本', …] }，扩展据此跳过不用再下的文件 */
+  async function haveMap(ids) {
+    const out = {};
+    const courses = await DB.all('courses');
+    for (const mid of ids || []) {
+      const c = courses.find(x => x.moodleId === mid); if (!c) continue;
+      const files = await DB.byIndex('files', 'courseId', c.id);
+      out[mid] = files.filter(f => f.moodleCmid && !f.url).map(f => `${f.moodleCmid}|${f.name}|${f.moodleRevision || '*'}`);
+    }
+    return out;
+  }
+  /* 以前的版本每同步一次就重复一份：同一个 cmid + 文件名只留一份（被笔记用到、有标注的那份优先） */
+  async function dedupe(courseId) {
+    const files = await DB.byIndex('files', 'courseId', courseId);
+    const notes = await DB.byIndex('notes', 'courseId', courseId);
+    const used = new Set(notes.flatMap(n => [...(n.sourceFileIds || []), n.deskFile]).filter(Boolean));
+    const score = f => (used.has(f.id) ? 100 : 0) + (f.ink && Object.keys(f.ink).length ? 50 : 0) + (f.prep ? 10 : 0) + (f.hard ? 10 : 0) + (f.keypoints ? 10 : 0) + (f.translation ? 10 : 0) + (f.status === 'ready' ? 1 : 0);
+    const groups = new Map();
+    for (const f of files) {
+      if (!f.moodleCmid) continue;
+      const k = f.moodleCmid + '|' + (f.url ? '' : f.name);
+      (groups.get(k) || groups.set(k, []).get(k)).push(f);
+    }
+    let removed = 0;
+    for (const g of groups.values()) {
+      if (g.length < 2) continue;
+      g.sort((a, b) => score(b) - score(a) || (a.addedAt || 0) - (b.addedAt || 0));
+      for (const f of g.slice(1)) { if (used.has(f.id)) continue; await DB.del('files', f.id); removed++; }
+    }
+    return removed;
+  }
+  async function handle(p) {
+    try {
+      if (p.type === 'start') {
+        State.sync = { total: 0, done: 0, added: 0, updated: 0, same: 0, skipped: [], failed: [], current: '正在准备…', finished: false };
+        showSyncProgress(true);
+        for (const c of p.courses) await ensureCourse(c);
+      } else if (p.type === 'course') {
+        await ensureCourse(p.course);
+        if (State.sync) State.sync.total += p.total || 0;
+        showSyncProgress();
+      } else if (p.type === 'item') {
+        const cid = byMoodle.get(p.courseId) || p.courseId;
+        const r = await writeItem(cid, p.item);
+        if (State.sync) { State.sync.current = p.item.name; }
+        showSyncProgress();
+        return r;
+      } else if (p.type === 'progress') {
+        if (State.sync) Object.assign(State.sync, { done: p.done, added: p.added, updated: p.updated || 0, same: p.same || 0, current: p.current || '' }, p.failed ? { failed: p.failed } : {});
+        showSyncProgress();
+      } else if (p.type === 'deadlines') {
+        const d = Deadlines.load();
+        const doneIds = new Set(d.items.filter(x => x.done).map(x => x.id));   // 自己勾掉的不要被同步冲回来
+        d.items = [...d.items.filter(x => x.manual), ...p.items.map(e => ({ ...e, id: 'm' + e.id, done: doneIds.has('m' + e.id) }))];
+        d.at = Date.now();
+        try { localStorage.setItem('tingkeben.deadlines', JSON.stringify(d)); } catch (e) {}
+      } else if (p.type === 'error') {
+        if (State.sync) { State.sync.finished = true; State.sync.current = ''; State.sync.failed = [p.message]; }
+        showSyncProgress(true);
+        toast('同步停下了：' + p.message, 8000);
+        State.sync = null; SyncUI.render();
+      } else if (p.type === 'done') {
+        await extractQ;
+        let removed = 0;
+        for (const lid of new Set(byMoodle.values())) removed += await dedupe(lid).catch(() => 0);
+        if (State.sync) Object.assign(State.sync, { finished: true, current: '', failed: p.failed || [], added: p.added, updated: p.updated || 0, same: p.same || 0, removed });
+        showSyncProgress(true);
+        toast(`同步完成：新增 ${p.added} 项${p.updated ? `，更新 ${p.updated} 项` : ''}${removed ? `，清掉 ${removed} 个重复课件` : ''}${p.failed && p.failed.length ? `，${p.failed.length} 个失败` : ''}`, 6000);
+        await loadCourses(); State.sync = null; SyncUI.render();
+        try { localStorage.setItem('tingkeben.moodleAt', String(Date.now())); localStorage.setItem('tingkeben.moodleAdded', String(p.added)); } catch (e) {}
+        if (location.hash.slice(1) === 'home' || !location.hash) route();
+      }
+    } catch (e) { console.warn('扩展推送处理失败', e); }
+  }
+  async function ask(q) {
+    if (q.type === 'have') return haveMap(q.moodleIds);
+    return null;
+  }
+  return { handle, ask, dedupe };
+})();
+document.documentElement.dataset.tkbReply = '1';   // 告诉扩展：这一版会回话（扩展据此等待「新增/更新/已有」）
+window.addEventListener('message', async e => {
+  if (e.source !== window || !e.data || e.data.tkbFrom !== 'ext' || !(e.data.push || e.data.ask)) return;
+  const data = e.data.push ? await ExtPush.handle(e.data.push) : await ExtPush.ask(e.data.ask).catch(() => null);
+  // 回话给扩展（新版扩展会等这个，用来跳过已有文件、统计新增/更新）
+  if (e.data.replyId) window.postMessage({ tkbAppReply: e.data.replyId, data: data === undefined ? null : data }, location.origin);
+});
 
 /* ---------- 从 Moodle 同步（需要 Chrome 扩展「听课本助手」） ---------- */
 const Ext = {
@@ -489,6 +792,18 @@ function extGuide() {
 
 async function syncModal(onlyCourseId) {
   if (State.sync) { showSyncProgress(true); return; }
+  // Mac 版里看不到 Chrome 的扩展：同步要在 Chrome 的 Moodle 页面上点扩展图标，数据会直接送进这里
+  if (!Ext.version() && document.documentElement.dataset.tkbDesktop) {
+    modal(`<h2>从 Moodle 同步到 Mac 版</h2>
+      <ol style="margin:0;padding-left:20px;line-height:1.9">
+        <li>保持这个 Mac 版听课本开着</li>
+        <li>在 <b>Chrome</b> 里打开 Moodle 并登录</li>
+        <li>点 Chrome 右上角「听课本助手」图标 → 勾选课程 →「同步到听课本」</li>
+      </ol>
+      <p class="hint" style="margin:0">扩展会直接把课件、作业要求、成绩等送进这个窗口，进度在这里显示。需要「听课本助手」1.6 以上。</p>
+      <div class="row" style="justify-content:flex-end"><button class="btn" data-close>知道了</button><a class="btn primary" href="${MOODLE}/my/courses.php" target="_blank" rel="noopener">打开 Moodle</a></div>`);
+    return;
+  }
   if (!Ext.version()) { extGuide(); return; }
   const close = modal(`<h2>从 Moodle 同步</h2><div class="thinking"><span class="spin"></span>正在读取你的 Moodle 课程…</div>`);
   let courses;
@@ -516,63 +831,15 @@ async function syncModal(onlyCourseId) {
   });
 }
 
+/* 同步统一交给扩展后台去跑（和在 Moodle 页面点扩展图标是同一条路）：
+   扩展抓 → 推给这个页面写库；已有的文件不重下，改过的原地更新，作业要求 / 每周说明 / 成绩一起带回来。 */
 async function runSync(courses, includeEbook) {
-  const S = State.sync = { total: 0, done: 0, added: 0, skipped: [], failed: [], current: '正在列出文件…', finished: false };
-  showSyncProgress(true);
   try {
-    // 1. 对应本地课程（没有就建）
-    const plan = [];
-    for (const mc of courses) {
-      let local = (await DB.all('courses')).find(c => c.moodleId === mc.id) || State.courses.find(c => c.code && c.code === courseCode(mc.name) && !c.moodleId);
-      if (!local) {
-        local = { id: DB.uid('c_'), name: shortName(mc.name), code: courseCode(mc.name), examDate: '', glossary: [], createdAt: Date.now(), color: COLORS[State.courses.length % COLORS.length] };
-      }
-      local.moodleId = mc.id;
-      await DB.put('courses', local);
-      await loadCourses();
-      S.current = '正在列出 ' + local.name + ' 的文件…'; showSyncProgress();
-      const files = await Ext.call('listFiles', { courseId: mc.id }, 60000);
-      const have = new Set((await DB.byIndex('files', 'courseId', local.id)).map(f => f.moodleCmid).filter(Boolean));
-      const skip = new Set(local.moodleSkip || []);
-      const todo = files.filter(f => !have.has(f.cmid) && !skip.has(f.cmid) && (includeEbook || !/e-?book/i.test(f.name)));
-      plan.push({ local, todo });
-      S.total += todo.length;
-    }
-    showSyncProgress();
-    // 2. 一个一个下载
-    for (const { local, todo } of plan) {
-      for (const f of todo) {
-        S.current = `${local.name} · ${f.name}`; showSyncProgress();
-        try {
-          const got = await Ext.call('fetchFile', { cmid: f.cmid, module: f.module });
-          const items = [];
-          for (const g of got) {
-            if (g.error) { S.failed.push(`${f.name}：${g.error}`); continue; }
-            if (!Extract.isSupported(g.name)) { S.skipped.push(g.name); continue; }
-            const file = new File([b64ToBlob(g.b64, g.mime || Extract.MIME[Extract.ext(g.name)] || '')], g.name, { type: g.mime || '' });
-            items.push({ file, folder: f.folder, meta: { moodleCmid: f.cmid, moodleCourseId: local.moodleId, moodleTitle: f.name, moodleRevision: g.revision } });
-          }
-          if (items.length) { await ingest(local, items); S.added += items.length; }
-          else if (!got.length) S.failed.push(`${f.name}：没有文件`);
-          else if (got.every(g => !g.error)) { local.moodleSkip = [...(local.moodleSkip || []), f.cmid]; await DB.put('courses', local); } // 全是不支持的类型，下次不再检查
-        } catch (e) {
-          if (e.code === 'login' || e.code === 'busy') { S.failed.push(e.message); throw e; }
-          S.failed.push(`${f.name}：${e.message}`);
-        }
-        S.done++; showSyncProgress();
-      }
-    }
+    await Ext.call('startSync', { courses, ebook: !!includeEbook }, 60000);
+    toast('开始同步，进度会显示在这里', 3000);
   } catch (e) {
-    if (!S.failed.includes(e.message)) S.failed.push(e.message || String(e));
+    toast((e && e.message) || '同步没启动起来', 6000);
   }
-  S.finished = true; S.current = '';
-  await loadCourses();
-  showSyncProgress(true);
-  toast(`同步完成：新增 ${S.added} 个课件${S.skipped.length ? `，${S.skipped.length} 个类型不支持` : ''}${S.failed.length ? `，${S.failed.length} 个失败` : ''}`, 6000);
-  try { localStorage.setItem('tingkeben.moodleAt', String(Date.now())); localStorage.setItem('tingkeben.moodleAdded', String(S.added)); } catch (e) {}
-  State.sync = null; SyncUI.render();
-  await Deadlines.refresh(true);
-  if (location.hash.slice(1) === 'home' || !location.hash) route();
 }
 
 function showSyncProgress(force) {
@@ -584,7 +851,7 @@ function showSyncProgress(force) {
   const html = `
     <h2>${S.finished ? '同步完成' : '正在同步 Moodle'}</h2>
     <div class="level" style="width:100%;height:8px"><i style="width:${S.total ? Math.round(S.done / S.total * 100) : 3}%"></i></div>
-    <div style="font-size:14px">${S.finished ? `新增 <b>${S.added}</b> 个课件` : `${S.done} / ${S.total || '…'} · ${esc(S.current)}`}</div>
+    <div style="font-size:14px">${S.finished ? `新增 <b>${S.added}</b> 项${S.updated ? ` · 更新 <b>${S.updated}</b> 项` : ''}${S.same ? ` · ${S.same} 项没变化` : ''}${S.removed ? ` · 清掉 ${S.removed} 个重复` : ''}` : `${S.done} / ${S.total || '…'} · ${esc(S.current)}${S.added || S.updated ? `<div class="hint">新增 ${S.added || 0} · 更新 ${S.updated || 0}${S.same ? ' · 没变化 ' + S.same : ''}</div>` : ''}`}</div>
     ${S.skipped.length ? `<details><summary style="font-size:13px;color:var(--muted)">${S.skipped.length} 个文件类型不支持，已跳过</summary><div class="hint">${S.skipped.map(esc).join('<br>')}</div></details>` : ''}
     ${S.failed.length ? `<details ${S.finished ? 'open' : ''}><summary style="font-size:13px;color:var(--danger)">${S.failed.length} 个没同步成功</summary><div class="hint">${S.failed.map(esc).join('<br>')}</div></details>` : ''}
     <div class="row" style="justify-content:flex-end"><button class="btn" data-close>${S.finished ? '关闭' : '放到后台继续'}</button></div>`;
@@ -615,7 +882,7 @@ async function ocrFile(course, f) {
 }
 
 /* ---------- 生成笔记 ---------- */
-const GEN_OUTS = [['note', '笔记', '中英对照讲义'], ['points', '重点', '要背的知识点'], ['cards', '记忆卡片', '正反面刷卡'], ['quiz', '测验', '单选题 + 解析']];
+const GEN_OUTS = [['note', '笔记', '按课件顺序的中英对照讲义'], ['points', '重点', '要背的知识点'], ['quiz', '测验', '单选题 + 解析']];
 const GenPref = {
   get() { try { const v = JSON.parse(localStorage.getItem('tingkeben.genouts') || 'null'); return Array.isArray(v) && v.length ? v : ['note']; } catch (e) { return ['note']; } },
   set(v) { try { localStorage.setItem('tingkeben.genouts', JSON.stringify(v)); } catch (e) {} },
@@ -660,9 +927,7 @@ async function generateModal({ course, preselect = [], sessionId = null, noteId 
       const sid = $('#g-sess', box)?.value;
       const sChars = sid ? sessions.find(s => s.id === sid).segments.reduce((n, g) => n + g.en.length + g.zh.length, 0) : 0;
       const tokens = Math.round((chars + sChars) / 3.2) + 1500;
-      const yuan = p.id === 'deepseek' ? (tokens * 2 + 12000 * 8) / 1e6 : null;
-      const extra = o.filter(k => k !== 'note').length * 0.01;
-      $('#g-est', box).textContent = `用 ${p.label}（${p.model}）· 材料约 ${Math.round(tokens / 1000)}k tokens` + (yuan !== null ? ` · 预计不到 ¥${Math.max(0.01, (o.includes('note') ? yuan : tokens * 2 / 1e6) + extra).toFixed(2)}（按高峰价估）` : '') + (o.length > 1 || (o.length && !o.includes('note')) ? ' · 只生成勾选的，不会多出别的' : '');
+      $('#g-est', box).textContent = `用 ${p.label}（${p.model}）· 材料约 ${Math.round(tokens / 1000)}k tokens` + (o.length > 1 || (o.length && !o.includes('note')) ? ' · 只生成勾选的，不会多出别的' : '');
     };
     $$('input,select', box).forEach(i => i.addEventListener('change', est)); est();
     $('#g-go', box).onclick = async () => {
@@ -750,7 +1015,7 @@ async function startGeneration({ course, fileIds, sessionId, title, style, extra
     State.gens.delete(note.id);
     job.done();
     ping();
-    if (autoStudy) Study.background(note.id, thenParts.length ? thenParts : ['points', 'cards', 'quiz']);
+    if (autoStudy) Study.background(note.id, thenParts.length ? thenParts : ['points', 'quiz']);
   })();
   return note.id;
 }
@@ -783,14 +1048,14 @@ async function studyFlow({ courseId = null, noteId = null, title = '' } = {}) {
   const ready = sortFiles(allFiles.filter(f => f.status === 'ready' || isPdf(f)));
   const notes = allNotes.sort((a, b) => b.createdAt - a.createdAt);
   modal(`<h2>${ICON.mic}手写笔记 + 课堂录音</h2>
-    <p class="hint" style="margin:0">不用课件也能开始。iPad 上用 Apple Pencil 在「画板」写，右栏同时录音并出中文字幕；下课后点「优化笔记」，AI 把老师讲的和你手写的合到一起。</p>
+    <p class="hint" style="margin:0">不用课件也能开始。iPad 上用 Apple Pencil 直接在笔记上写，右栏同时录音并出中文字幕；下课后点「优化笔记」，AI 把老师讲的和你手写的合到一起。</p>
     <div class="field"><label for="sf-c">哪门课</label><select id="sf-c">${courses.map(c => `<option value="${c.id}" ${c.id === course.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
     <div class="field"><label for="sf-f">左边放哪份课件（可以不选）</label>
       <select id="sf-f"><option value="">不用课件 / 还没有</option>${ready.map(f => `<option value="${f.id}">${esc(weekOf(f).label)} · ${esc(f.name)}</option>`).join('')}</select>
       <span class="hint">${ready.length ? '只影响左栏显示，不影响手写和录音；上课时也能换' : '这门课还没有课件，左栏先空着。课件以后导进来，再进工作台一样能看'}</span></div>
     <div class="field"><label for="sf-n">记在哪份笔记</label>
       <select id="sf-n"><option value="">新建一份空白笔记</option>${notes.map(n => `<option value="${n.id}" ${n.id === noteId ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}</select></div>
-    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="sf-go">${ICON.mic}进入：画板 + 录音</button></div>`, (box, close) => {
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="sf-go">${ICON.mic}进入：笔记 + 录音</button></div>`, (box, close) => {
     $('#sf-c', box).onchange = e => { close(); studyFlow({ courseId: e.target.value }); };
     $('#sf-go', box).onclick = async () => {
       const fid = $('#sf-f', box).value;
@@ -802,8 +1067,8 @@ async function studyFlow({ courseId = null, noteId = null, title = '' } = {}) {
         if (!(n.sourceFileIds || []).includes(fid)) n.sourceFileIds = [...(n.sourceFileIds || []), fid];
         await DB.put('notes', n);
       }
-      // 进工作台先把分栏对到手写和录音：中间画板 + 右边实时翻译
-      DeskPref.set({ mtab: 'board', rtab: 'live' });
+      // 进工作台先把分栏对到手写和录音：中间笔记 + 右边录音
+      DeskPref.set({ mtab: 'note', rtab: 'live' });
       close();
       location.hash = 'desk-' + n.id;
     };
@@ -813,9 +1078,10 @@ async function studyFlow({ courseId = null, noteId = null, title = '' } = {}) {
 /* 课堂结束后：手写 + 录音一起交给 AI 整理进笔记（有录音走完整流程，只有手写就只认手写） */
 async function enhanceNote(note, course, after) {
   const ink = typeof Board !== 'undefined' && Board.hasInk(note);
-  if (!note.sessionId && !ink) { toast('这节课还没有录音，画板上也还没写东西。先录一段或在「画板」写点内容'); return; }
-  if (note.sessionId) return runRecap(note, course, after);
-  const close = modal(`<h2>手写笔记 → 笔记</h2><div data-job-slot="hw:${note.id}"><div class="thinking"><span class="spin"></span>准备中…</div></div><div id="en-st" class="hint" hidden></div><p class="hint" style="margin:0">会把画板上的手写识别出来，整理成「我的手写笔记」加到笔记最后，不会动你已经写好的部分。</p>`);
+  const hasRec = (note.sessionIds || []).length || note.sessionId;
+  if (!hasRec && !ink) { toast('这节课还没有录音，笔记上也还没写东西。先录一段，或者直接在笔记上写'); return; }
+  if (hasRec) return runRecap(note, course, after);
+  const close = modal(`<h2>手写笔记 → 笔记</h2><div data-job-slot="hw:${note.id}"><div class="thinking"><span class="spin"></span>准备中…</div></div><div id="en-st" class="hint" hidden></div><p class="hint" style="margin:0">会把笔记上的手写识别出来，整理成「我的手写笔记」加到笔记最后，不会动你已经写好的部分。</p>`);
   try {
     await Recap.handwritingMerge(note, course, t => { const el = $('#en-st'); if (el) { el.hidden = false; el.textContent = t; } });
     close(); toast('手写已经整理进笔记');
@@ -824,6 +1090,30 @@ async function enhanceNote(note, course, after) {
 }
 
 /* 上课：找这份课件已有的笔记，没有就建一份空白的，然后进工作台 */
+/* 一键进课堂：直接是三栏（左课件 / 中笔记或画板 / 右翻译·AI），不再先弹模式选择框。
+   模式（画板 / 笔记 / 重点…）在课堂里用中栏的标签切换，不用重新进来一次。 */
+async function openClassroom(course, fileId) {
+  if (!course) { toast('先选一门课'); return; }
+  const [files, notes] = await Promise.all([
+    DB.byIndex('files', 'courseId', course.id),
+    DB.byIndex('notes', 'courseId', course.id),
+  ]);
+  const ready = sortFiles(files.filter(f => f.status === 'ready' || isPdf(f)));
+  const ns = notes.sort((a, b) => b.createdAt - a.createdAt);
+  // 优先上次在这门课用的笔记（有 deskFile 的），否则最近一份
+  const note = ns.find(n => n.deskFile) || ns[0];
+  const fid = fileId || (note && note.deskFile) || (ready[0] && ready[0].id) || '';
+  if (note) {
+    if (fid && note.deskFile !== fid) { note.deskFile = fid; await DB.put('notes', note); }
+    // 进课堂默认是「画板 + 录音」，笔记/重点/卡片在教室里点中栏标签随时切
+    DeskPref.set({ left: true, mid: true, mtab: 'note', rtab: 'live' });
+    location.hash = 'desk-' + note.id;
+    return;
+  }
+  const title = `${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} ${course.code || course.name}`;
+  await startClass(course, fid ? [fid] : [], title);
+}
+
 async function startClass(course, fileIds, title) {
   const notes = await DB.byIndex('notes', 'courseId', course.id);
   let n = fileIds.length ? notes.filter(x => (x.sourceFileIds || []).includes(fileIds[0])).sort((a, b) => b.createdAt - a.createdAt)[0] : null;
@@ -849,21 +1139,27 @@ async function startClassModal(course) {
 }
 
 /* ---------- 笔记页 ---------- */
-const NOTE_TABS = [['note', '笔记'], ['board', '画板'], ['points', '重点'], ['cards', '记忆卡片'], ['quiz', '测验'], ['map', '思维导图']];
+// 笔记页的功能标签：笔记（画布）/ 课件 / 重点 / 测验 / 思维导图 / 生词本 / 纯文本（这一版之前被精简掉了，补回来）
+const NOTE_TABS = [['note', '笔记'], ['doc', '课件'], ['points', '重点'], ['quiz', '测验'], ['map', '思维导图'], ['vocab', '生词本'], ['text', '纯文本']];
 function noteTabsHTML(tab, note) {
   const pg = Study.progress(note);
   return NOTE_TABS.map(([k, l]) => `<button data-ntab="${k}" class="${tab === k ? 'on' : ''}">${l}${k === 'points' && pg.total ? ` <span class="pill mute">${pg.done}/${pg.total}</span>` : ''}${k !== 'note' && k !== 'board' && k !== 'map' && State.studyGens.has(note.id) ? ' <span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>' : ''}</button>`).join('');
 }
 /* 在 pane 里画一个笔记工具（笔记以外的标签） */
 function mountNoteTool(tab, note, course, pane, go) {
-  if (tab === 'board') return Board.mount(pane, note, { course });
+
   if (tab === 'points') return Study.points(note, pane, { focus: go && go.focus });
-  if (tab === 'cards') return Study.cards(note, pane);
   if (tab === 'quiz') return Study.quiz(note, pane, { gotoPoint: id => go && go.toPoint(id) });
   if (tab === 'map') return MindMap.mount(pane, note);
+  if (tab === 'doc') return docTab(note, course, pane);
+  if (tab === 'vocab') { pane.innerHTML = `<div class="empty"><strong>生词本</strong>这门课的生词按艾宾浩斯节奏复习。<div class="row" style="justify-content:center;margin-top:12px"><a class="btn primary" href="#vocab~${esc(note.courseId)}">打开生词本</a></div></div>`; return; }
+
 }
 async function renderNote(id, tab = 'note', opt = {}) {
   if (!location.hash.slice(1).startsWith('note-' + id)) return; // 已经离开这页了（异步回调晚到），不要把别的页面盖掉
+  if (tab === 'board') tab = 'note'; // 画板已经并进笔记，老链接直接落到笔记
+  if (tab === 'vocab') { location.hash = 'vocab~' + note.courseId; return; }
+  if (['points', 'quiz', 'map'].includes(tab)) { location.hash = 'review-' + id + '~' + tab; return; }
   const note = await DB.get('notes', id);
   if (!note) { location.hash = 'home'; return; }
   const course = await DB.get('courses', note.courseId);
@@ -874,7 +1170,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
       <a class="crumb" href="#course-${note.courseId}~notes">← ${esc(course ? course.name : '课程')}</a>
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1>${esc(note.title)}</h1>
-          <div class="meta">${fmtDate(note.createdAt)} · ${esc(note.model || '')}${files.length ? ' · 来源：' + files.map(f => esc(f.name)).join('、') : ''}${note.sessionId ? ' · 含课堂录音' : ''}</div></div>
+          <div class="meta">${[fmtDate(note.createdAt), esc(note.model || ''), files.length ? '来源：' + files.map(f => esc(f.name)).join('、') : '', note.sessionId ? '含课堂录音' : ''].filter(Boolean).join(' · ')}</div></div>
         <div class="row"><a class="btn" href="#desk-${id}">上课工作台</a><button class="btn" id="n-ask">问 AI</button></div>
       </div>
       <div class="tabs" id="n-tabs">${noteTabsHTML(tab, note)}</div>
@@ -883,13 +1179,33 @@ async function renderNote(id, tab = 'note', opt = {}) {
   $$('[data-ntab]').forEach(b => b.onclick = () => { history.replaceState(null, '', '#note-' + id + (b.dataset.ntab === 'note' ? '' : '~' + b.dataset.ntab)); renderNote(id, b.dataset.ntab); });
   $('#n-ask').onclick = () => chatDrawer({ note, course });
   const pane = $('#n-pane');
-  if (tab !== 'note') {
-    pane.className = tab === 'board' ? '' : 'card pad tool-pane';
+  // 「笔记」= 课件顺序的笔记文字 + 手写画板（合在一页）；「纯文本」还是老式的文章视图
+  if (tab === 'note') {
+    // 左边课件、右边笔记（白板），左边滑到哪一页，右边就跟着滚到那一页
+    pane.innerHTML = `<div id="note-todo"></div><div class="row noprint note-acts" id="note-acts"></div>
+      <div class="nb-split" id="nb-split"><button class="btn small nb-doc-tog noprint" id="nb-doc-tog" aria-expanded="false">📄 显示课件</button><aside class="nb-left" id="nb-left"></aside><section class="nb-right" id="nb-right"></section></div>`;
+    // 窄屏（iPad 竖屏 / 手机）：课件默认收起，点一下在画布上方展开，不用滚到最底下找
+    const tog = $('#nb-doc-tog');
+    const setDoc = on => { $('#nb-split').classList.toggle('doc-on', on); tog.textContent = on ? '收起课件' : '📄 显示课件'; tog.setAttribute('aria-expanded', on ? 'true' : 'false'); try { localStorage.setItem('tingkeben.nbDoc', on ? '1' : '0'); } catch (e) {} };
+    tog.onclick = () => setDoc(!$('#nb-split').classList.contains('doc-on'));
+    try { if (localStorage.getItem('tingkeben.nbDoc') === '1') setDoc(true); } catch (e) {}
+    renderTodo($('#note-todo'), note, course, () => renderTodo($('#note-todo'), note, course));
+    $('#note-acts').innerHTML = noteActsHTML(note, 'board');
+    bindNoteActs(note, course, id, 'board');
+    // 左右不再自动联动（用户要求：标着页数自己滑）。只有点笔记里的页码小标签时，左边才跳到那一页。
+    let docPaneRef = null;
+    Board.mount($('#nb-right'), note, { course, onPageJump: p => { if (docPaneRef) docPaneRef.scrollTo(p); } });
+    Promise.resolve(noteDocPane($('#nb-left'), note, course, null)).then(x => { docPaneRef = x || null; });
+    return;
+  }
+  if (tab !== 'text') {
+    pane.className = 'card pad tool-pane';
     mountNoteTool(tab, note, course, pane, { focus: opt.focus, toPoint: pid => { history.replaceState(null, '', '#note-' + id + '~points'); renderNote(id, 'points', { focus: pid }); } });
     return;
   }
-  pane.innerHTML = `<div class="row noprint note-acts" id="note-acts"></div><article class="sheet"><div id="note-body" class="md"></div></article>`;
+  pane.innerHTML = `<div id="note-todo"></div><div class="row noprint note-acts" id="note-acts"></div><article class="sheet"><div id="note-body" class="md"></div></article>`;
   const body = $('#note-body'), acts = $('#note-acts');
+  renderTodo($('#note-todo'), note, course, () => renderTodo($('#note-todo'), note, course));
 
   if (gen) {
     acts.innerHTML = '<button class="btn small" id="n-stop">停止生成</button>';
@@ -908,19 +1224,40 @@ async function renderNote(id, tab = 'note', opt = {}) {
   }
 
   if (note.status === 'error') body.innerHTML = `<div class="empty"><strong>生成失败</strong>${esc(note.error)}</div>`;
-  else if (!note.markdown) body.innerHTML = `<div class="empty"><strong>这是一份空白笔记</strong>可以直接点「编辑」写，或者在「画板」里手写；有课件的话点「生成」让 AI 先写一稿。</div>`;
+  else if (!note.markdown) body.innerHTML = `<div class="empty"><strong>这是一份空白笔记</strong>可以直接点「编辑」写，或者直接在笔记上写；有课件的话点「生成」让 AI 先写一稿。</div>`;
   else body.innerHTML = md(note.markdown) + (note.error ? `<p class="noprint" style="color:var(--warn)">（${esc(note.error)}，内容可能不完整）</p>` : '');
   linkPageRefs(body, note);
-  acts.innerHTML = `
-    ${note.sessionId || Board.hasInk(note) ? `<button class="btn small primary" id="n-recap" title="把老师讲的和你手写的整理进笔记下半部分">${ICON.spark}手写笔记 + 课堂录音优化笔记</button>` : `<button class="btn small" id="n-link">关联课堂录音</button>`}
-    <button class="btn small" id="n-edit">编辑</button>
-    <button class="btn small" id="n-copy">复制</button>
-    <button class="btn small" id="n-pdf">导出 PDF</button>
-    <button class="btn small" id="n-regen">${note.markdown ? '重新生成' : '生成'}</button>
-    <button class="btn small ghost" id="n-del">删除</button>`;
-  $('#n-copy').onclick = async () => { try { await navigator.clipboard.writeText(note.markdown); toast('已复制 Markdown，可以粘贴到 Goodnotes / Notion'); } catch (e) { toast('复制失败，长按文字手动复制'); } };
-  $('#n-pdf').onclick = () => { toast('在打印窗口选「存储为 PDF」，再导入 Goodnotes 手写批注'); setTimeout(() => window.print(), 300); };
-  $('#n-regen').onclick = async () => {
+  acts.innerHTML = noteActsHTML(note, 'text');
+  bindNoteActs(note, course, id, 'text');
+  $('#n-edit').onclick = () => {
+    body.innerHTML = `<textarea id="n-text" style="min-height:60vh;font-family:var(--mono);font-size:14px">${esc(note.markdown)}</textarea>
+      <div class="row noprint" style="justify-content:flex-end;margin-top:10px"><button class="btn" id="n-cancel">取消</button><button class="btn primary" id="n-save">保存</button></div>`;
+    $('#n-cancel').onclick = () => renderNote(id);
+    $('#n-save').onclick = async () => { note.markdown = $('#n-text').value; await DB.put('notes', note); toast('已保存'); renderNote(id); };
+  };
+}
+
+function noteActsHTML(note, view) {
+  return `
+    ${(note.sessionIds || []).length || note.sessionId || Board.hasInk(note) ? `<button class="btn small primary" id="n-recap" title="把老师讲的和你手写的整理进笔记下半部分">${ICON.spark}手写笔记 + 课堂录音优化笔记</button>` : `<button class="btn small" id="n-link">关联课堂录音</button>`}
+    <button class="btn small" id="n-ai" title="把笔记 + 错题 + 没搞懂的打包成一段 prompt">复制给 AI</button>
+    <button class="btn small ghost danger-text" data-del-note="${note.id}" title="删除这份笔记">删除笔记</button>
+    <details class="more">
+      <summary class="btn small">更多</summary>
+      <div class="more-menu">
+        <button id="n-edit">编辑正文</button>
+        <button id="n-copy">复制 Markdown</button>
+        ${view === 'board' ? `<a href="#note-${note.id}~text">纯文本视图</a>` : `<a href="#note-${note.id}">笔记 + 手写</a>`}
+        <button id="n-pdf">导出 PDF</button>
+        <button id="n-regen">${note.markdown ? '重新生成' : '生成'}</button>
+      </div>
+    </details>`;
+}
+function bindNoteActs(note, course, id, view) {
+  const copy = $('#n-copy'); if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(note.markdown); toast('已复制 Markdown，可以粘贴到 Goodnotes / Notion'); } catch (e) { toast('复制失败，长按文字手动复制'); } };
+  const ai = $('#n-ai'); if (ai) ai.onclick = () => aiPackModal(note, course);
+  const pdf = $('#n-pdf'); if (pdf) pdf.onclick = () => { toast('在打印窗口选「存储为 PDF」'); setTimeout(() => window.print(), 300); };
+  const re = $('#n-regen'); if (re) re.onclick = async () => {
     if (!course) return;
     if (!(note.sourceFileIds || []).length && !note.sessionId) { generateModal({ course, noteId: note.id, title: note.title }); return; }
     await startGeneration({ course, fileIds: note.sourceFileIds || [], sessionId: note.sessionId, title: note.title, style: note.style || 'detailed', extra: note.extra, noteId: note.id });
@@ -928,13 +1265,66 @@ async function renderNote(id, tab = 'note', opt = {}) {
   };
   const rc = $('#n-recap'); if (rc) rc.onclick = () => enhanceNote(note, course, () => renderNote(id));
   const lk = $('#n-link'); if (lk) lk.onclick = () => linkSessionModal(note, () => renderNote(id));
-  confirmClick($('#n-del'), '确认删除', async () => { await DB.del('notes', id); location.hash = 'course-' + note.courseId + '~notes'; });
-  $('#n-edit').onclick = () => {
-    body.innerHTML = `<textarea id="n-text" style="min-height:60vh;font-family:var(--mono);font-size:14px">${esc(note.markdown)}</textarea>
-      <div class="row noprint" style="justify-content:flex-end;margin-top:10px"><button class="btn" id="n-cancel">取消</button><button class="btn primary" id="n-save">保存</button></div>`;
-    $('#n-cancel').onclick = () => renderNote(id);
-    $('#n-save').onclick = async () => { note.markdown = $('#n-text').value; await DB.put('notes', note); toast('已保存'); renderNote(id); };
-  };
+  const del = $('#n-del'); if (del) confirmClick(del, '确认删除', async () => { await DB.del('notes', id); location.hash = 'course-' + note.courseId + '~notes'; });
+  const ed = $('#n-edit'); if (ed) ed.onclick = () => editMarkdown(note, () => renderNote(id, view === 'board' ? 'note' : 'text'));
+}
+
+/* 改正文：两种视图都能用，弹窗里改，保存后回到原视图 */
+function editMarkdown(note, after) {
+  modal(`<h2>编辑正文</h2><p class="hint" style="margin:0">手写和课件页不受影响；笔记是按 [p.3] 这样的页码对上课件的。</p>
+    <textarea id="em-t" style="min-height:50vh;font-family:var(--mono);font-size:14px;width:100%">${esc(note.markdown || '')}</textarea>
+    <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-close>取消</button><button class="btn primary" id="em-save">保存</button></div>`, (box, close) => {
+    $('#em-save', box).onclick = async () => { note.markdown = $('#em-t', box).value; await DB.put('notes', note); close(); toast('已保存'); after && after(); };
+  });
+}
+
+/* 这节还没搞懂的（「没听懂」一键转过来的待办清单） */
+function renderTodo(host, note, course, after) {
+  const list = (note.todo || []);
+  const open = list.filter(x => !x.done);
+  if (!list.length) { host.innerHTML = ''; return; }
+  host.innerHTML = `<details class="card pad todo-card noprint">
+    <summary><b>还没搞懂的 · ${open.length}</b><span class="hint">勾掉就是真懂了</span></summary>
+    <div class="todo-list">${list.map(x => `<div class="todo-item ${x.done ? 'done' : ''}" data-td="${esc(x.id)}">
+      <button class="todo-box" aria-label="${x.done ? '标记为没懂' : '标记为懂了'}">${x.done ? '✓' : ''}</button>
+      <div class="grow"><b>${esc(x.t)}</b>${x.detail ? `<div class="hint todo-d">${esc(x.detail)}</div>` : ''}${x.check ? `<div class="hint todo-c">自测：${esc(x.check)}</div>` : ''}</div>
+      ${x.sessionId ? `<a class="btn small ghost" href="#session-${x.sessionId}" title="回到那节课">回看</a>` : ''}
+    </div>`).join('')}</div></details>`;
+  $$('[data-td]', host).forEach(row => $('.todo-box', row).onclick = async () => {
+    await Learn.todoToggle(note, row.dataset.td);
+    after && after();
+  });
+}
+
+/* 一键打包给别的 AI（Claude / ChatGPT / LearnlyAI 都行） */
+function aiPackModal(note, course) {
+  const st = note.study || {};
+  const has = { note: !!note.markdown, points: (st.points || []).length, wrong: (note.wrong || []).length, todo: (note.todo || []).filter(x => !x.done).length };
+  modal(`<h2>复制给 AI</h2>
+    <p class="hint" style="margin:0">打包成一段 prompt，直接粘到 Claude / ChatGPT / LearnlyAI 继续问，不用手动贴来贴去。</p>
+    <div class="checklist">
+      ${has.note ? `<label><input type="checkbox" id="ap-note" checked>笔记正文</label>` : ''}
+      ${has.points ? `<label><input type="checkbox" id="ap-points" checked>${has.points} 个知识点（已掌握的标 ✓）</label>` : ''}
+      ${has.wrong ? `<label><input type="checkbox" id="ap-wrong" checked>${has.wrong} 道做错过的题</label>` : ''}
+      ${has.todo ? `<label><input type="checkbox" id="ap-todo" checked>${has.todo} 条还没搞懂的</label>` : ''}
+    </div>
+    <div class="field"><label for="ap-task">想让它做什么</label><input id="ap-task" type="text" value="查漏补缺，并出 5 道题考我" placeholder="例如：用更简单的中文重讲一遍 / 出 10 道题 / 帮我写复习计划"></div>
+    <div class="field"><label for="ap-pre">预览</label><textarea id="ap-pre" rows="7" style="font-family:var(--mono);font-size:12.5px"></textarea></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>关闭</button><button class="btn primary" id="ap-go">复制</button></div>`, (box, close) => {
+    const build = () => Learn.packPrompt(note, course, {
+      task: $('#ap-task', box).value.trim(),
+      note: !!$('#ap-note', box)?.checked, points: !!$('#ap-points', box)?.checked,
+      wrong: !!$('#ap-wrong', box)?.checked, todo: !!$('#ap-todo', box)?.checked,
+    });
+    const upd = () => { $('#ap-pre', box).value = build(); };
+    $$('input[type=checkbox], #ap-task', box).forEach(el => el.onchange = upd);
+    $('#ap-task', box).oninput = upd;
+    upd();
+    $('#ap-go', box).onclick = async () => {
+      try { await navigator.clipboard.writeText(build()); toast('已复制，粘到 Claude / ChatGPT 就行'); close(); }
+      catch (e) { toast('复制失败，手动选中下面的预览复制'); }
+    };
+  });
 }
 /* 笔记里的 [p.5] 变成可点的小标签（在工作台里点了会跳到课件那一页） */
 function linkPageRefs(body, note) {
@@ -945,10 +1335,86 @@ function linkPageRefs(body, note) {
 async function linkSessionModal(note, after) {
   const sessions = (await DB.byIndex('sessions', 'courseId', note.courseId)).sort((a, b) => b.startedAt - a.startedAt);
   if (!sessions.length) { toast('这门课还没有课堂录音'); return; }
-  modal(`<h2>关联课堂录音</h2><div class="field"><select id="ls-s">${sessions.map(s => `<option value="${s.id}">${esc(s.title)} · ${fmtDate(s.startedAt)} · ${fmtTime(s.duration)}</option>`).join('')}</select><span class="hint">关联后可以点「手写笔记 + 课堂录音优化笔记」，问 AI 也会参考这节课老师说的话</span></div>
+  const linked = new Set([].concat(note.sessionIds || [], note.sessionId || []).filter(Boolean));
+  modal(`<h2>关联课堂录音</h2><p class="hint" style="margin:0">同一份笔记可以关联好几段录音（一门课上好几节课），整理时一起用。</p>
+    <div class="checklist" id="ls-list">${sessions.map(s => `<label><input type="checkbox" value="${s.id}" ${linked.has(s.id) ? 'checked' : ''}>${esc(s.title)} <span class="hint">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)}</span></label>`).join('')}</div>
     <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="ls-go">关联</button></div>`, (box, close) => {
-    $('#ls-go', box).onclick = async () => { note.sessionId = $('#ls-s', box).value; await DB.put('notes', note); close(); after && after(); };
+    $('#ls-go', box).onclick = async () => {
+      const ids = $$('#ls-list input:checked', box).map(i => i.value);
+      note.sessionIds = ids;
+      note.sessionId = ids[ids.length - 1] || '';
+      await DB.put('notes', note); close(); after && after();
+    };
   });
+}
+
+/* 笔记页左边的课件栏：一页一页画出来，滚到哪一页就告诉右边 */
+async function noteDocPane(host, note, course, onPage) {
+  const files = sortFiles((await Promise.all((note.sourceFileIds || []).map(id => DB.get('files', id)))).filter(Boolean));
+  const pdfs = files.filter(f => f.pages || isPdf(f));
+  if (!pdfs.length) {
+    host.innerHTML = '<div class="empty"><strong>还没关联课件</strong>把 Moodle 的 PDF 导进来，这里就会一页一页显示，右边笔记跟着走。</div>';
+    return;
+  }
+  let cur = note.deskFile && pdfs.some(f => f.id === note.deskFile) ? note.deskFile : pdfs[0].id;
+  const draw = async () => {
+    const f = pdfs.find(x => x.id === cur) || pdfs[0];
+    const full = await DB.get('files', f.id);
+    const pdf = isPdf(f);
+    const n = pdf ? await Pdf.count(f.id).catch(() => 0) : (splitPages(full.text).length || 1);
+    if (!n) { host.innerHTML = '<div class="empty">这份课件读不出页数</div>'; return; }
+    host.innerHTML = `<div class="nb-head">${pdfs.length > 1
+      ? `<select id="nb-file" class="dk-sel">${pdfs.map(x => `<option value="${x.id}" ${x.id === cur ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`
+      : `<b class="grow">${esc(f.name)}</b>`}<span class="hint">${n} 页</span></div>
+      <div class="nb-pages" id="nb-pages">${Array.from({ length: n }, (_, i) => i + 1).map(p => {
+        if (pdf) return `<div class="pdfpage nb-page" data-p="${p}"><div class="ph">第 ${p} 页</div><span class="pnum">P${p}</span></div>`;
+        const txt = (splitPages(full.text).find(x => x.n === p) || {}).text || '';
+        return `<div class="docpage nb-page" data-p="${p}"><div class="doc-text">${esc(txt)}</div><span class="pnum">P${p}</span></div>`;
+      }).join('')}</div>`;
+    const sel = $('#nb-file', host); if (sel) sel.onchange = () => { cur = sel.value; draw(); };
+    const pages = $('.nb-pages', host);
+    if (pdf) {
+      const io = new IntersectionObserver(ents => ents.forEach(async en => {
+        if (!en.isIntersecting) return;
+        const node = en.target; if (node.dataset.done) return; node.dataset.done = '1';
+        try { await renderPdfPageInto(node, f.id, Number(node.dataset.p)); } catch (e) { node.innerHTML = `<div class="ph">第 ${node.dataset.p} 页加载失败</div>`; }
+      }), { root: pages, rootMargin: '600px' });
+      $$('.nb-page', host).forEach(x => io.observe(x));
+    }
+    let ticking = false;
+    const pick = () => {
+      ticking = false;
+      if (!pages.isConnected || !pages.offsetParent || !pages.clientHeight) return;   // 课件栏收起时不要乱报页码（会把画布拽到最后一块）
+      const nodes = $$('.nb-page', host);
+      if (!nodes.length) return;
+      // 滚到底/滚到顶直接取最后一页/第一页，否则取离顶边最近的那页
+      if (pages.scrollTop + pages.clientHeight >= pages.scrollHeight - 6) return onPage && onPage(Number(nodes[nodes.length - 1].dataset.p));
+      if (pages.scrollTop <= 2) return onPage && onPage(Number(nodes[0].dataset.p));
+      const top = pages.getBoundingClientRect().top + 12;
+      let best = 1, bestD = Infinity;
+      for (const node of nodes) {
+        const r = node.getBoundingClientRect();
+        if (r.bottom <= top + 4) continue;
+        const d = Math.abs(r.top - top);
+        if (d < bestD) { bestD = d; best = Number(node.dataset.p); }
+      }
+      onPage && onPage(best);
+    };
+    let lock = 0;
+    pages.addEventListener('scroll', () => {
+      if (Date.now() < lock) return;
+      if (!ticking) { ticking = true; requestAnimationFrame(pick); }
+    }, { passive: true });
+    setTimeout(pick, 300);
+    return {
+      scrollTo(p) {
+        const el = $(`.nb-page[data-p="${p}"]`, host); if (!el) return;
+        lock = Date.now() + 700;          // 防止两边互相推
+        el.scrollIntoView({ block: 'start' });
+      },
+    };
+  };
+  return draw();
 }
 
 async function runRecap(note, course, after) {
@@ -973,7 +1439,7 @@ async function renderLive(courseId) {
   if (State.live) return renderLiveRunning();
   const courses = State.courses;
   view.innerHTML = `
-    <div class="head"><div><h1>课堂录音</h1><div class="meta">实时转写老师的英文，并翻成中文字幕；结束后可以一键整理成笔记</div></div></div>
+    <div class="head"><div><h1>课堂录音</h1><div class="meta">${Settings.load().liveEnglishOnly !== false ? '只转写英文，不翻中文 —— 录音用来课后整理笔记；换回中文可在设置里关掉「只录英文」' : '实时转写老师的英文，并翻成中文字幕；结束后可以一键整理成笔记'}</div></div></div>
     ${!s.geminiKey ? '<div class="banner"><div class="grow"><strong>还没填 Gemini API key</strong></div><a class="btn primary small" href="#settings~ai">去设置</a></div>' : ''}
     <div class="card pad" style="display:flex;flex-direction:column;gap:16px">
       <div class="field"><label for="l-course">这是哪门课</label>
@@ -981,18 +1447,24 @@ async function renderLive(courseId) {
         <span class="hint">选了课程，会用这门课课件里的专业词提高识别准确度，录音也会存进这门课</span></div>
       <div class="row">
         <button class="recbtn" id="l-start" aria-label="开始录音"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg></button>
-        <div><strong>开始录音</strong><div class="hint" style="color:var(--muted);font-size:13px">识别语言：${esc(langLabel(s.liveLanguage))} · 可在设置里改</div></div>
+        <div><strong>开始录音</strong><div class="hint" style="color:var(--muted);font-size:13px">识别语言：${esc(langLabel(s.liveLanguage))} · ${s.liveEnglishOnly !== false ? '只存英文转写' : '英文 + 中文字幕'} · 可在设置里改</div></div>
       </div>
+      <label class="switch"><input type="checkbox" id="l-enonly" ${s.liveEnglishOnly !== false ? 'checked' : ''}>只录英文，不翻中文（录音主要用来课后整理笔记，省额度）</label>
     </div>
     <div class="card pad" style="font-size:14px;color:var(--muted);line-height:1.7">
       <strong style="color:var(--ink)">上课时这样用</strong><br>
       · 手机或 iPad 放在离老师近一点的桌上，第一次会问你要麦克风权限，点「允许」。<br>
       · 想一边录一边在 iPad 上手写：用分屏把听课本和 Goodnotes 并排放。听课本完全切到后台时，iPadOS 可能会停掉麦克风（不确定，建议先试一节课）。<br>
       · 听到老师说重点，点「标记重点」，整理笔记时会单独列出来。<br>
-      · 老师说几个词就会先出灰色的草稿中文${(Settings.load().draftMode || 'free') === 'free' ? '（用 Chrome 内置免费翻译；iPad 上没有这个功能）' : ''}；说完一句或最多 ${Settings.load().maxWaitSec || 6} 秒，就换成黑色的正式翻译。<br>
-      · ${AI.translateProvider() === 'deepseek' ? '正式翻译用 DeepSeek，会纠正识别错的专业词、术语前后一致。' : '正式翻译用免费模型池（Groq 两个模型 + Gemini 四个模型轮流用）。在「设置」里多填几家免费 key，就更快、更不容易用完。'}
+      ${s.liveEnglishOnly !== false
+        ? '· 现在只存英文转写（不翻中文），所以录音几乎不花额外的翻译额度；课后整理笔记时，AI 直接读英文转写。<br>· 想让这里也出中文字幕，把上面「只录英文」关掉就行。'
+        : `· 老师说几个词就会先出灰色的草稿中文${(Settings.load().draftMode || 'free') === 'free' ? '（用 Chrome 内置免费翻译；iPad 上没有这个功能）' : ''}；说完一句或最多 ${Settings.load().maxWaitSec || 6} 秒，就换成黑色的正式翻译。<br>
+      · ${AI.translateProvider() === 'deepseek' ? '正式翻译用 DeepSeek，会纠正识别错的专业词、术语前后一致。' : '正式翻译用免费模型池（Groq 两个模型 + Gemini 四个模型轮流用）。在「设置」里多填几家免费 key，就更快、更不容易用完。'}`}
     </div>`;
+  const eo = $('#l-enonly');
+  if (eo) eo.onchange = () => { Settings.save({ liveEnglishOnly: eo.checked }); renderLive(courseId); };
   $('#l-start').onclick = async () => {
+    if (await micState() === 'denied') { micHelp(() => $('#l-start').click()); return; }
     // 必须在点击当下（还没 await 之前）准备 Chrome 内置翻译，否则 Chrome 不让下载模型
     if ((Settings.load().draftMode || 'free') === 'free') AI.prepareLocalTranslator();
     const cid = $('#l-course').value;
@@ -1014,11 +1486,34 @@ async function renderLive(courseId) {
       renderLiveRunning();
     } catch (e) {
       btn.disabled = false;
-      const msg = e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风，再试一次。' : e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message;
-      toast(msg, 6000);
+      if (e.name === 'NotAllowedError' || /permission|denied/i.test(String(e.message || ''))) micHelp(() => $('#l-start').click());
+      else toast(e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message, 6000);
       try { sess.capture && sess.capture.stop(); } catch (x) {}
     }
   };
+}
+/* 麦克风权限引导：Chrome 一旦记住「拒绝」，再点开始录音也不会有任何弹窗，
+   所以先查权限状态，被拒就一步步告诉用户去哪儿改。 */
+async function micState() {
+  try {
+    if (!navigator.permissions || !navigator.permissions.query) return 'prompt';
+    const st = await navigator.permissions.query({ name: 'microphone' });
+    return st.state;
+  } catch (e) { return 'prompt'; }
+}
+function micHelp(onRetry) {
+  const isIOS = Device.ipad || /iPad|iPhone|iPod/.test(navigator.userAgent);
+  modal(`<h2>先允许麦克风</h2>
+    <p class="hint" style="margin:0">录音要用麦克风。浏览器只在你点「允许」时才给，之前如果点过「阻止」，它就不会再问了 —— 按下面三步改回来。</p>
+    <ol class="mic-steps">
+      <li>点地址栏<b>左边那个图标</b>（🔒 锁，或者 ⓘ / 两个滑块的图标）</li>
+      <li>找到<b>麦克风（Microphone）</b>，改成 <b>允许（Allow）</b></li>
+      <li>回到这个页面<b>刷新一次</b>，再点开始录音</li>
+    </ol>
+    ${isIOS ? '<p class="hint">iPad / iPhone 的 Safari：点地址栏左边的「大小／aA」→ 网站设置 → 麦克风 → 允许；如果还不行，去「设置 → Safari → 麦克风」看看。</p>' : '<p class="hint">Chrome：也可以点右上角 ⋮ → 设置 → 隐私和安全 → 网站设置 → 麦克风，把 tingkeben 从「不允许」里删掉。</p>'}
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>知道了</button><button class="btn primary" id="mic-retry">我改好了，再试一次</button></div>`, (box, close) => {
+    $('#mic-retry', box).onclick = () => { close(); onRetry && onRetry(); };
+  });
 }
 const langLabel = c => ({ 'en-GB': '英语（英式/马来西亚口音）', 'en-US': '英语（美式）', 'en-IN': '英语（印度口音）', 'ms-MY': '马来语', 'cmn-Hans-CN': '普通话', 'yue-Hant-HK': '粤语', auto: '自动识别' }[c] || c);
 
@@ -1061,6 +1556,8 @@ const liveUI = {
   },
 };
 function capHTML(g) {
+  // 只录英文时没有中文，别留一行空的「翻译中…」
+  if (g.status === 'done' && !g.zh) return `<div class="ts">${fmtTime(g.t)}</div><div><div class="en">${esc(g.en)}</div></div>`;
   const zh = g.status === 'done' ? esc(g.zh) : g.status === 'streaming' ? esc(g.zh) + '<span class="caret"></span>' : g.zhDraft && g.status !== 'failed' ? `<span class="draft">${esc(g.zhDraft)}</span>` : g.status === 'failed' ? `<span class="failed">翻译失败 <button class="btn small ghost" data-retry>重试</button></span>` : '<span class="wait">翻译中…</span>';
   return `<div class="ts" title="${esc(g.by ? '翻译：' + g.by : '')}">${fmtTime(g.t)}</div><div><div class="zh">${zh}</div><div class="en">${esc(g.en)}</div></div>`;
 }
@@ -1142,7 +1639,10 @@ async function renderSession(id) {
       </div>
     </div>
     ${!course ? '<div class="banner"><div class="grow">这段录音没有归到课程里。要整理成笔记，先把它放进一门课。</div><select id="s-move" style="width:auto"><option value="">选择课程</option>' + State.courses.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('') + '</select></div>' : ''}
-    ${(s.confused || []).length ? `<div class="card pad confused-box"><div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:8px">❓ 没听懂的地方 · ${s.confused.length}</div>${s.confused.map((c, i) => `<div class="cf" data-cf="${i}"><div class="row"><span class="clock" style="font-size:13px">${fmtTime(c.t)}</span><span class="grow hint cf-near">${esc(c.near.slice(-160))}</span><button class="btn small ghost" data-cf-go>跳过去</button><button class="btn small ${c.explain ? '' : 'primary'}" data-cf-ex>${c.explain ? '重新讲' : '用中文重讲'}</button></div>${c.explain ? `<div class="md cf-ex">${md(c.explain)}</div>` : '<div class="cf-ex" hidden></div>'}</div>`).join('')}</div>` : ''}
+    ${(s.segments || []).length >= 12 ? `<div class="topics noprint">${(s.topics || []).length
+      ? s.topics.map((t, i) => `<button class="topic" data-topic="${i}"><b>${esc(t.title)}</b><span>${fmtTime(t.t)}</span></button>`).join('')
+      : `<button class="btn small" id="s-topics" title="按老师换话题的位置切段，每段一个标题">${ICON.spark}按话题分段（1 小时也能跳着听）</button>`}</div>` : ''}
+    ${(s.confused || []).length ? `<div class="card pad confused-box"><div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:8px">❓ 没听懂的地方 · ${s.confused.length}</div>${s.confused.map((c, i) => `<div class="cf" data-cf="${i}"><div class="row"><span class="clock" style="font-size:13px">${fmtTime(c.t)}</span><span class="grow hint cf-near">${esc(c.near.slice(-160))}</span><button class="btn small ghost" data-cf-go>跳过去</button><button class="btn small ${c.explain ? '' : 'primary'}" data-cf-ex>${c.explain ? '重新讲' : '用中文重讲'}</button></div>${c.explain ? `<div class="md cf-ex">${md(c.explain)}</div>` : '<div class="cf-ex" hidden></div>'}</div>`).join('')}      <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="btn primary" id="s-todo">${ICON.spark}变成复习清单（Top 5）</button></div></div>` : ''}
     ${(s.highlights || []).length ? `<div class="card pad marks-card">
       <div class="row" style="justify-content:space-between"><b>${ICON.star}标记重点 · ${s.highlights.length}</b><span class="hint">只回看你按过标记的时间点，不用从头听</span></div>
       <div class="mark-list">${s.highlights.map((h, i) => `<div class="mark-item"><button class="mark-time" data-hl="${i}" title="跳到这一句">${fmtTime(h.t)}</button><span class="grow mark-near">${esc((h.near || '').slice(0, 90) || '（这里没识别到文字）')}</span><button class="btn small ghost" data-hl-play="${i}">听 30 秒</button></div>`).join('')}</div>
@@ -1169,10 +1669,31 @@ async function renderSession(id) {
       <button class="btn small" id="p-rate">1x</button>
     </div>` : ''}`;
   const gen = $('#s-gen'); if (gen) gen.onclick = () => generateModal({ course, sessionId: s.id });
+  // 按话题分段：有就跳转，没有就生成
+  $$('[data-topic]').forEach(b => b.onclick = () => {
+    const t = s.topics[Number(b.dataset.topic)];
+    if (!t) return;
+    jumpTo(t.t);
+  });
+  const tp = $('#s-topics');
+  if (tp) tp.onclick = async () => { try { await Learn.buildTopics(s, course); toast('分好段了'); renderSession(s.id); } catch (e) { toast(e.message, 6000); } };
+  const todoBtn = $('#s-todo');
+  if (todoBtn) todoBtn.onclick = async () => {
+    todoBtn.disabled = true;
+    try {
+      const notes = await DB.byIndex('notes', 'courseId', s.courseId);
+      let n = notes.filter(x => x.sessionId === s.id).sort((a, b) => b.createdAt - a.createdAt)[0];
+      if (!n) { n = await newBlankNote(course, {}); n.sessionId = s.id; await DB.put('notes', n); }
+      const items = await Learn.confusedList(n, s, course);
+      toast(`整理出 ${items.length} 条，已经放进「${n.title}」的待办`);
+      location.hash = 'note-' + n.id;
+    } catch (e) { toast(e.message, 6000); todoBtn.disabled = false; }
+  };
   const enh = $('#s-enhance'); if (enh) enh.onclick = async () => {
     const notes = await DB.byIndex('notes', 'courseId', course.id);
     let n = notes.filter(x => x.sessionId === s.id).sort((a, b) => b.createdAt - a.createdAt)[0];
-    if (!n) { n = await newBlankNote(course, {}); n.sessionId = s.id; await DB.put('notes', n); }
+    if (!n) { n = await newBlankNote(course, {}); }
+    await linkSession(n, s.id);
     await enhanceNote(n, course, () => { location.hash = 'note-' + n.id; });
   };
   const mg = $('#s-merge'); if (mg) mg.onclick = async () => {
@@ -1180,7 +1701,7 @@ async function renderSession(id) {
     if (!notes.length) { toast('这门课还没有笔记，点「整理成新笔记」'); return; }
     modal(`<h2>并入已有笔记</h2><div class="field"><select id="mg-n">${notes.map(n => `<option value="${n.id}" ${n.sessionId === s.id ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}</select><span class="hint">课件笔记不动，在下面加一部分「课堂上老师提到的」：老师强调的、课件之外的补充、课堂提问和答案、你的手写</span></div>
       <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="mg-go">开始整理</button></div>`, (box, close) => {
-      $('#mg-go', box).onclick = async () => { const n = await DB.get('notes', $('#mg-n', box).value); n.sessionId = s.id; await DB.put('notes', n); close(); enhanceNote(n, course, () => { location.hash = 'note-' + n.id; }); };
+      $('#mg-go', box).onclick = async () => { const n = await DB.get('notes', $('#mg-n', box).value); await linkSession(n, s.id); close(); enhanceNote(n, course, () => { location.hash = 'note-' + n.id; }); };
     });
   };
 
@@ -1323,6 +1844,13 @@ function renderSettings(cat = '') {
         <div class="row" style="justify-content:space-between"><h2>这台设备</h2><span class="pill">${{ ipad: 'iPad 版', desktop: 'Mac 版', phone: '手机版' }[Device.kind]}</span></div>
         <p>iPad 版：侧边栏能收起、工作台竖屏上下分屏、默认打开画板、按钮更大。一般自动识别，认错了可以在这里改。</p>
         <div class="seg" role="radiogroup" aria-label="设备">${[['auto', '自动识别'], ['desktop', 'Mac'], ['ipad', 'iPad']].map(([v, l]) => `<button data-dev="${v}" class="${Device.choice() === v ? 'on' : ''}">${l}${v === 'auto' ? `（${{ ipad: 'iPad', desktop: 'Mac', phone: '手机' }[Device.detected]}）` : ''}</button>`).join('')}</div>
+        <h2 style="margin-top:18px">外观</h2>
+        <p>深色模式下页面和笔记画布变暗，手写颜色显示时会自动提亮；课件 PDF 保持白纸，方便看原件。每台设备各自设置。</p>
+        <div class="seg theme-seg" role="radiogroup" aria-label="外观">${[
+          ['auto', '跟随系统', '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'],
+          ['light', '浅色', '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'],
+          ['dark', '深色', '<svg viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/></svg>'],
+        ].map(([v, l, ic]) => `<button data-theme="${v}" role="radio" aria-checked="${(s.theme || 'auto') === v}" class="${(s.theme || 'auto') === v ? 'on' : ''}">${ic}${l}</button>`).join('')}</div>
       </section>
       <section class="card pad">
         <div class="row" style="justify-content:space-between"><h2>课表与上课提醒</h2><button class="btn small" id="set-sched">管理课表</button></div>
@@ -1343,7 +1871,7 @@ function renderSettings(cat = '') {
           <div class="field"><label for="d-mode">草稿翻译（老师说几个词就先出灰色中文）</label>
             <select id="d-mode">
               <option value="free" ${(s.draftMode || 'free') === 'free' ? 'selected' : ''}>免费：Chrome 内置翻译（Mac 的 Chrome 可用）</option>
-              <option value="deepseek" ${s.draftMode === 'deepseek' ? 'selected' : ''}>DeepSeek（更准，iPad 也能用，每小时约多 ¥1–2）</option>
+              <option value="deepseek" ${s.draftMode === 'deepseek' ? 'selected' : ''}>DeepSeek（更准，iPad 也能用）</option>
               <option value="off" ${s.draftMode === 'off' ? 'selected' : ''}>关闭</option>
             </select>
             <div class="row" style="gap:8px;margin-top:4px"><button class="btn small" id="d-dl">下载 Chrome 内置翻译</button><span class="hint" id="d-st"></span></div>
@@ -1357,8 +1885,10 @@ function renderSettings(cat = '') {
           <div class="field"><label for="w-max">老师一直不停时，最多几秒强制翻一次</label><input id="w-max" type="number" min="3" max="20" value="${s.maxWaitSec || 6}"><span class="hint">越小中文越及时，但句子会被切得更碎；建议 5–8</span></div>
         </div>
         <div class="field" style="margin-top:8px"><label for="s-mic">麦克风</label><div class="row"><select id="s-mic" class="grow"><option value="">系统默认麦克风</option>${s.micId ? `<option value="${esc(s.micId)}" selected>上次选的麦克风</option>` : ''}</select><button class="btn small" id="s-mic-scan">列出麦克风</button></div><span class="hint">Mac 外接了麦克风或者用 AirPods 时可以在这里选</span></div>
-        <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-auto-study" ${s.autoStudy === true ? 'checked' : ''}>每次生成笔记后，都自动出重点、记忆卡片和测验题（默认关；一般在「生成」窗口里按需勾选就行）</label>
+        <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-auto-study" ${s.autoStudy === true ? 'checked' : ''}>每次生成笔记后，都自动出重点和测验题（默认关；一般在「生成」窗口里按需勾选就行）</label>
         <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-audio" ${s.saveAudio ? 'checked' : ''}>同时保存录音（之后可以下载回听，1 小时约 115MB）</label>
+        <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-autodiff" ${s.autoDiff !== false ? 'checked' : ''}>导入课件后自动标出「最难的 3 页」（一次导入最多扫 8 份）</label>
+        <label class="switch" style="margin-top:8px"><input type="checkbox" id="l-enonly2" ${s.liveEnglishOnly !== false ? 'checked' : ''}>录音只转写英文，不翻中文（中文实时翻译用别的软件的话，开着更省额度）</label>
         <div class="row" style="margin-top:12px"><button class="btn small" id="t-live">测试实时转写连接</button><div class="result" id="t-live-r"></div></div>
       </section>
       <section class="card pad">
@@ -1366,7 +1896,7 @@ function renderSettings(cat = '') {
         <p>按下面的顺序轮流用各家的免费额度：哪家慢（4 秒没出字）、出错或今天额度快用完，就自动换下一家。每家都是免费注册、不用绑卡；填了 key 的才会用。</p>
         <div class="field" style="margin-bottom:12px"><label for="t-prov">翻译方式</label><select id="t-prov">
           <option value="pool" ${s.translateProvider !== 'deepseek' ? 'selected' : ''}>免费模型池（推荐）</option>
-          <option value="deepseek" ${s.translateProvider === 'deepseek' ? 'selected' : ''}>只用 DeepSeek（付费，每小时约 ¥0.5–1）</option>
+          <option value="deepseek" ${s.translateProvider === 'deepseek' ? 'selected' : ''}>只用 DeepSeek</option>
         </select></div>
         <div class="pool" id="pool"></div>
         <div class="field" style="margin-top:12px"><label for="p-fb">免费额度都用完时</label><select id="p-fb">
@@ -1447,7 +1977,7 @@ function renderSettings(cat = '') {
     if (p === 'denied') toast('浏览器通知被拒绝了，只能在页面里提醒', 6000);
   };
   bind('#m-ds', 'deepseekModel', v => v.trim()); bind('#ds-think', 'deepseekThinking');
-  bind('#l-lang', 'liveLanguage'); bind('#l-mode', 'liveMode'); bind('#s-audio', 'saveAudio'); bind('#t-prov', 'translateProvider'); bind('#d-mode', 'draftMode'); bind('#t-pace', 'translatePace'); bind('#s-auto-study', 'autoStudy'); bind('#s-mic', 'micId');
+  bind('#l-lang', 'liveLanguage'); bind('#l-mode', 'liveMode'); bind('#s-audio', 'saveAudio'); bind('#t-prov', 'translateProvider'); bind('#d-mode', 'draftMode'); bind('#t-pace', 'translatePace'); bind('#s-auto-study', 'autoStudy'); bind('#s-mic', 'micId'); bind('#s-autodiff', 'autoDiff'); bind('#l-enonly2', 'liveEnglishOnly');
   $('#s-mic-scan').onclick = async () => {
     try {
       const st = await navigator.mediaDevices.getUserMedia({ audio: true }); st.getTracks().forEach(t => t.stop());
@@ -1473,6 +2003,10 @@ function renderSettings(cat = '') {
   renderPool();
   renderCosts();
   bindR2();
+  $$('.theme-seg [data-theme]').forEach(b => b.onclick = () => {
+    const v = b.dataset.theme; Settings.save({ theme: v }); if (window.__tkTheme) window.__tkTheme(v);
+    $$('.theme-seg [data-theme]').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-checked', x === b ? 'true' : 'false'); });
+  });
   $$('[data-dev]').forEach(b => b.onclick = () => { Device.setChoice(b.dataset.dev); toast('已切换，正在重新打开…'); setTimeout(() => location.reload(), 500); });
   settingsCategories(cat);
   $$('[data-show]').forEach(b => b.onclick = () => { const i = $('#' + b.dataset.show); i.type = i.type === 'password' ? 'text' : 'password'; b.textContent = i.type === 'password' ? '显示' : '隐藏'; });
@@ -1649,7 +2183,7 @@ async function importBackup(file) {
 
 /* 设置分类：首页只放分类卡片，点进去才看到具体设置 */
 const SET_CATS = [
-  ['device', '这台设备', 'Mac 版 / iPad 版'],
+  ['device', '外观和设备', '浅色 / 深色 · Mac 版 / iPad 版'],
   ['schedule', '课表与提醒', '每周上课时间、开课前提醒'],
   ['ai', 'AI 和 API key', 'Gemini、DeepSeek、生成笔记'],
   ['translate', '课堂翻译', '免费模型池、翻译节奏'],
@@ -1667,7 +2201,7 @@ function settingsCategories(cat) {
     secs.forEach(sec => { sec.hidden = true; });
     const s = Settings.load(), st = Sync.status();
     const status = {
-      device: { ipad: '现在是 iPad 版', desktop: '现在是 Mac 版', phone: '现在是手机版' }[Device.kind],
+      device: ({ auto: '跟随系统', light: '浅色', dark: '深色' }[s.theme || 'auto']) + ' · ' + { ipad: 'iPad 版', desktop: 'Mac 版', phone: '手机版' }[Device.kind],
       schedule: Schedule.load().length ? `${Schedule.load().length} 节课${Schedule.remindOn() ? ' · 会提醒' : ''}` : '还没填',
       ai: s.geminiKey && s.deepseekKey ? '✓ 两个 key 都填了' : `还没填：${[!s.geminiKey && 'Gemini', !s.deepseekKey && 'DeepSeek'].filter(Boolean).join('、')}`,
       translate: { pool: '免费模型池', deepseek: 'DeepSeek', gemini: 'Gemini' }[s.translateProvider] || s.translateProvider || '',
@@ -1684,33 +2218,217 @@ function settingsCategories(cat) {
 }
 
 /* ---------- 复习模式：大字、少按钮，适合 iPad 拿在手上看 ---------- */
-const REVIEW_TABS = [['note', '笔记'], ['points', '重点'], ['cards', '卡片'], ['quiz', '测验']];
+const REVIEW_TABS = [['note', '文本'], ['map', '思维导图'], ['points', '重点'], ['quiz', '测验']];
 const ReviewPref = {
   get() { try { return Object.assign({ size: Device.ipad ? 19 : 17 }, JSON.parse(localStorage.getItem('tingkeben.review') || '{}')); } catch (e) { return { size: 18 }; } },
   set(p) { try { localStorage.setItem('tingkeben.review', JSON.stringify(Object.assign(this.get(), p))); } catch (e) {} },
 };
 async function renderReview(courseId) {
-  const notes = (await DB.all('notes')).filter(n => n.status !== 'generating').sort((a, b) => b.createdAt - a.createdAt);
+  const all = (await DB.all('notes')).filter(n => n.status !== 'generating').sort((a, b) => b.createdAt - a.createdAt);
   const courses = State.courses;
-  const list = courseId ? notes.filter(n => n.courseId === courseId) : notes;
+  const list = courseId ? all.filter(n => n.courseId === courseId) : all;
   const cname = id => (courses.find(c => c.id === id) || {}).name || '';
+
+  // 正反馈：先说本周掌握了多少，而不是「0/32 还差 32 个」
+  const wk = Learn.week(list);
+  const goal = 0.6, diff = Math.round((wk.rate - goal) * 100);
+  const mood = !wk.total ? 'flat' : diff >= 0 ? 'up' : 'down';
+  const moodText = !wk.total ? '本周还没有新笔记，先看下面的「今天先看什么」'
+    : diff >= 0 ? `比「本周掌握 60%」的目标领先 ${diff} 个百分点，保持住`
+    : `离「本周掌握 60%」还差 ${-diff} 个百分点，先把标了 ○ 的知识点过一遍`;
+
+  // 今天先看什么：按考核截止日算，不花 token
+  const plan = Learn.priority(all, courses);
+  const wb = Learn.wrongList(all, courses);
+
   view.innerHTML = `
-    <div class="head"><div><h1>复习</h1><div class="meta">挑一份笔记：看笔记、过重点、刷卡片、做测验</div></div></div>
+    <div class="head"><div><h1>复习</h1><div class="meta">先看什么、缺什么、错在哪，这一页给答案</div></div></div>
+
+    <div class="card pad wk-card ${mood}">
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div class="grow">
+          <div class="wk-k">本周掌握</div>
+          <div class="wk-n">${Math.round(wk.rate * 100)}<small>%</small></div>
+          <div class="hint">本周 ${wk.n} 份笔记 · ${wk.done} / ${wk.total || 0} 个知识点 · ${esc(moodText)}</div>
+        </div>
+        <div class="wk-bar" aria-hidden="true"><i style="height:${Math.round(wk.rate * 100)}%"></i><span style="bottom:${goal * 100}%"></span></div>
+      </div>
+    </div>
+
+    ${plan.length ? `<div class="card pad plan-card">
+      <div class="row" style="justify-content:space-between"><b>今天先看什么</b><span class="hint">按 Moodle 截止日期排的，不用再自己算</span></div>
+      ${plan.map(p => `<div class="plan-item">
+        <div class="plan-head"><span class="pill ${p.days < 3 ? 'bad' : p.days < 7 ? 'warn' : 'mute'}">还有 ${Math.round(p.days)} 天</span><b class="grow">${esc(p.d.name)}</b><span class="hint">${esc(p.course ? p.course.name : '')}</span></div>
+        <div class="plan-notes">${p.picks.map(x => `<a class="plan-note" href="#review-${x.n.id}"><span class="grow">${esc(x.n.title)}</span><span class="hint">${x.p.total ? `掌握 ${x.p.done}/${x.p.total}` : '还没出重点'}</span></a>`).join('')}</div>
+      </div>`).join('')}
+    </div>` : ''}
+
+    <div class="hub">
+      <a class="hub-card" href="#vocab${courseId ? '~' + courseId : ''}">
+        <b>生词本</b><span class="hub-n" id="hub-vocab">—</span>
+        <span class="hint">按遗忘曲线推：今天、3 天后、7 天后</span>
+      </a>
+      <a class="hub-card" href="#wrong">
+        <b>错题本</b><span class="hub-n">${wb.length} 道</span>
+        <span class="hint">只刷做错的，连对两次自动出本</span>
+      </a>
+      <a class="hub-card" href="#marks${courseId ? '~' + courseId : ''}">
+        <b>老师亲口划的重点</b><span class="hub-n">考前一张纸</span>
+        <span class="hint">课上标记 + 自动识别的高亮，合成一页</span>
+      </a>
+      <a class="hub-card" href="#course-${(courses[0] && courses[0].id) || ''}~notes" data-mock>
+        <b>模拟考试</b><span class="hub-n">按权重组卷</span>
+        <span class="hint">不同 topic 按占分抽题，比平均抽更像真考试</span>
+      </a>
+    </div>
+
+    <h2 class="rv-h2">按课程看笔记</h2>
     <div class="chips" role="group" aria-label="按课程筛选">
-      <a class="chip ${!courseId ? 'on' : ''}" href="#review">全部 <span>${notes.length}</span></a>
-      ${courses.map(c => `<a class="chip ${courseId === c.id ? 'on' : ''}" href="#review~${c.id}">${esc(c.name)} <span>${notes.filter(n => n.courseId === c.id).length}</span></a>`).join('')}
+      <a class="chip ${!courseId ? 'on' : ''}" href="#review">全部 <span>${all.length}</span></a>
+      ${courses.map(c => `<a class="chip ${courseId === c.id ? 'on' : ''}" href="#review~${c.id}">${esc(c.name)} <span>${all.filter(n => n.courseId === c.id).length}</span></a>`).join('')}
     </div>
     ${list.length ? `<div class="rv-grid">${list.map(n => {
       const pg = Study.progress(n);
       const c = courses.find(x => x.id === n.courseId);
-      const cards = ((n.study && n.study.cards) || []).length, quiz = ((n.study && n.study.quiz) || []).length;
+      const quiz = ((n.study && n.study.quiz) || []).length;
+      const pct = pg.total ? Math.round(pg.done / pg.total * 100) : 0;
       return `<a class="rv-card" href="#review-${n.id}" style="--c:${(c && c.color) || 'var(--accent)'}">
         <span class="rv-course">${esc(cname(n.courseId))}</span>
         <b>${esc(n.title)}</b>
         <span class="rv-meta">${fmtDate(n.createdAt)}${n.markdown ? '' : ' · 还没有正文'}</span>
-        ${pg.total ? `<span class="rv-prog"><span class="sb-bar green"><i style="width:${Math.round(pg.done / pg.total * 100)}%"></i></span><small>重点掌握 ${pg.done} / ${pg.total}${cards ? ` · 卡片 ${cards}` : ''}${quiz ? ` · 测验 ${quiz} 题` : ''}</small></span>` : '<span class="rv-prog"><small>还没生成重点和卡片</small></span>'}
+        ${pg.total ? `<span class="rv-prog"><span class="sb-bar green"><i style="width:${pct}%"></i></span><small>掌握 ${pct}%（${pg.done}/${pg.total}）${quiz ? ` · 测验 ${quiz} 题` : ''}${(n.wrong || []).length ? ` · 错题 ${n.wrong.length}` : ''}</small></span>` : '<span class="rv-prog"><small>还没生成重点和卡片</small></span>'}
       </a>`; }).join('')}</div>`
     : `<div class="empty"><strong>还没有笔记</strong>先在课程里生成笔记，再来复习。</div>`}`;
+
+  // 生词本角标（异步，不挡页面）
+  if (courseId || courses[0]) {
+    Learn.vocab(courseId || courses[0].id).then(v => { const el = $('#hub-vocab'); if (el) el.textContent = `今天 ${Learn.vstats(v).due} 个`; }).catch(() => {});
+  }
+  const mk = $('[data-mock]'); if (mk) mk.onclick = e => { e.preventDefault(); const c = courses.find(x => x.id === courseId) || courses[0]; if (c) mockExamModal(c); };
+}
+
+/* ---------- 生词本 ---------- */
+async function renderVocab(courseId, mode = 'card') {
+  const courses = State.courses;
+  const cid = courseId || (courses[0] && courses[0].id);
+  view.innerHTML = `<div class="head"><div><h1>重点词汇</h1><div class="meta">课件和录音里的术语都在这里：按遗忘曲线背，或者当词典查</div></div><a class="btn small ghost" href="#review">← 回复习</a></div>
+    <div class="chips">${courses.map(c => `<a class="chip ${cid === c.id ? 'on' : ''}" href="#vocab~${c.id}~${mode}">${esc(c.name)}</a>`).join('')}</div>
+    <div class="seg" id="vb-mode" style="margin-bottom:12px"><button data-vm="card" class="${mode === 'card' ? 'on' : ''}">🃏 今天要背</button><button data-vm="list" class="${mode === 'list' ? 'on' : ''}">📖 全部词汇</button></div>
+    <div id="vocab-body"></div>`;
+  $$('#vb-mode [data-vm]').forEach(b => b.onclick = () => { history.replaceState(null, '', '#vocab~' + cid + '~' + b.dataset.vm); renderVocab(cid, b.dataset.vm); });
+  if (mode === 'list') await vocabList(cid, $('#vocab-body'));
+  else Learn.vocabPage($('#vocab-body'), courses, cid);
+}
+
+/* 全部词汇：术语 + 音标 + 例句，可搜 */
+async function vocabList(courseId, el) {
+  const files = (await DB.byIndex('files', 'courseId', courseId)).filter(f => f.prep && (f.prep.terms || []).length);
+  const terms = [], seen = new Set();
+  for (const f of files) for (const t of ((f.prep && f.prep.terms) || [])) {
+    const k = String(t.en || '').toLowerCase().trim(); if (!k || seen.has(k)) continue;
+    seen.add(k); terms.push({ en: t.en, ipa: t.ipa || '', zh: t.zh, explain: t.explain || '', example: t.example || '', example_zh: t.example_zh || '', from: f.name, fileId: f.id });
+  }
+  if (!terms.length) {
+    el.innerHTML = `<div class="empty"><strong>这门课还没有术语</strong>到「课件 → 课前包」生成一份，术语会同时进这里和生词本。</div>`;
+    return;
+  }
+  vocabListHTML(el, terms, files);
+}
+
+function vocabListHTML(el, terms, files) {
+  const missing = terms.filter(t => !t.ipa).length;
+  el.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+      <div class="grow"><b>${terms.length} 个术语</b><div class="hint">来自这门课的课件和课堂录音 · 已经在「今天要背」里按遗忘曲线排好了</div></div>
+      ${missing ? `<button class="btn small" id="vb-ipa">补音标（${missing}）</button>` : ''}
+    </div>
+    <div class="row" style="margin-bottom:10px"><input id="vb-q" type="search" class="grow" placeholder="搜英文或中文…" style="max-width:320px"></div>
+    <div class="vlist" id="vb-list">${terms.map((t, i) => `<div class="vitem" data-i="${i}">
+      <div class="vi-h"><button class="say" data-say="${esc(t.en)}" aria-label="朗读">🔊</button><b>${esc(t.en)}</b>${t.ipa ? `<span class="vi-ipa">${esc(t.ipa)}</span>` : ''}<span class="vi-zh">${esc(t.zh)}</span></div>
+      ${t.explain ? `<div class="vi-x">${esc(t.explain)}</div>` : ''}
+      ${t.example ? `<div class="vi-e"><button class="say small" data-say="${esc(t.example)}" aria-label="朗读例句">🔊</button><span>${esc(t.example)}</span><em>${esc(t.example_zh)}</em></div>` : ''}
+      <div class="vi-from">${esc(t.from || '')}</div>
+    </div>`).join('')}</div>`;
+  const list = $('#vb-list', el);
+  $$('[data-say]', el).forEach(b => b.onclick = () => Prep.speak(b.dataset.say));
+  $('#vb-q', el).oninput = e => {
+    const k = e.target.value.trim().toLowerCase();
+    $$('.vitem', list).forEach(row => { const t = terms[Number(row.dataset.i)]; row.hidden = !!k && !(t.en + ' ' + t.zh + ' ' + (t.explain || '')).toLowerCase().includes(k); });
+  };
+  const ipa = $('#vb-ipa', el);
+  if (ipa) ipa.onclick = async () => {
+    if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
+    ipa.disabled = true; ipa.textContent = '正在标…';
+    try {
+      const need = terms.filter(t => !t.ipa).slice(0, 60);
+      const map = await AI.ipaFor(need.map(t => t.en));
+      for (const f of files) {
+        const fresh = await DB.get('files', f.id); if (!fresh.prep || !fresh.prep.terms) continue;
+        let hit = false;
+        fresh.prep.terms.forEach(x => { const v = map[String(x.en || '').toLowerCase().trim()]; if (v && !x.ipa) { x.ipa = v; hit = true; } });
+        if (hit) await DB.put('files', fresh);
+      }
+      terms.forEach(t => { const v = map[String(t.en).toLowerCase().trim()]; if (v && !t.ipa) t.ipa = v; });
+      toast('音标补好了'); vocabListHTML(el, terms, files);
+    } catch (e) { toast(e.message, 6000); ipa.disabled = false; ipa.textContent = '补音标'; }
+  };
+}
+
+/* ---------- 错题本 ---------- */
+async function renderWrong() {
+  const notes = (await DB.all('notes')).filter(n => (n.wrong || []).length);
+  const courses = State.courses;
+  const items = Learn.wrongList(notes, courses);
+  view.innerHTML = `<div class="head"><div><h1>错题本</h1><div class="meta">测验做错的题自动进来；同一道连对两次就出本</div></div><a class="btn small ghost" href="#review">← 回复习</a></div>
+    ${items.length ? `<div class="row" style="margin-bottom:12px"><button class="btn primary" id="wb-go">开始刷错题（${items.length}）</button><span class="hint">做对了会从本子里淡出，别重做整套测验</span></div>
+    <div class="wb-list">${items.map(it => `<div class="card pad wb-item">
+      <div class="row" style="justify-content:space-between"><span class="pill mute">${esc(it.courseName)}</span><span class="hint">${esc(it.noteTitle)}</span></div>
+      <div class="wb-q">${esc(it.q.q)}</div>
+      <div class="wb-a"><b>答案：</b>${esc(it.q.options[it.q.answer])}<div class="hint" style="margin-top:4px">${esc(it.q.explain)}</div></div>
+      <div class="row"><a class="btn small ghost" href="#note-${it.noteId}~points">看知识点</a><span class="grow"></span><button class="btn small" data-drop="${it.noteId}|${it.qi}">移出错题本</button></div>
+    </div>`).join('')}</div>`
+    : `<div class="empty"><strong>错题本是空的 👍</strong>去做一次测验，答错的题会自动进来。</div>`}`;
+  const go = $('#wb-go');
+  if (go) go.onclick = () => {
+    Learn.runPaper(null, items.map(it => Object.assign({}, it.q, { noteId: it.noteId, noteTitle: it.noteTitle, qi: it.qi })), 0,
+      { title: '错题重刷', meta: '连对两次自动出本', onWrong: q => Learn.wrongResolve(q.noteId, q.qi, false), onRight: q => Learn.wrongResolve(q.noteId, q.qi, true) });
+  };
+  $$('[data-drop]').forEach(b => b.onclick = async () => {
+    const [nid, qi] = b.dataset.drop.split('|');
+    const n = await DB.get('notes', nid); if (!n) return;
+    n.wrong = (n.wrong || []).filter(x => x.qi !== Number(qi));
+    await DB.put('notes', n); renderWrong();
+  });
+}
+
+/* ---------- 老师亲口划的重点 ---------- */
+async function renderMarks(courseId) {
+  const courses = State.courses;
+  const cid = courseId || (courses[0] && courses[0].id);
+  const course = courses.find(c => c.id === cid);
+  const sessions = cid ? await DB.byIndex('sessions', 'courseId', cid) : [];
+  const raw = Learn.gatherMarks(sessions);
+  const m = course && course.marks;
+  view.innerHTML = `<div class="head"><div><h1>老师亲口划的重点</h1><div class="meta">课上按的标记 + 系统识别的 exam / due / important，合成考前只看这一页</div></div><a class="btn small ghost" href="#review">← 回复习</a></div>
+    <div class="chips">${courses.map(c => `<a class="chip ${cid === c.id ? 'on' : ''}" href="#marks~${c.id}">${esc(c.name)}</a>`).join('')}</div>
+    ${!course ? '<div class="empty"><strong>还没有课程</strong></div>' : !raw.length ? `<div class="empty"><strong>这门课还没有可整理的内容</strong>上课时按「标记重点」，或者让实时翻译跑起来 —— 说到考试、作业、重点的句子会自动高亮，这里就能收进来。</div>`
+    : `<div class="card pad"><div class="row" style="justify-content:space-between"><div class="grow"><b>${raw.length} 条原始标记</b><div class="hint">来自 ${new Set(raw.map(x => x.sid)).size} 节课；按「必考 / 可能考 / 了解」整理成一张纸</div></div><button class="btn primary" id="mk-go">${m ? '重新整理' : '整理成一张纸'}</button></div>
+      ${m ? `<div class="mk-sum">${esc(m.summary)}</div><div class="mk-list">${m.items.map(x => `<div class="mk-item"><span class="pill ${x.level === '必考' ? 'bad' : x.level === '可能考' ? 'warn' : 'mute'}">${esc(x.level || '看看')}</span><div class="grow"><b>${esc(x.title)}</b>${x.why ? `<div class="hint">${esc(x.why)}</div>` : ''}</div></div>`).join('')}</div>
+      <div class="row" style="justify-content:flex-end"><button class="btn small ghost" id="mk-copy">复制给 AI 复习</button></div>` : `<div class="hint" style="margin-top:10px">还没整理过。整理后这里会是一张按「必考 / 可能考 / 了解」分好、可以直接背的清单。</div>`}</div>
+      <details class="card pad" style="margin-top:12px"><summary><b>原始标记（${raw.length}）</b><span class="hint"> · 点开看老师原话</span></summary>
+        <div class="mark-list" style="margin-top:10px">${raw.slice(0, 120).map(x => `<div class="mark-item"><a class="mark-time" href="#session-${x.sid}">${fmtTime(x.t)}</a><span class="grow mark-near">${esc((x.text || '').slice(0, 120))}</span>${x.kind === 'mark' ? '<span class="pill mute">我标的</span>' : ''}</div>`).join('')}</div>
+      </details>`}`;
+  const go = $('#mk-go');
+  if (go) go.onclick = async () => {
+    go.disabled = true;
+    try { await Learn.buildMarks(course); toast('整理好了'); renderMarks(cid); }
+    catch (e) { toast(e.message, 6000); go.disabled = false; }
+  };
+  const cp = $('#mk-copy');
+  if (cp) cp.onclick = async () => {
+    const text = `这是「${course.name}」老师课上明确划过的重点，考前帮我按重要性排一遍，并针对每条出一句自测问题：\n\n${m.summary}\n\n${m.items.map((x, i) => `${i + 1}. [${x.level}] ${x.title} —— ${x.why}`).join('\n')}`;
+    try { await navigator.clipboard.writeText(text); toast('已复制，粘给 Claude / ChatGPT 都行'); } catch (e) { toast('复制失败'); }
+  };
 }
 async function renderReviewNote(id, tab) {
   if (!location.hash.slice(1).startsWith('review-' + id)) return;
@@ -1868,9 +2586,77 @@ window.addEventListener('beforeunload', e => { if (State.live) { e.preventDefaul
   window.postMessage({ tkbAppReady: true }, location.origin);
   // 把上次没生成完的笔记标记为中断
   for (const n of await DB.all('notes')) if (n.status === 'generating') { n.status = n.markdown ? 'done' : 'error'; n.error = '上次生成被中断，点「重新生成」'; await DB.put('notes', n); }
-  route();
+  const t0 = Date.now();
+  await route().catch(() => {});
+  await splashChecks();                       // 开屏上跑一遍自检
+  exitSplash(Math.max(0, 2300 - (Date.now() - t0)));
   askDeviceOnce();
 })();
+
+/* 开屏自检：趁这 2 秒把该检查的检查一遍，有问题的当场就能看到 */
+async function splashChecks() {
+  const box = document.getElementById('sp-checks');
+  if (!box) return;
+  const prog = document.getElementById('sp-prog');
+  let stepN = 0; const STEPS = 5;
+  const bump = () => { stepN++; if (prog) prog.style.width = Math.round(stepN / STEPS * 100) + '%'; };
+  const wait = ms => new Promise(r => setTimeout(r, window.__tkSplashSkip ? 0 : ms));
+  const add = (text, state) => {
+    const li = document.createElement('li');
+    li.className = 'sp-check ' + (state || 'run');
+    li.innerHTML = `<span class="sp-ico"></span><span>${esc(text)}</span>`;
+    box.appendChild(li);
+    requestAnimationFrame(() => li.classList.add('in'));
+    return li;
+  };
+  const done = (li, text, state) => {
+    li.className = 'sp-check in ' + state;
+    li.lastChild.textContent = text;
+    bump();
+  };
+  const step = async (pending, fn) => {
+    const li = add(pending, 'run');
+    await wait(90);
+    try { const r = await fn(); done(li, pending + ' · ' + r.text, r.ok ? 'ok' : 'warn'); }
+    catch (e) { done(li, pending + ' · ' + (e.message || '失败'), 'warn'); }
+    await wait(120);
+  };
+
+  const s = Settings.load();
+  let courses = 0;
+  await step('检查本地数据', async () => { const all = await DB.all('courses'); courses = all.length; return { ok: true, text: courses + ' 门课' }; });
+  await step('检查 API key', async () => {
+    const miss = [!s.deepseekKey && 'DeepSeek', !s.geminiKey && 'Gemini'].filter(Boolean);
+    return miss.length ? { ok: false, text: '还没填 ' + miss.join(' / ') } : { ok: true, text: '都填好了' };
+  });
+  await step('检查云同步', async () => {
+    if (!Sync.ready()) return { ok: false, text: '没登录（登录后 Mac 和 iPad 才同步）' };
+    const st = Sync.status();
+    return { ok: !st.err, text: st.err ? '上次出错：' + st.err : (st.at ? '已连接' : '已登录') };
+  });
+  await step('检查离线缓存', async () => {
+    const ctl = 'serviceWorker' in navigator && navigator.serviceWorker.controller;
+    return { ok: true, text: ctl ? '已就绪' : '首次加载，稍后自动缓存' };
+  });
+  const v = (document.querySelector('link[href*="styles.css?v="]') || {}).href;
+  const ver = (v && (v.match(/v=(\d+)/) || [])[1]) || '';
+  const li = add('准备就绪', 'run');
+  await wait(160);
+  done(li, '全部检查完成 · 版本 ' + ver, 'ready');
+}
+
+/* 开屏：首屏画好之后再淡出，至少停留 2 秒，别闪一下就没了 */
+function exitSplash(delay = 0) {
+  const sp = document.getElementById('splash');
+  if (!sp) return;
+  const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (sp.dataset.leaving) { if (!delay) { sp.classList.add('out'); setTimeout(() => sp.remove(), 650); } return; }
+  sp.dataset.leaving = '1';
+  setTimeout(() => {
+    sp.classList.add('out');
+    setTimeout(() => sp.remove(), reduced ? 30 : 700);
+  }, reduced || window.__tkSplashSkip ? 0 : delay);
+}
 
 /* 第一次打开：确认一下认出来的设备对不对（只问一次；以后在「设置 → 这台设备」改） */
 function askDeviceOnce() {
@@ -1885,3 +2671,45 @@ function askDeviceOnce() {
     $('#modal').onclick = null; // 必须选一个
   });
 }
+
+/* 「更多」菜单：点外面或点了菜单里的某一项就自动收起（以前要再点一次「更多」才关） */
+document.addEventListener('click', e => {
+  document.querySelectorAll('details.more[open]').forEach(d => {
+    if (!d.contains(e.target)) { d.removeAttribute('open'); return; }
+    const item = e.target.closest('.more-menu button, .more-menu a');
+    if (item && !item.closest('.mm-row') && !item.closest('[data-keep]')) setTimeout(() => d.removeAttribute('open'), 0);
+  });
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('details.more[open]').forEach(d => d.removeAttribute('open')); });
+
+
+/* ---------- 删除：课程卡片、笔记列表、课程页、笔记页都能直接删（点两次确认，防手滑） ---------- */
+async function deleteCourse(id) {
+  for (const st of ['files', 'notes', 'sessions']) {
+    const items = await DB.byIndex(st, 'courseId', id);
+    for (const it of items) { if (st === 'sessions') await DB.delByIndex('audio', 'sessionId', it.id); await DB.del(st, it.id); }
+  }
+  await DB.del('courses', id);
+  await loadCourses();
+  toast('课程已删除');
+  if (location.hash.slice(1).includes(id) || location.hash.slice(1) === 'home' || !location.hash) { location.hash = 'home'; route(); } else route();
+}
+async function deleteNote(id) {
+  const n = await DB.get('notes', id);
+  await DB.del('notes', id);
+  toast('笔记已删除');
+  if (location.hash.slice(1).startsWith('note-' + id) || location.hash.slice(1).startsWith('desk-' + id)) location.hash = n ? 'course-' + n.courseId + '~notes' : 'home';
+  else route();
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest && e.target.closest('[data-del-course],[data-del-note]');
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  if (!b.dataset.armed) {
+    b.dataset.armed = '1'; b.dataset.old = b.innerHTML; b.classList.add('armed');
+    b.textContent = b.dataset.delCourse ? '再点一次：删除这门课和里面所有课件、笔记、录音' : '再点一次删除';
+    setTimeout(() => { if (b.isConnected && b.dataset.armed) { delete b.dataset.armed; b.innerHTML = b.dataset.old; b.classList.remove('armed'); } }, 3500);
+    return;
+  }
+  if (b.dataset.delCourse) await deleteCourse(b.dataset.delCourse); else await deleteNote(b.dataset.delNote);
+}, true);

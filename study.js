@@ -1,4 +1,4 @@
-/* 听课本 — 学习工具：手写画板、重点/记忆卡片/测验、思维导图、问 AI、录音总结、课件翻译、截止日期。
+/* 听课本 — 学习工具：课件顺序的笔记 + 手写画板、重点/测验、词汇表、思维导图、问 AI、录音总结、课件翻译、截止日期。
    依赖 app.js 里的 $, $$, esc, md, toast, modal, fmtTime, fmtDate, State, DB, AI, Settings。 */
 
 /* ---------- PDF 渲染（左栏课件、画板背景共用） ---------- */
@@ -98,7 +98,9 @@ const Jobs = (() => {
    手写画板：Apple Pencil 写字，手指只滚动；笔落下时手掌碰屏不算
    ====================================================================== */
 const Board = (() => {
-  const W = 1000; // 逻辑宽度，所有坐标按这个存
+  const W = 1000;                 // 兼容旧的坐标/导出
+  const COL = 680;                // 笔记文字列宽（世界坐标）
+  const GAP = 120;                // 板块之间的空隙
   const INK = ['#1B2233', '#2C47A5', '#C0392B', '#2B7A4B'];
   const pref = () => { try { return JSON.parse(localStorage.getItem('tingkeben.board') || '{}'); } catch (e) { return {}; } };
   const savePref = p => { try { localStorage.setItem('tingkeben.board', JSON.stringify(Object.assign(pref(), p))); } catch (e) {} };
@@ -141,16 +143,35 @@ const Board = (() => {
     }
     if (i1 === pts.length - 1) ctx.lineTo(pts[i1][0] * scale, pts[i1][1] * scale);
   }
+  /* 平滑后的点和外框按 pts 数组缓存：平移/缩放时每帧重画几百笔，不用每次重算 */
+  const SM = new WeakMap();
+  function strokeInfo(s) {
+    const raw = s.pts || [];
+    let v = SM.get(raw);
+    if (!v || v.n !== raw.length) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const q of raw) { if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
+      const pad = (s.w || 3) + 2;
+      v = { n: raw.length, sm: smoothPts(raw), box: [x0 - pad, y0 - pad, x1 + pad, y1 + pad] };
+      SM.set(raw, v);
+    }
+    return v;
+  }
+  /* 深色模式：显示时把深色墨水换成亮色（存的还是原色，导出/识别仍然是白底黑字） */
+  const DARK_INK = { '#1b2233': '#E8ECF6', '#1a2030': '#E8ECF6', '#2c47a5': '#8FAAFF', '#c0392b': '#FF8A7A', '#2b7a4b': '#63D69E', '#b93434': '#FF8A7A' };
+  const isDark = () => document.documentElement.dataset.theme === 'dark';
+  const shown = c => (isDark() && DARK_INK[String(c || '').toLowerCase()]) || c;
   function drawStroke(ctx, s, scale, ocr, bold = 1) {
     const raw = s.pts; if (!raw || !raw.length) return;
-    const pts = smoothPts(raw);
+    const pts = strokeInfo(s).sm;
     const hl = s.tool === 'hl';
     // bold：交给 AI 识别时把笔迹加粗一点，细笔写完的整页放大后不至于断成虚线
     const base = hl ? (s.w || 18) : (s.w || 3) * bold;
     ctx.save();
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    ctx.strokeStyle = s.c; ctx.fillStyle = s.c;
-    if (hl) ctx.globalAlpha = ocr ? .82 : .3;
+    const col = ocr ? s.c : shown(s.c);
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    if (hl) ctx.globalAlpha = ocr ? .82 : (isDark() ? .38 : .3);
 
     if (pts.length === 1) {
       ctx.beginPath();
@@ -178,292 +199,181 @@ const Board = (() => {
     ctx.restore();
   }
 
-  function mount(host, note, { course, onChange } = {}) {
-    note.board = note.board || { pages: [{ bg: null, h: 1414, strokes: [] }] };
-    if (!note.board.pages.length) note.board.pages.push({ bg: null, h: 1414, strokes: [] });
-    const P = Object.assign({ tool: 'pen', color: INK[0], size: 3, penOnly: true }, pref());
-    const undo = [], redo = [];
-    host.innerHTML = `
-      <div class="board-tools noprint">
-        <div class="seg" role="group" aria-label="工具">
-          <button data-tool="pen" title="笔（再点一下切成橡皮）">✎ 笔</button><button data-tool="hl" title="荧光笔（再点一下切成橡皮）">▮ 荧光</button><button data-tool="er" title="橡皮（擦掉整笔；再点一下切回笔）">⌫ 橡皮</button>
-        </div>
-        <div class="seg colors">${INK.map(c => `<button data-color="${c}" style="--sw:${c}" aria-label="颜色"></button>`).join('')}</div>
-        <div class="seg"><button data-size="2">细</button><button data-size="3">中</button><button data-size="5">粗</button></div>
-        <div class="seg"><button data-act="undo" title="撤销">↶</button><button data-act="redo" title="重做">↷</button></div>
-        <label class="switch small" title="开着时只有 Apple Pencil 能写，手指用来滚动"><input type="checkbox" id="b-pen" ${P.penOnly ? 'checked' : ''}>只用笔写</label>
-        <span class="grow"></span>
-        <button class="btn small" data-act="add">＋空白页</button>
-        <button class="btn small" data-act="addpdf">＋课件页</button>
-        <button class="btn small ghost" data-act="export">导出图片</button>
-        <button class="btn small" data-act="hw" title="用 Gemini 免费识别手写，整理后放进笔记">识别手写 → 笔记</button>
-      </div>
-      ${Device.touch && !pref().hintSeen ? `<div class="board-hint noprint">小技巧：再点一下正在用的笔 = 切成橡皮，再点一下切回来 · 两指轻点 = 撤销 · 三指轻点 = 重做 · 手指滑动 = 翻页 <button class="btn small ghost" data-act="hint-x">知道了</button></div>` : ''}
-      <div class="board-pages"></div>`;
-    const hx = $('[data-act=hint-x]', host); if (hx) hx.onclick = () => { savePref({ hintSeen: 1 }); hx.parentElement.remove(); };
-    const pagesEl = $('.board-pages', host);
-    let save = null;
-    const persist = () => { clearTimeout(save); save = setTimeout(async () => { await DB.put('notes', note); onChange && onChange(); }, 700); };
-
-    const syncTools = () => {
-      $$('[data-tool]', host).forEach(b => b.classList.toggle('on', b.dataset.tool === P.tool));
-      $$('[data-color]', host).forEach(b => b.classList.toggle('on', b.dataset.color === P.color));
-      $$('[data-size]', host).forEach(b => b.classList.toggle('on', Number(b.dataset.size) === P.size));
-      $$('.board-page', host).forEach(el => { el.style.touchAction = P.penOnly ? 'pan-x pan-y pinch-zoom' : 'none'; });
+  /* 在笔记上改完字，把 HTML 变回 Markdown（只覆盖笔记用到的那几种格式） */
+  function htmlToMd(root) {
+    const inline = node => {
+      let out = '';
+      node.childNodes.forEach(n => {
+        if (n.nodeType === 3) { out += n.textContent.replace(/\s+/g, ' '); return; }
+        if (n.nodeType !== 1) return;
+        if (n.dataset && n.dataset.ref) { out += n.dataset.ref; return; } // 课件页码小标签 → 还原成 [p.N]
+        const t = n.tagName.toLowerCase(), inner = inline(n);
+        if (t === 'strong' || t === 'b') out += inner.trim() ? `**${inner.trim()}**` : '';
+        else if (t === 'em' || t === 'i') out += inner.trim() ? `*${inner.trim()}*` : '';
+        else if (t === 'code') out += '`' + inner + '`';
+        else if (t === 'a') out += `[${inner.trim()}](${n.getAttribute('href') || ''})`;
+        else if (t === 'br') out += '\n';
+        else out += inner;
+      });
+      return out.replace(/[ \t]+/g, ' ');
     };
-    // 再点一下正在用的笔 → 切成橡皮；在橡皮上再点 → 切回刚才的笔（不用移动手去找按钮）
-    let prevTool = P.tool === 'er' ? 'pen' : P.tool;
-    $$('[data-tool]', host).forEach(b => b.onclick = () => {
-      const t = b.dataset.tool;
-      if (t === P.tool && t !== 'er') { prevTool = t; P.tool = 'er'; }
-      else if (t === 'er' && P.tool === 'er') P.tool = prevTool;
-      else { if (t !== 'er') prevTool = t; P.tool = t; }
-      savePref({ tool: P.tool }); syncTools();
+    const out = [];
+    const push = (s, br) => { if (s.trim()) out.push(br ? (out.length ? '\n\n' + s.trim() : s.trim()) : s.trim()); };
+    root.childNodes.forEach(n => {
+      if (n.nodeType === 3) { const t = n.textContent.trim(); if (t) push(t, out.length > 0); return; }
+      if (n.nodeType !== 1) return;
+      const t = n.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(t)) push('#'.repeat(Number(t[1])) + ' ' + inline(n).trim(), out.length > 0);
+      else if (t === 'ul' || t === 'ol') {
+        const items = [...n.children].map((li, i) => (t === 'ol' ? `${i + 1}. ` : '- ') + inline(li).trim()).filter(s => s.length > 2);
+        if (items.length) push(items.join('\n'), out.length > 0);
+      } else if (t === 'blockquote') push('> ' + inline(n).trim(), out.length > 0);
+      else if (t === 'pre') push('```\n' + n.textContent.replace(/\s+$/, '') + '\n```', out.length > 0);
+      else if (t === 'hr') push('---', out.length > 0);
+      else if (t === 'table') {
+        const rows = [...n.querySelectorAll('tr')].map(tr => '| ' + [...tr.children].map(td => inline(td).trim()).join(' | ') + ' |');
+        if (rows.length) { rows.splice(1, 0, '|' + rows[0].split('|').slice(1, -1).map(() => ' --- ').join('|') + '|'); push(rows.join('\n'), out.length > 0); }
+      } else push(inline(n).trim().replace(/\n{2,}/g, '\n'), out.length > 0);
     });
-    $$('[data-color]', host).forEach(b => b.onclick = () => { P.color = b.dataset.color; if (P.tool === 'er') P.tool = 'pen'; savePref({ color: P.color, tool: P.tool }); syncTools(); });
-    $$('[data-size]', host).forEach(b => b.onclick = () => { P.size = Number(b.dataset.size); savePref({ size: P.size }); syncTools(); });
-    $('#b-pen', host).onchange = e => { P.penOnly = e.target.checked; savePref({ penOnly: P.penOnly }); syncTools(); };
+    return out.join('').replace(/\n{3,}/g, '\n\n').trim();
+  }
 
-    const pageViews = [];
-    function layoutPage(pv) {
-      const cssW = pv.el.clientWidth || 600, dpr = Math.min(2.5, window.devicePixelRatio || 1);
-      const cssH = cssW * pv.page.h / W;
-      const bw = Math.round(cssW * dpr), bh = Math.round(cssH * dpr);
-      for (const c of [pv.bgC, pv.ink, pv.live]) { c.width = bw; c.height = bh; c.style.height = cssH + 'px'; }
-      pv.scale = cssW / W;
-      // 用「实际像素宽 / css 宽」当倍率，避免四舍五入带来的整体半像素模糊
-      pv.dpr = bw / cssW;
-      paintBg(pv); paintInk(pv);
+  /* ---------- 世界：一整块无限画布 ----------
+     以前是「一页一页固定大小的纸」，笔只能在纸里写。
+     现在整份笔记是一块无限大的画布：课文页的要点是一块块「板块」，手写可以写在任何地方，
+     上下左右都不封边；缩放/平移随意。老数据在打开时自动搬过来。 */
+  function blockH(text) { return Math.max(820, 300 + Math.ceil(String(text || '').length / 36) * 30 + 320); }
+  function world(note) {
+    note.board = note.board || {};
+    const b = note.board;
+    if (b.world && Array.isArray(b.world.blocks)) {
+      // 老数据：只有一块空的、但正文有内容 —— 直接把正文切成块，别让笔记看不见
+      const w = b.world;
+      if (w.blocks.length === 1 && !String(w.blocks[0].text || '').trim() && String(note.markdown || '').trim()) {
+        w.blocks = blocksFromMd(note.markdown);
+        layout(w);
+      } else if (w.mdSig && w.mdSig !== mdSig(note.markdown) && String(note.markdown || '').trim()) {
+        // 正文在别处改过（编辑正文 / 重新生成 / 手写整理进笔记）：板块跟着换，手写按页码留在原来那块旁边
+        const oldY = new Map(w.blocks.map(b => [b.p, b.y]));
+        w.blocks = blocksFromMd(note.markdown);
+        layout(w);
+        shiftInk(w, oldY);
+      }
+      w.mdSig = mdSig(note.markdown);
+      return w;
     }
-    async function paintBg(pv) {
-      const ctx = pv.bgC.getContext('2d');
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, pv.bgC.width, pv.bgC.height);
-      if (pv.page.bg) {
-        try {
-          const c = await Pdf.render(pv.page.bg.fileId, pv.page.bg.page, Math.min(2000, pv.bgC.width));
-          ctx.drawImage(c, 0, 0, pv.bgC.width, pv.bgC.height);
-        } catch (e) { ctx.fillStyle = '#999'; ctx.font = '28px sans-serif'; ctx.fillText('课件页加载失败：' + e.message, 30, 60); }
-      } else {
-        // 淡淡的横线，像笔记本
-        ctx.strokeStyle = 'rgba(44,71,165,.10)'; ctx.lineWidth = 1;
-        const step = 40 * pv.scale * pv.dpr;
-        for (let y = step * 2; y < pv.bgC.height; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(pv.bgC.width, y); ctx.stroke(); }
+    const blocks = [], strokes = [];
+    let y = 0;
+    (b.pages || []).forEach((pg, i) => {
+      const text = pg.text || '';
+      const p = pg.p || (pg.bg && pg.bg.page) || (i + 1);
+      blocks.push({ p, y, text });
+      (pg.strokes || []).forEach(s => strokes.push(Object.assign({}, s, { p, pts: (s.pts || []).map(q => [q[0], q[1] + y, q[2]]) })));
+      y += Math.max(pg.h || 0, blockH(text)) + GAP;
+    });
+    if (!blocks.length) blocks.push(...blocksFromMd(note.markdown || ''));
+    if (!blocks.length) blocks.push({ p: 1, y: 0, text: '' });
+    b.world = { strokes, blocks, mdSig: mdSig(note.markdown) };
+    delete b.pages;
+    return b.world;
+  }
+  /* 把正文切成一块块（按二级标题分，太长再按段落切开） */
+  function blocksFromMd(md, startP = 1) {
+    const text = String(md || '').trim();
+    if (!text) return [];
+    const parts = [];
+    let buf = '';
+    const push = () => { if (buf.trim()) { parts.push(buf.trim()); buf = ''; } };
+    for (const line of text.split('\n')) {
+      if (/^##\s/.test(line)) push();
+      buf += (buf ? '\n' : '') + line;
+      if (buf.length > 1400) {
+        const cut = buf.lastIndexOf('\n', 1400);
+        if (cut > 400) { parts.push(buf.slice(0, cut).trim()); buf = buf.slice(cut); }
       }
     }
-    function paintInk(pv) {
-      const ctx = pv.ink.getContext('2d');
-      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pv.ink.width, pv.ink.height);
-      const lc = pv.live && pv.live.getContext('2d');
-      if (lc) { lc.setTransform(1, 0, 0, 1, 0, 0); lc.clearRect(0, 0, pv.live.width, pv.live.height); }
-      const sc = pv.scale * pv.dpr;
-      for (const s of pv.page.strokes) drawStroke(ctx, s, sc);
-    }
-    function build() {
-      pagesEl.innerHTML = '';
-      pageViews.length = 0;
-      note.board.pages.forEach((page, i) => {
-        const el = document.createElement('div'); el.className = 'board-page';
-        el.innerHTML = `<canvas class="bg"></canvas><canvas class="ink"></canvas><canvas class="live"></canvas><div class="pno">${i + 1}${page.bg ? ' · 课件第 ' + page.bg.page + ' 页' : ''}<button class="btn small ghost" data-del="${i}" title="删除这一页">删除</button></div>`;
-        pagesEl.appendChild(el);
-        const pv = { el, page, bgC: $('.bg', el), ink: $('.ink', el), live: $('.live', el), scale: 1, dpr: 1 };
-        pageViews.push(pv);
-        attach(pv);
-        confirmClick($('[data-del]', el), '确认删除这页', () => { note.board.pages.splice(i, 1); if (!note.board.pages.length) note.board.pages.push({ bg: null, h: 1414, strokes: [] }); persist(); build(); });
-      });
-      requestAnimationFrame(() => pageViews.forEach(layoutPage));
-      syncTools();
-    }
-
-    function attach(pv) {
-      let cur = null, penDown = false;
-      const sc = () => pv.scale * pv.dpr;
-      const pos = e => {
-        const r = pv.ink.getBoundingClientRect();
-        return [
-          (e.clientX - r.left) / (pv.scale || 1),
-          (e.clientY - r.top) / (pv.scale || 1),
-          e.pointerType === 'pen' ? (e.pressure || .5) : .5,
-        ];
-      };
-      const allowed = e => {
-        if (e.pointerType === 'pen') return true;
-        if (e.pointerType === 'touch') return !P.penOnly && !penDown;
-        return e.button === 0 || e.buttons === 1; // 鼠标 / 触控板
-      };
-      // 正在写的那一笔画在单独一层上，松手才落到纸上。
-      // 好处是每帧只重画这一笔，不用把整页几百笔重画一遍，iPad 上不会掉帧。
-      const liveCtx = pv.live.getContext('2d');
-      const liveClear = () => { liveCtx.setTransform(1, 0, 0, 1, 0, 0); liveCtx.clearRect(0, 0, pv.live.width, pv.live.height); };
-      const liveDraw = () => { liveClear(); if (cur && !cur.er) drawStroke(liveCtx, cur.s, sc()); };
-      // 阻止 Apple Pencil 拖动时页面跟着滚
-      pv.el.addEventListener('touchstart', e => { if ([...e.touches].some(t => t.touchType === 'stylus') || !P.penOnly) e.preventDefault(); }, { passive: false });
-      pv.el.addEventListener('touchmove', e => { if ([...e.touches].some(t => t.touchType === 'stylus') || (!P.penOnly && cur)) e.preventDefault(); }, { passive: false });
-      pv.ink.addEventListener('pointerdown', e => {
-        if (!allowed(e)) return;
-        if (e.pointerType === 'pen') penDown = true;
-        e.preventDefault();
-        try { pv.ink.setPointerCapture(e.pointerId); } catch (err) {}
-        const p = pos(e);
-        if (P.tool === 'er') { cur = { er: true, id: e.pointerId, removed: [] }; eraseAt(pv, p, cur); return; }
-        cur = { id: e.pointerId, s: { tool: P.tool, c: P.tool === 'hl' ? '#FFD400' : P.color, w: P.tool === 'hl' ? 18 : P.size, pts: [p] } };
-        liveDraw();
-      });
-      pv.ink.addEventListener('pointermove', e => {
-        if (!cur || e.pointerId !== cur.id) return;
-        e.preventDefault();
-        const co = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-        const evs = co.length ? co : [e];
-        let added = false;
-        for (const ev of evs) {
-          const p = pos(ev);
-          if (cur.er) { eraseAt(pv, p, cur); continue; }
-          const pts = cur.s.pts, last = pts[pts.length - 1];
-          if (Math.hypot(p[0] - last[0], p[1] - last[1]) < .7) continue;
-          pts.push(p); added = true;
-        }
-        if (added) liveDraw();
-      });
-      const end = e => {
-        if (e.pointerType === 'pen') penDown = false;
-        if (!cur || e.pointerId !== cur.id) return;
-        if (cur.er) { if (cur.removed.length) { undo.push({ type: 'erase', page: pv.page, strokes: cur.removed }); redo.length = 0; persist(); } }
-        else {
-          pv.page.strokes.push(cur.s);
-          // 松手时把这一笔按最终形态画到纸上（和纸上其它笔迹同一套算法，前后一致）
-          drawStroke(pv.ink.getContext('2d'), cur.s, sc());
-          undo.push({ type: 'add', page: pv.page, stroke: cur.s }); redo.length = 0; persist();
-        }
-        liveClear();
-        cur = null;
-      };
-      pv.ink.addEventListener('pointerup', end);
-      pv.ink.addEventListener('pointercancel', end);
-    }
-    function eraseAt(pv, p, cur) {
-      const r = 14;
-      const keep = [];
-      let hit = false;
-      for (const s of pv.page.strokes) {
-        if (s.pts.some(q => Math.hypot(q[0] - p[0], q[1] - p[1]) < r + s.w / 2)) { cur.removed.push(s); hit = true; } else keep.push(s);
-      }
-      if (hit) { pv.page.strokes = keep; paintInk(pv); }
-    }
-    const doUndo = (quiet) => {
-      const a = undo.pop(); if (!a) { if (!quiet) toast('没有可以撤销的'); return; }
-      if (a.type === 'add') a.page.strokes = a.page.strokes.filter(s => s !== a.stroke); else a.page.strokes.push(...a.strokes);
-      redo.push(a); pageViews.forEach(paintInk); persist();
-      if (quiet) toast('已撤销', 900);
-    };
-    const doRedo = (quiet) => {
-      const a = redo.pop(); if (!a) { if (!quiet) toast('没有可以重做的'); return; }
-      if (a.type === 'add') a.page.strokes.push(a.stroke); else a.page.strokes = a.page.strokes.filter(s => !a.strokes.includes(s));
-      undo.push(a); pageViews.forEach(paintInk); persist();
-      if (quiet) toast('已重做', 900);
-    };
-    $('[data-act=undo]', host).onclick = () => doUndo();
-    $('[data-act=redo]', host).onclick = () => doRedo();
-    // 手势：两指轻点 = 撤销，三指轻点 = 重做（手指没怎么移动、很快抬起才算，滚动不会误触发）
-    let tap = null;
-    pagesEl.addEventListener('touchstart', e => {
-      const fingers = [...e.touches].filter(t => t.touchType !== 'stylus');
-      if (fingers.length !== e.touches.length) { tap = null; return; }
-      if (fingers.length >= 2) tap = { n: Math.max(tap ? tap.n : 0, fingers.length), t: tap ? tap.t : Date.now(), pts: fingers.map(f => [f.identifier, f.clientX, f.clientY]), moved: tap ? tap.moved : false };
-      else if (fingers.length === 1) tap = { n: 1, t: Date.now(), pts: [[fingers[0].identifier, fingers[0].clientX, fingers[0].clientY]], moved: false };
-    }, { passive: true });
-    pagesEl.addEventListener('touchmove', e => {
-      if (!tap) return;
-      for (const t of e.touches) { const p = tap.pts.find(q => q[0] === t.identifier); if (p && Math.hypot(t.clientX - p[1], t.clientY - p[2]) > 12) tap.moved = true; }
-    }, { passive: true });
-    pagesEl.addEventListener('touchend', e => {
-      if (!tap || e.touches.length) return;
-      const t = tap; tap = null;
-      if (t.moved || Date.now() - t.t > 350) return;
-      if (t.n === 2) doUndo(true); else if (t.n === 3) doRedo(true);
+    push();
+    // 只有一个大标题（# 标题）的那一块并到下一块里，不然开头是一块几乎空白的板块
+    if (parts.length > 1 && /^#\s[^\n]*$/.test(parts[0])) parts.splice(0, 2, parts[0] + '\n\n' + parts[1]);
+    // 板块编号尽量用正文里的课件页码 [p.N]，左边课件才能对上；用过的页码不重复
+    const used = new Set(), out = [];
+    parts.forEach(t => {
+      const m = [...t.matchAll(/\[p\.?\s*(\d+)/g)].map(x => Number(x[1])).find(n => n >= 1 && !used.has(n));
+      if (m) used.add(m);
+      out.push({ p: m || 0, text: t });
     });
-    pagesEl.addEventListener('touchcancel', () => { tap = null; });
-    $('[data-act=add]', host).onclick = () => { note.board.pages.push({ bg: null, h: 1414, strokes: [] }); persist(); build(); pagesEl.lastElementChild?.scrollIntoView({ behavior: 'smooth' }); };
-    $('[data-act=addpdf]', host).onclick = () => addPdfPages(note, course, async () => { persist(); build(); });
-    $('[data-act=export]', host).onclick = () => exportImages(note);
-    $('[data-act=hw]', host).onclick = async () => {
-      const b = $('[data-act=hw]', host); b.disabled = true; const old = b.textContent;
-      try { clearTimeout(save); await DB.put('notes', note); await Recap.handwritingMerge(note, course, t => { b.textContent = t; }); toast('手写已经整理进笔记（笔记最下面「我的手写笔记」）'); }
-      catch (e) { toast(e.message, 6000); }
-      b.disabled = false; b.textContent = old;
-    };
-    let rz; const ro = new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(() => pageViews.forEach(layoutPage), 120); });
-    ro.observe(pagesEl);
-    build();
-    return { addPdfPage: async (fileId, page) => { const h = Math.round(W * await Pdf.aspect(fileId, page)); note.board.pages.push({ bg: { fileId, page }, h, strokes: [] }); persist(); build(); pagesEl.lastElementChild?.scrollIntoView({ behavior: 'smooth' }); } };
+    let k = Math.max(startP - 1, ...used, out.length);
+    out.forEach(b => { if (!b.p) b.p = ++k; });
+    return out;
   }
+  const mdSig = s => { s = String(s || ''); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return s.length + ':' + h; };
 
-  async function addPdfPages(note, course, done) {
-    const files = (await DB.byIndex('files', 'courseId', note.courseId)).filter(isPdf);
-    if (!files.length) { toast('这门课还没有 PDF 课件（PPT 要先在电脑上另存为 PDF 再导入）'); return; }
-    modal(`<h2>把课件页加进画板</h2>
-      <div class="field"><label for="ap-f">课件</label><select id="ap-f">${sortFiles(files).map(f => `<option value="${f.id}" ${(note.sourceFileIds || []).includes(f.id) ? 'selected' : ''}>${esc(weekOf(f).label)} · ${esc(f.name)}</option>`).join('')}</select></div>
-      <div class="field"><label for="ap-r">哪几页</label><input id="ap-r" type="text" placeholder="例如 1-5, 8；不填就是全部"><span class="hint" id="ap-n"></span></div>
-      <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="ap-go">加进去</button></div>`, (box, close) => {
-      const upd = async () => { try { $('#ap-n', box).textContent = `共 ${await Pdf.count($('#ap-f', box).value)} 页`; } catch (e) { $('#ap-n', box).textContent = e.message; } };
-      $('#ap-f', box).onchange = upd; upd();
-      $('#ap-go', box).onclick = async () => {
-        const fid = $('#ap-f', box).value; const n = await Pdf.count(fid);
-        const raw = $('#ap-r', box).value.trim(); const pages = [];
-        if (!raw) for (let i = 1; i <= n; i++) pages.push(i);
-        else raw.split(/[,，\s]+/).forEach(part => { const [a, b] = part.split('-').map(Number); if (a) for (let i = a; i <= (b || a); i++) if (i >= 1 && i <= n) pages.push(i); });
-        if (!pages.length) { toast('页码不对'); return; }
-        if (pages.length > 60) { toast('一次最多加 60 页'); return; }
-        close(); toast('正在加入 ' + pages.length + ' 页…');
-        // 如果只有一张没写过的空白页，就替换掉它
-        const bp = note.board.pages;
-        if (bp.length === 1 && !bp[0].bg && !bp[0].strokes.length) bp.length = 0;
-        for (const p of pages) bp.push({ bg: { fileId: fid, page: p }, h: Math.round(W * await Pdf.aspect(fid, p)), strokes: [] });
-        await done();
-      };
+  /* 估算排版。手写永远跟着它所在的那一块走：块挪了多少，那一块的笔迹就挪多少。
+     （以前每次打开笔记都先按估算高度排一次、再按实际高度排一次，中间笔迹没跟着挪，
+       于是每打开一次手写就往上跑一截 —— 这是「手写和文字错位」的根源） */
+  function layout(wd) {
+    const oldY = new Map(wd.blocks.filter(b => typeof b.y === 'number').map(b => [b.p, b.y]));
+    let y = 0;
+    wd.blocks.forEach(bl => { bl.y = y; y += blockH(bl.text) + GAP; });
+    wd.h = y;
+    shiftInk(wd, oldY);
+    return wd;
+  }
+  function shiftInk(wd, oldY) {
+    const ny = new Map(wd.blocks.map(b => [b.p, b.y]));
+    wd.strokes.forEach(s => {
+      const oy = oldY.get(s.p), y2 = ny.get(s.p);
+      if (oy == null || y2 == null || oy === y2) return;
+      const d = y2 - oy; s.pts = s.pts.map(q => [q[0], q[1] + d, q[2]]);
+    });
+    // 打字文本框也跟着所在的那一块走
+    (wd.texts || []).forEach(t => {
+      const oy = oldY.get(t.p), y2 = ny.get(t.p);
+      if (oy == null || y2 == null || oy === y2) return;
+      t.y += y2 - oy;
     });
   }
+  const sections = note => {
+    const wd = world(note);
+    return wd.blocks.map(bl => ({ p: bl.p, y: bl.y, text: bl.text, strokes: wd.strokes.filter(s => s.p === bl.p) }));
+  };
+  const hasInk = note => {
+    try { return world(note).strokes.length > 0; } catch (e) { return false; }
+  };
+  const blockOf = (wd, y) => { let best = wd.blocks[0]; for (const b of wd.blocks) if (y >= b.y - 40) best = b; return best; };
 
-  /* 画板每页渲染成 PNG（导出 / 交给 Gemini 识别手写） */
-  async function pageImage(page, width = 1000, withBg = true) {
-    const c = document.createElement('canvas'); const sc = width / W;
-    c.width = width; c.height = Math.round(page.h * sc);
-    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-    if (withBg && page.bg) { try { ctx.drawImage(await Pdf.render(page.bg.fileId, page.bg.page, width), 0, 0, c.width, c.height); } catch (e) {} }
-    for (const s of page.strokes) drawStroke(ctx, s, sc);
-    return c;
-  }
-  /* 只画笔迹、自动裁到有字的区域：识别手写用这个。
-     原来是把整页（含课件印刷体）压到 1000px 宽再识别，笔迹只有 1–2 像素，
-     模型基本认不出来；裁到笔迹范围再放大，同样一张图能清楚好几倍。 */
-  function inkBox(page) {
+  /* 把一块区域画成图（导出 / 交给 Gemini 认手写） */
+  function inkImage(src, targetW = 1600, maxPx = 4.2e6, bold = 1, region) {
+    const strokes = src.strokes || [];
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const s of page.strokes || []) for (const p of s.pts || []) {
+    if (region) { x0 = region.x0; y0 = region.y0; x1 = region.x1; y1 = region.y1; }
+    else for (const s of strokes) for (const p of s.pts || []) {
       if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
       if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
     }
-    return isFinite(x0) ? { x0, y0, x1, y1 } : null;
-  }
-  function inkImage(page, targetW = 1600, maxPx = 4.2e6, bold = 1, region) {
-    const b = region ? {
-      x0: Math.max(0, region.x0), y0: Math.max(0, region.y0),
-      x1: Math.min(W, region.x1), y1: Math.min(page.h || 1414, region.y1),
-    } : inkBox(page);
-    if (!b || b.x1 - b.x0 < 4 || b.y1 - b.y0 < 4) return null;
+    if (!isFinite(x0)) return null;
     const pad = region ? 14 : 40;
-    const x0 = Math.max(0, b.x0 - pad), y0 = Math.max(0, b.y0 - pad);
-    const x1 = Math.min(W, b.x1 + pad), y1 = Math.min(page.h || 1414, b.y1 + pad);
+    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
     const bw = Math.max(80, x1 - x0), bh = Math.max(80, y1 - y0);
     let sc = targetW / bw;
-    if (bw * bh * sc * sc > maxPx) sc = Math.sqrt(maxPx / (bw * bh)); // 别超过 iOS 的 canvas 上限
-    sc = Math.max(sc, 0.8);
+    if (bw * bh * sc * sc > maxPx) sc = Math.sqrt(maxPx / (bw * bh));
+    sc = Math.max(sc, .8);
     const c = document.createElement('canvas');
     c.width = Math.round(bw * sc); c.height = Math.round(bh * sc);
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     ctx.translate(-x0 * sc, -y0 * sc);
-    for (const s of page.strokes) drawStroke(ctx, s, sc, true, bold);
+    for (const s of strokes) drawStroke(ctx, s, sc, true, bold);
     return c;
   }
+  const inkBox = src => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of (src && src.strokes) || []) for (const p of s.pts || []) {
+      if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+    }
+    return isFinite(x0) ? { x0, y0, x1, y1 } : null;
+  };
   /* iOS Safari 对没挂在页面上的 canvas 调 toDataURL 有时会返回全白，先挂上去再截 */
   function shoot(canvas, mime, quality) {
     canvas.style.cssText = 'position:fixed;left:-99999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
@@ -473,23 +383,782 @@ const Board = (() => {
     return out;
   }
 
-  async function exportImages(note) {
-    const pages = (note.board?.pages || []).filter(p => p.strokes.length || p.bg);
-    if (!pages.length) { toast('画板还是空的'); return; }
-    toast('正在生成图片…');
-    const w = window.open('', '_blank');
-    if (!w) { toast('浏览器拦截了新窗口，允许弹出窗口后再试'); return; }
-    const imgs = [];
-    for (const p of pages) imgs.push((await pageImage(p, 1400)).toDataURL('image/jpeg', .9));
-    w.document.write(`<title>${esc(note.title)} · 手写</title><style>body{margin:0;background:#888}img{display:block;width:100%;max-width:900px;margin:12px auto;background:#fff}@media print{body{background:#fff}img{margin:0;page-break-after:always;max-width:none}}</style>${imgs.map(s => `<img src="${s}">`).join('')}<script>setTimeout(()=>print(),400)<\/script>`);
-    w.document.close();
+  /* ---------- 挂载 ---------- */
+  let current = null;
+
+  function mount(host, note, { course, onPageJump } = {}) {
+    const onPageChange = null;   // 不再随滚动自动联动左边课件
+    const wd = world(note);
+    // 只有出现还没排过的块（新加的、刚切出来的）才估算一次；排好的位置原样保留
+    if (wd.blocks.some(b => typeof b.y !== 'number')) layout(wd);
+    const P = Object.assign({ tool: 'select', color: INK[0], size: 3, penOnly: true }, pref());
+    // 顺手把老页面里「第几页」的板书信息记下来，供左边课件联动
+    // 每份笔记各记各的位置和缩放（以前是全局一个，换一份笔记会停在奇怪的地方）
+    const savedView = (pref().views || {})[note.id];
+    let view = Object.assign({ x: 0, y: -24, z: 1 }, savedView || {});
+    const NS = { size: Math.min(24, Math.max(11, Number(P.noteSize) || 15)), bold: !!P.noteBold, ink: P.noteInk || '#1A2030' };
+
+    host.innerHTML = `
+      <div class="board-tools noprint">
+        <div class="seg tools" role="group" aria-label="工具">
+          <button data-tool="select" title="选择：双击改字、拖空白处移动（V）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 8-6 1.5L10 19z"/></svg><span class="lbl">选择</span></button>
+          <button data-tool="hand" title="手：拖动画布（H / 按住空格）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11V5.5a1.5 1.5 0 013 0V10m0-4.5a1.5 1.5 0 013 0V10m0-3a1.5 1.5 0 013 0v6.5A6.5 6.5 0 0110.5 20 5.5 5.5 0 015.6 17L3.8 13a1.4 1.4 0 012.4-1.4L8 14"/></svg><span class="lbl">手</span></button>
+          <button data-tool="pen" title="笔（P；再点一下切成橡皮）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 013 3L8 19z"/><path d="M14 7l3 3"/></svg><span class="lbl">笔</span></button>
+          <button data-tool="hl" title="荧光笔"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15l-3 3H3v-2l3-3"/><path d="M8 12l7.5-7.5a2 2 0 013 3L11 15z"/><path d="M14 21h7"/></svg><span class="lbl">荧光</span></button>
+          <button data-tool="er" title="橡皮（E）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 21h12"/><path d="M5.5 15.5l9-9a2 2 0 012.8 0l2.2 2.2a2 2 0 010 2.8L13 18H8z"/></svg><span class="lbl">橡皮</span></button>
+          <button data-tool="text" title="文字（T）：点画布任意位置放一个文本框，直接打字"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6V4h14v2"/><path d="M12 4v16"/><path d="M9 20h6"/></svg><span class="lbl">文字</span></button>
+        </div>
+        <div class="seg colors" role="group" aria-label="笔的颜色">${INK.map(c => `<button data-color="${c}" style="--sw:${c}" aria-label="颜色"></button>`).join('')}</div>
+        <div class="seg sizes" role="group" aria-label="粗细"><button data-size="2" title="细" aria-label="细"><i style="--d:4px"></i></button><button data-size="3" title="中" aria-label="中"><i style="--d:7px"></i></button><button data-size="5" title="粗" aria-label="粗"><i style="--d:10px"></i></button></div>
+        <div class="seg"><button data-act="undo" title="撤销（⌘Z · 两指轻点）" aria-label="撤销"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-2"/></svg></button><button data-act="redo" title="重做（⇧⌘Z · 三指轻点）" aria-label="重做"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 000 12h2"/></svg></button></div>
+        <div class="seg nav" role="group" aria-label="块">
+          <button data-nav="-1" aria-label="上一块" title="上一块">‹</button>
+          <span class="zoom-pct" id="ic-nav" title="第几块 / 共几块">1/1</span>
+          <button data-nav="1" aria-label="下一块" title="下一块">›</button>
+        </div>
+        <div class="seg zoom" role="group" aria-label="缩放">
+          <button data-zoom="-" title="缩小（⌘− · 捏合）" aria-label="缩小">−</button>
+          <button data-zoom="fit" class="zoom-pct" id="b-zoom" title="点一下回到 100%">100%</button>
+          <button data-zoom="+" title="放大（⌘+）" aria-label="放大">＋</button>
+        </div>
+        <span class="grow"></span>
+        <button class="btn small ghost icon-btn" data-act="find" title="在笔记里找字（⌘F）" aria-label="查找"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></button>
+        <details class="more">
+          <summary class="btn small">更多</summary>
+          <div class="more-menu">
+            <div class="mm-row"><span class="mm-lbl">笔记文字</span><button data-nfont="-" title="字小一点">A−</button><button data-nfont="+" title="字大一点">A+</button><button data-nbold="1" title="加粗"><b>B</b></button></div>
+            <div class="mm-row"><span class="mm-lbl">文字颜色</span><button data-ncolor="#1A2030" class="nsw" style="--sw:#1A2030" aria-label="墨黑"></button><button data-ncolor="#2C47A5" class="nsw" style="--sw:#2C47A5" aria-label="蓝"></button><button data-ncolor="#B93434" class="nsw" style="--sw:#B93434" aria-label="红"></button></div>
+            <button data-act="add" title="在最后加一块空白笔记">＋ 加一块空白</button>
+            <button data-act="center" title="回到当前这一块">回到当前块</button>
+            <label class="more-check"><input type="checkbox" id="b-pen" ${P.penOnly ? 'checked' : ''}>只用 Apple Pencil 写（手指只移动）</label>
+            <button data-act="doc" title="按课件页码把要点排成一块块（手写都留着）">跟课件排页</button>
+            <button data-act="export">导出手写图片</button>
+            <button data-act="hw" title="用 Gemini 免费识别手写，整理后放进笔记">识别手写 → 笔记</button>
+          </div>
+        </details>
+      </div>
+      ${Device.touch && !pref().hintSeen ? `<div class="board-hint noprint">小技巧：一指拖动、两指捏合缩放 · 两指轻点 = 撤销，三指轻点 = 重做 · 双击文字就能改 <button class="btn small ghost" data-act="hint-x">知道了</button></div>` : ''}
+      <div class="ic-stage" id="ic-stage">
+        <div class="ic-world" id="ic-world"></div>
+        <canvas class="ic-ink" id="ic-ink"></canvas>
+        <canvas class="ic-live" id="ic-live"></canvas>
+      </div>`;
+    const hx = $('[data-act=hint-x]', host); if (hx) hx.onclick = () => { savePref({ hintSeen: 1 }); hx.parentElement.remove(); };
+
+    const stage = $('#ic-stage', host), worldEl = $('#ic-world', host);
+    const ink = $('#ic-ink', host), live = $('#ic-live', host);
+    const ictx = ink.getContext('2d'), lctx = live.getContext('2d');
+    let dpr = 1;
+    let save = null;
+    const saveView = () => {
+      const vs = Object.assign({}, pref().views || {});
+      vs[note.id] = { x: Math.round(view.x), y: Math.round(view.y), z: Math.round(view.z * 1000) / 1000 };
+      const keys = Object.keys(vs); if (keys.length > 60) delete vs[keys[0]];
+      savePref({ views: vs });
+    };
+    let viewT = null;
+    const persistView = () => { clearTimeout(viewT); viewT = setTimeout(saveView, 400); };
+    let pending = false, cleaned = false;
+    const persist = () => { pending = true; clearTimeout(save); save = setTimeout(async () => { pending = false; saveView(); await DB.put('notes', note); }, 500); };
+
+    /* ---- 视图 ---- */
+    let raf = 0;
+    const applyView = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        worldEl.style.transform = `translate(${-view.x * view.z}px, ${-view.y * view.z}px) scale(${view.z})`;
+        const lab = $('#b-zoom', host); if (lab) lab.textContent = Math.round(view.z * 100) + '%';
+        paint();
+      });
+    };
+    // 画布高度按「屏幕上还剩多少」算，保证整块都在可视区里，不用滚页面找
+    const fitStage = () => {
+      const offset = stage.getBoundingClientRect().top + (window.scrollY || 0);
+      const avail = Math.max(360, window.innerHeight - offset - 16);
+      if (Math.abs(stage.clientHeight - avail) > 4) stage.style.height = avail + 'px';
+    };
+    const resize = () => {
+      fitStage();
+      dpr = Math.min(2.5, window.devicePixelRatio || 1);
+      for (const c of [ink, live]) { c.width = Math.round(stage.clientWidth * dpr); c.height = Math.round(stage.clientHeight * dpr); }
+      paint();
+    };
+    const toWorld = (cx, cy) => {
+      const r = stage.getBoundingClientRect();
+      return [view.x + (cx - r.left) / view.z, view.y + (cy - r.top) / view.z];
+    };
+
+    /* ---- 画 ---- */
+    function paint() {
+      const w = ink.width, h = ink.height;
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+      ictx.clearRect(0, 0, w, h); // 纯白画布：不画横线，整块都是写字的地方
+      ictx.setTransform(view.z * dpr, 0, 0, view.z * dpr, -view.x * view.z * dpr, -view.y * view.z * dpr);
+      // 只画看得见的笔画：长笔记几百笔时平移也不卡
+      const vx0 = view.x, vy0 = view.y, vx1 = view.x + w / dpr / view.z, vy1 = view.y + h / dpr / view.z;
+      for (const s of wd.strokes) {
+        const b = strokeInfo(s).box;
+        if (b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1) continue;
+        drawStroke(ictx, s, 1);
+      }
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    /* ---- 板块（笔记文字）---- */
+    const renderBlocks = () => {
+      worldEl.innerHTML = wd.blocks.map((bl, i) => `<div class="ic-block" data-p="${bl.p}" data-i="${i}" style="top:${bl.y}px;width:${COL}px">
+        ${bl.text ? `<div class="md"></div>` : `<div class="hint ic-empty">这一块还没有字，双击可以写</div>`}
+        <div class="ic-tag">P${bl.p}</div>
+      </div>`).join('');
+      $$('.ic-block', worldEl).forEach((el, i) => {
+        const bl = wd.blocks[i];
+        if (bl.text) {
+          const box = $('.md', el);
+          // 页码引用 [p.3] 显示成小标签：点一下左边课件跳到那页；改字时不会被弄丢
+          box.innerHTML = md(String(bl.text).replace(/\[p\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?\]/g, (m, a, b2) => ` <span class="pref" data-ref="${m}" data-pg="${a}">p${a}${b2 ? '–' + b2 : ''}</span>`));
+          $$('.pref', box).forEach(r => { r.contentEditable = 'false'; r.onclick = ev => { if (box.isContentEditable) return; ev.stopPropagation(); if (onPageJump) onPageJump(Number(r.dataset.pg)); }; });
+        }
+        el.addEventListener('dblclick', e => { e.preventDefault(); startEdit(i, e); });
+        // 选块：点一下把它设为「当前块」（居中/联动用）
+        el.addEventListener('pointerdown', () => { curBlock = i; });
+      });
+      curBlock = Math.min(curBlock, wd.blocks.length - 1);
+      renderTexts();
+    };
+
+    /* ---- 文字工具：画布上任意位置的文本框（像 GoodNotes 的 T） ----
+       存在 world.texts：{ id, p, x, y, text, size, c }，坐标是世界坐标，随缩放一起变；
+       跟着所在那一块挪（shiftInk）。空的文本框离开编辑时自动删掉。 */
+    wd.texts = wd.texts || [];
+    function renderTexts() {
+      $$('.ic-text', worldEl).forEach(el => el.remove());
+      for (const t of wd.texts) worldEl.appendChild(textEl(t));
+    }
+    function textEl(t) {
+      const el = document.createElement('div');
+      el.className = 'ic-text'; el.dataset.id = t.id;
+      el.style.left = t.x + 'px'; el.style.top = t.y + 'px';
+      el.style.setProperty('--tsize', (t.size || 16) + 'px'); el.style.setProperty('--tc', shown(t.c || '#1A2030'));
+      el.innerHTML = `<span class="ic-grip" title="拖动移动位置" aria-hidden="true">⠿</span><button class="ic-tx-del" title="删除这个文本框" aria-label="删除这个文本框">×</button><div class="ic-tx-body"></div>`;
+      const body = $('.ic-tx-body', el); body.textContent = t.text || '';
+      body.addEventListener('pointerdown', e => { if (['pen', 'hl', 'er'].includes(P.tool)) return; e.stopPropagation(); if (!body.isContentEditable) { e.preventDefault(); editText(t, el, e); } });
+      $('.ic-tx-del', el).addEventListener('pointerdown', e => { e.stopPropagation(); e.preventDefault(); removeText(t); });
+      // 拖着左上角的小点挪位置
+      const grip = $('.ic-grip', el);
+      grip.addEventListener('pointerdown', e => {
+        e.stopPropagation(); e.preventDefault();
+        try { grip.setPointerCapture(e.pointerId); } catch (err) {}
+        const sx = e.clientX, sy = e.clientY, ox = t.x, oy = t.y;
+        const mv = ev => { t.x = ox + (ev.clientX - sx) / view.z; t.y = oy + (ev.clientY - sy) / view.z; el.style.left = t.x + 'px'; el.style.top = t.y + 'px'; };
+        const up = () => { grip.removeEventListener('pointermove', mv); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up); const b = blockOf(wd, t.y); t.p = b ? b.p : t.p; persist(); };
+        grip.addEventListener('pointermove', mv); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
+      });
+      return el;
+    }
+    function editText(t, el, ev) {
+      const body = $('.ic-tx-body', el);
+      el.classList.add('editing');
+      body.contentEditable = 'plaintext-only';
+      if (body.contentEditable !== 'plaintext-only') body.contentEditable = 'true';
+      body.spellcheck = false;
+      body.focus();
+      try {
+        const sel = window.getSelection(); let range = null;
+        if (ev && document.caretRangeFromPoint) range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+        if (!range || !body.contains(range.startContainer)) { range = document.createRange(); range.selectNodeContents(body); range.collapse(false); }
+        sel.removeAllRanges(); sel.addRange(range);
+      } catch (e) {}
+      const done = () => {
+        body.removeEventListener('blur', done);
+        body.contentEditable = 'false'; el.classList.remove('editing');
+        t.text = body.innerText.replace(/\n+$/, '');
+        if (!t.text.trim()) { removeText(t, true); return; }
+        persist();
+      };
+      body.addEventListener('blur', done);
+      body.addEventListener('keydown', k => { if (k.key === 'Escape') { k.preventDefault(); body.blur(); } k.stopPropagation(); });
+    }
+    function addText(cx, cy) {
+      const [x, y] = toWorld(cx, cy);
+      const b = blockOf(wd, y);
+      const t = { id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), p: b ? b.p : null, x: Math.round(x), y: Math.round(y - 10), text: '', size: Math.round(NS.size + 1), c: P.tool === 'text' && P.color ? P.color : NS.ink };
+      wd.texts.push(t);
+      const el = textEl(t); worldEl.appendChild(el);
+      undo.push({ type: 'text', t }); redo.length = 0;
+      editText(t, el, null);
+    }
+    function removeText(t, quiet) {
+      wd.texts = wd.texts.filter(x => x !== t);
+      const el = $(`.ic-text[data-id="${t.id}"]`, worldEl); if (el) el.remove();
+      persist(); if (!quiet) toast('删掉了文本框', 1200);
+    }
+
+    let curBlock = 0;
+
+    /* 用真实渲染高度重排：估计值要么留大空隙、要么重叠，量一次最准。手写跟着块一起挪。 */
+    function relayout() {
+      const els = $$('.ic-block', worldEl);
+      // 画布被藏起来（切到别的分栏 / 还没显示）时量出来全是 0，这时重排会把手写全挪乱
+      if (!els.length || els.some(el => !el.offsetHeight)) { paint(); return; }
+      const oldY = new Map(wd.blocks.map(b => [b.p, b.y]));
+      let y = 0;
+      wd.blocks.forEach((bl, i) => {
+        bl.y = y;
+        y += (els[i] ? els[i].offsetHeight + 56 : blockH(bl.text) + GAP);
+      });
+      wd.h = y;
+      els.forEach((el, i) => { el.style.top = wd.blocks[i].y + 'px'; });
+      shiftInk(wd, oldY);
+      updateNav();
+      paint();
+    }
+
+    function startEdit(i, ev) {
+      if (P.tool !== 'select') return;
+      const el = $$('.ic-block', worldEl)[i]; if (!el) return;
+      let body = $('.md', el);
+      if (!body || !body.textContent.trim() && !wd.blocks[i].text) {
+        el.innerHTML = '<div class="md"></div><div class="ic-tag">P' + wd.blocks[i].p + '</div>';
+        body = $('.md', el);
+      }
+      const before = wd.blocks[i].text || '';
+      body.contentEditable = 'true'; body.spellcheck = false; body.classList.add('editing'); body.focus();
+      const snap = htmlToMd(body);           // 进入编辑时的样子：没改就什么都不动
+      // 光标落在你双击的地方，不要跳到末尾
+      try {
+        let range = null;
+        if (ev && document.caretRangeFromPoint) range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+        else if (ev && document.caretPositionFromPoint) { const cp = document.caretPositionFromPoint(ev.clientX, ev.clientY); if (cp) { range = document.createRange(); range.setStart(cp.offsetNode, cp.offset); } }
+        const sel = window.getSelection();
+        if (range && body.contains(range.startContainer)) { sel.removeAllRanges(); sel.addRange(range); }
+      } catch (err) {}
+      // 编辑时块会变高：实时把下面的块推开，不会盖住
+      const grow = () => requestAnimationFrame(relayout);
+      body.addEventListener('input', grow);
+      const finish = async () => {
+        body.removeEventListener('blur', finish);
+        body.removeEventListener('input', grow);
+        body.contentEditable = 'false'; body.classList.remove('editing');
+        const newMd = htmlToMd(body);
+        if (newMd === snap) { renderBlocks(); relayout(); return; }
+        let doc = String(note.markdown || '');
+        const at = before ? doc.indexOf(before) : -1;
+        if (at >= 0) doc = doc.slice(0, at) + newMd + doc.slice(at + before.length);   // 不用 replace：正文里的 $ 会被当成特殊符号
+        else {
+          // 这一块不是从正文原样切出来的（比如按课件重排过）：用所有板块重新拼出正文，避免越改越重复
+          wd.blocks[i].text = newMd;
+          doc = wd.blocks.map(b => String(b.text || '').trim()).filter(Boolean).join('\n\n');
+        }
+        note.markdown = doc;
+        wd.blocks[i].text = newMd;
+        wd.mdSig = mdSig(doc);
+        renderBlocks(); relayout(); persist();
+        toast('改好了', 1200);
+      };
+      body.addEventListener('blur', finish);
+      body.addEventListener('keydown', ev => {
+        if (ev.key === 'Escape' || ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter')) { ev.preventDefault(); body.blur(); }
+      });
+    }
+
+    /* ---- 工具 ---- */
+    const syncTools = () => {
+      $$('[data-tool]', host).forEach(b => b.classList.toggle('on', b.dataset.tool === P.tool));
+      $$('[data-color]', host).forEach(b => b.classList.toggle('on', b.dataset.color === P.color));
+      $$('[data-size]', host).forEach(b => b.classList.toggle('on', Number(b.dataset.size) === P.size));
+      const draw = ['pen', 'hl', 'er'].includes(P.tool);
+      stage.classList.toggle('mode-select', P.tool === 'select');
+      stage.classList.toggle('mode-hand', P.tool === 'hand');
+      stage.classList.toggle('mode-ink', draw);
+      stage.classList.toggle('mode-text', P.tool === 'text');
+      stage.style.cursor = P.tool === 'hand' ? 'grab' : draw ? 'crosshair' : P.tool === 'text' ? 'text' : 'default';
+      $$('[data-nbold]', host).forEach(b => b.classList.toggle('on', NS.bold));
+      $$('[data-ncolor]', host).forEach(b => { b.classList.toggle('on', b.dataset.ncolor === NS.ink); b.style.setProperty('--sw', shown(b.dataset.ncolor)); });
+      $$('[data-color]', host).forEach(b => b.style.setProperty('--sw', shown(b.dataset.color)));
+      host.style.setProperty('--note-size', NS.size + 'px');
+      host.style.setProperty('--note-weight', NS.bold ? '600' : '400');
+      host.style.setProperty('--note-ink', shown(NS.ink));
+    };
+    let prevTool = 'pen';
+    $$('[data-tool]', host).forEach(b => b.onclick = () => {
+      const t = b.dataset.tool;
+      if (t === 'select' || t === 'hand' || t === 'text') { P.tool = t; savePref({ tool: t }); syncTools(); return; }
+      if (t === P.tool && t !== 'er') { prevTool = t; P.tool = 'er'; }
+      else if (t === 'er' && P.tool === 'er') P.tool = prevTool;
+      else { if (t !== 'er') prevTool = t; P.tool = t; }
+      savePref({ tool: P.tool }); syncTools();
+    });
+    $$('[data-color]', host).forEach(b => b.onclick = () => { P.color = b.dataset.color; if (P.tool === 'er') P.tool = 'pen'; savePref({ color: P.color, tool: P.tool }); syncTools(); });
+    $$('[data-size]', host).forEach(b => b.onclick = () => { P.size = Number(b.dataset.size); savePref({ size: P.size }); syncTools(); });
+    $('#b-pen', host).onchange = e => { P.penOnly = e.target.checked; savePref({ penOnly: P.penOnly }); };
+    $$('[data-nfont]', host).forEach(b => b.onclick = () => { NS.size = Math.min(24, Math.max(11, NS.size + (b.dataset.nfont === '+' ? 1.5 : -1.5))); savePref({ noteSize: NS.size }); syncTools(); renderBlocks(); requestAnimationFrame(relayout); });
+    $$('[data-nbold]', host).forEach(b => b.onclick = () => { NS.bold = !NS.bold; savePref({ noteBold: NS.bold }); syncTools(); requestAnimationFrame(relayout); });
+    $$('[data-ncolor]', host).forEach(b => b.onclick = () => { NS.ink = b.dataset.ncolor; savePref({ noteInk: NS.ink }); syncTools(); });
+
+    /* ---- 缩放 ---- */
+    const zoomAt = (k, cx, cy) => {
+      const r = stage.getBoundingClientRect();
+      const px = cx == null ? r.width / 2 : cx - r.left, py = cy == null ? r.height / 2 : cy - r.top;
+      const wx = view.x + px / view.z, wy = view.y + py / view.z;
+      const z = Math.min(3, Math.max(.2, view.z * k));
+      if (z === view.z) return;
+      view.z = z; view.x = wx - px / z; view.y = wy - py / z;
+      applyView(); persistView();
+    };
+    $$('[data-zoom]', host).forEach(b => b.onclick = () => {
+      const z = b.dataset.zoom;
+      if (z === 'fit') { zoomTo(1); return; }
+      zoomAt(z === '+' ? 1.2 : 1 / 1.2);
+    });
+    // 回到 100%：以画布中心为准，不会突然跳到别处
+    const zoomTo = z => zoomAt(Math.min(3, Math.max(.2, z)) / view.z);
+
+    stage.addEventListener('wheel', e => {
+      if (e.ctrlKey || e.metaKey || e.altKey) { e.preventDefault(); zoomAt(Math.exp(-e.deltaY * 0.0022), e.clientX, e.clientY); return; }
+      // 普通滚轮 = 平移画布（这是无限画布，页面本身不滚）
+      e.preventDefault();
+      view.x += (e.shiftKey ? e.deltaY : e.deltaX) / view.z;
+      view.y += (e.shiftKey ? 0 : e.deltaY) / view.z;
+      applyView(); persistView(); notify();
+    }, { passive: false });
+
+    /* ---- 画 / 拖 ----
+       手势规则（iPad 和 Mac 一样）：
+       · 笔 / 鼠标左键：按当前工具写、涂、擦
+       · 一根手指（开了「只用笔写」）/ 手工具 / 空格 / 中键 / 选择模式拖空白处：移动画布
+       · 两根手指：捏合缩放 + 一起拖动；两指轻点 = 撤销，三指轻点 = 重做 */
+    let cur = null, pan = null, spaceTmp = null;
+    const pos = e => {
+      const [x, y] = toWorld(e.clientX, e.clientY);
+      return [x, y, e.pointerType === 'pen' ? (e.pressure || .5) : .5];
+    };
+    const allowed = e => {
+      if (e.pointerType === 'pen') return true;
+      if (e.pointerType === 'touch') return !P.penOnly;
+      return e.button === 0 || e.buttons === 1;
+    };
+    const liveClear = () => { lctx.setTransform(1, 0, 0, 1, 0, 0); lctx.clearRect(0, 0, live.width, live.height); };
+    const liveDraw = () => {
+      liveClear();
+      if (!cur || cur.er) return;
+      lctx.setTransform(view.z * dpr, 0, 0, view.z * dpr, -view.x * view.z * dpr, -view.y * view.z * dpr);
+      drawStroke(lctx, cur.s, 1);
+      lctx.setTransform(1, 0, 0, 1, 0, 0);
+    };
+
+    const startPan = e => {
+      try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+      pan = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
+      stage.classList.add('panning');
+    };
+    // 触屏：记下每根手指，用来做捏合和多指轻点
+    const touches = new Map();
+    let pinch = null, tap = null, touchLock = false, lastTap = null;
+    const mid2 = () => { const [a, b] = [...touches.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; };
+    stage.addEventListener('pointerdown', e => {
+      if (e.pointerType !== 'touch') return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY });
+      if (touches.size === 1) tap = { n: 1, t: Date.now(), moved: false };
+      else if (tap) tap.n = Math.max(tap.n, touches.size);
+      if (touches.size >= 2) {
+        // 第二根手指落下：取消单指拖动和正在写的那一笔（手指写的），改成捏合
+        pan = null; touchLock = true;
+        if (cur && !cur.er && cur.touch) { cur = null; liveClear(); }
+        const m = mid2(), r = stage.getBoundingClientRect();
+        pinch = { d: m.d, z: view.z, wx: view.x + (m.x - r.left) / view.z, wy: view.y + (m.y - r.top) / view.z };
+      }
+    }, true);
+    stage.addEventListener('pointermove', e => {
+      if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
+      const t = touches.get(e.pointerId); t.x = e.clientX; t.y = e.clientY;
+      if (tap && Math.hypot(t.x - t.x0, t.y - t.y0) > 12) tap.moved = true;
+      if (pinch && touches.size >= 2) {
+        e.preventDefault();
+        const m = mid2(), r = stage.getBoundingClientRect();
+        view.z = Math.min(3, Math.max(.2, pinch.z * m.d / pinch.d));
+        view.x = pinch.wx - (m.x - r.left) / view.z;
+        view.y = pinch.wy - (m.y - r.top) / view.z;
+        applyView();
+      }
+    }, true);
+    const touchUp = e => {
+      if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
+      touches.delete(e.pointerId);
+      if (touches.size < 2 && pinch) { pinch = null; persistView(); notify(); }
+      if (touches.size === 0) {
+        if (tap && !tap.moved && e.type === 'pointerup' && Date.now() - tap.t < 320) {
+          if (tap.n === 2) doUndo(true); else if (tap.n >= 3) doRedo(true);
+        }
+        tap = null; touchLock = false;
+      }
+    };
+    stage.addEventListener('pointerup', touchUp, true);
+    stage.addEventListener('pointercancel', touchUp, true);
+
+    // 移动画布：在整块舞台上接（选择模式下笔画层不接事件，拖空白处也要能挪）
+    stage.addEventListener('pointerdown', e => {
+      if (pan || cur) return;
+      if (e.pointerType === 'touch' && touchLock) return;
+      const editing = e.target.closest && e.target.closest('.md.editing');
+      if (editing) return;
+      const onBlock = e.target.closest && e.target.closest('.ic-block');
+      if (e.target.closest && e.target.closest('.ic-text')) return;   // 文本框自己处理（编辑 / 拖动）
+      // 正在改字时点了别处：先把改动收下（下面会 preventDefault，浏览器就不会自己失焦了）
+      const ae = document.activeElement;
+      if (ae && ae.isContentEditable && stage.contains(ae)) ae.blur();
+      const drawTool = ['pen', 'hl', 'er'].includes(P.tool);
+      const wantsPan = P.tool === 'hand' || spaceTmp || e.button === 1 || P.tool === 'text'
+        || (e.pointerType === 'touch' && (P.penOnly || !drawTool))
+        || (P.tool === 'select' && !onBlock && e.pointerType !== 'pen');
+      if (!wantsPan) return;
+      // 触屏在块上：判断双击（自己判断，触屏上浏览器的 dblclick 不可靠）
+      if (e.pointerType === 'touch' && onBlock && P.tool === 'select') {
+        const now = Date.now();
+        if (lastTap && now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 24) {
+          lastTap = null; e.preventDefault(); startEdit(Number(onBlock.dataset.i), e); return;
+        }
+        lastTap = { t: now, x: e.clientX, y: e.clientY };
+      }
+      e.preventDefault();
+      startPan(e);
+    });
+    stage.addEventListener('pointermove', e => {
+      if (!pan || e.pointerId !== pan.id) return;
+      if (touchLock && e.pointerType === 'touch') { pan = null; return; }
+      if (Math.abs(e.clientX - pan.x) + Math.abs(e.clientY - pan.y) > 3) pan.moved = true;
+      view.x = pan.vx - (e.clientX - pan.x) / view.z;
+      view.y = pan.vy - (e.clientY - pan.y) / view.z;
+      applyView();
+    });
+    const panEnd = e => {
+      if (!pan || (e && e.pointerId !== pan.id)) return;
+      const tap = !pan.moved && P.tool === 'text' && !spaceTmp && e && e.type === 'pointerup' && !touchLock;
+      const at = pan;
+      pan = null; stage.classList.remove('panning'); persistView(); notify();
+      // 文字工具：点一下（没拖动）就在这里放一个文本框
+      if (tap) addText(at.x, at.y);
+    };
+    stage.addEventListener('pointerup', panEnd);
+    stage.addEventListener('pointercancel', panEnd);
+
+    ink.addEventListener('pointerdown', e => {
+      if (P.tool === 'hand' || P.tool === 'select' || P.tool === 'text' || spaceTmp || e.button === 1) return; // 交给上面的「移动画布」
+      if (!allowed(e)) return;
+      if (e.pointerType === 'touch' && (touchLock || touches.size > 1)) return;
+      e.preventDefault(); e.stopPropagation();
+      try { ink.setPointerCapture(e.pointerId); } catch (err) {}
+      const p = pos(e);
+      const blk = blockOf(wd, p[1]);
+      curBlock = wd.blocks.indexOf(blk);
+      if (P.tool === 'er') { cur = { er: true, id: e.pointerId, removed: [] }; eraseAt(p, cur); return; }
+      cur = { id: e.pointerId, touch: e.pointerType === 'touch', s: { tool: P.tool, c: P.tool === 'hl' ? '#FFD400' : P.color, w: P.tool === 'hl' ? 18 : P.size, pts: [p], p: blk ? blk.p : null } };
+      liveDraw();
+    });
+    ink.addEventListener('pointermove', e => {
+      if (!cur || e.pointerId !== cur.id) return;
+      e.preventDefault();
+      const co = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+      const evs = co.length ? co : [e];
+      let added = false;
+      for (const ev of evs) {
+        const p = pos(ev);
+        if (cur.er) { eraseAt(p, cur); continue; }
+        const pts = cur.s.pts, last = pts[pts.length - 1];
+        if (Math.hypot(p[0] - last[0], p[1] - last[1]) < .7 / view.z) continue;
+        pts.push(p); added = true;
+      }
+      if (added && !liveRaf) liveRaf = requestAnimationFrame(() => { liveRaf = 0; liveDraw(); });
+    });
+    let liveRaf = 0;
+    const end = e => {
+      if (!cur || (e && e.pointerId !== cur.id)) return;
+      if (cur.er) { if (cur.removed.length) { undo.push({ type: 'erase', strokes: cur.removed }); redo.length = 0; persist(); paint(); } }
+      else {
+        wd.strokes.push(cur.s);
+        undo.push({ type: 'add', stroke: cur.s }); redo.length = 0;
+        paint(); persist();
+      }
+      cancelAnimationFrame(liveRaf); liveRaf = 0;
+      liveClear(); cur = null;
+    };
+    ink.addEventListener('pointerup', end);
+    ink.addEventListener('pointercancel', end);
+    function eraseAt(p, c) {
+      const r = 14 / view.z;
+      const keep = [];
+      let hit = false;
+      for (const s of wd.strokes) {
+        const bx = strokeInfo(s).box;
+        const near = p[0] > bx[0] - r && p[0] < bx[2] + r && p[1] > bx[1] - r && p[1] < bx[3] + r;
+        if (near && s.pts.some(q => Math.hypot(q[0] - p[0], q[1] - p[1]) < r + s.w / 2)) { c.removed.push(s); hit = true; } else keep.push(s);
+      }
+      if (hit) { wd.strokes = keep; paint(); }
+    }
+
+    /* ---- 撤销 ---- */
+    const undo = [], redo = [];
+    const doUndo = quiet => {
+      const a = undo.pop(); if (!a) { if (!quiet) toast('没有可以撤销的'); return; }
+      if (a.type === 'add') wd.strokes = wd.strokes.filter(s => s !== a.stroke);
+      else if (a.type === 'text') { wd.texts = wd.texts.filter(x => x !== a.t); renderTexts(); }
+      else wd.strokes.push(...a.strokes);
+      redo.push(a); paint(); persist(); if (quiet) toast('已撤销', 900);
+    };
+    const doRedo = quiet => {
+      const a = redo.pop(); if (!a) { if (!quiet) toast('没有可以重做的'); return; }
+      if (a.type === 'add') wd.strokes.push(a.stroke);
+      else if (a.type === 'text') { if (!wd.texts.includes(a.t)) wd.texts.push(a.t); renderTexts(); }
+      else wd.strokes = wd.strokes.filter(s => !a.strokes.includes(s));
+      undo.push(a); paint(); persist(); if (quiet) toast('已重做', 900);
+    };
+    $('[data-act=undo]', host).onclick = () => doUndo();
+    $('[data-act=redo]', host).onclick = () => doRedo();
+
+    /* ---- 键盘 ---- */
+    const onKey = e => {
+      if (!host.isConnected) { document.removeEventListener('keydown', onKey); document.removeEventListener('keyup', onUp); return; }
+      const t = e.target;
+      if (t && (/input|textarea|select/i.test(t.tagName) || t.isContentEditable)) return;
+      if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '0')) {
+        e.preventDefault();
+        if (e.key === '0') zoomTo(1); else zoomAt(e.key === '-' ? 1 / 1.2 : 1.2);
+        return;
+      }
+      if (e.code === 'Space' && !spaceTmp) { spaceTmp = P.tool; P.tool = 'hand'; syncTools(); e.preventDefault(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); findModal(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? doRedo(true) : doUndo(true); return; }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 'e') { P.tool = 'er'; syncTools(); }
+      else if (k === 't') { P.tool = 'text'; syncTools(); }
+      else if (k === 'v') { P.tool = 'select'; syncTools(); }
+      else if (k === 'h') { P.tool = 'hand'; syncTools(); }
+      else if (k === 'p') { P.tool = 'pen'; syncTools(); }
+    };
+    const onUp = e => { if (e.code === 'Space' && spaceTmp) { P.tool = spaceTmp; spaceTmp = null; syncTools(); } };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('keyup', onUp);
+
+    /* ---- 加块 / 排版 / 导出 ---- */
+    $('[data-act=add]', host).onclick = () => {
+      const maxP = wd.blocks.reduce((m, b) => Math.max(m, Number(b.p) || 0), 0);
+      wd.blocks.push({ p: maxP + 1, y: wd.h || 0, text: '' });
+      renderBlocks(); relayout(); persist();
+      gotoBlock(wd.blocks.length - 1);
+    };
+    const centerBtn = $('[data-act=center]', host);
+    if (centerBtn) centerBtn.onclick = () => gotoBlock(curBlock);
+    function updateNav() {
+      const el = $('#ic-nav', host); if (!el) return;
+      el.textContent = (Math.min(curBlock, wd.blocks.length - 1) + 1) + '/' + wd.blocks.length;
+    }
+    $$('[data-nav]', host).forEach(b => b.onclick = () => {
+      const i = Math.max(0, Math.min(wd.blocks.length - 1, curBlock + Number(b.dataset.nav)));
+      curBlock = i; gotoBlock(i); updateNav();
+    });
+
+    async function gotoBlock(i, smooth) {
+      const bl = wd.blocks[Math.max(0, Math.min(i, wd.blocks.length - 1))]; if (!bl) return;
+      curBlock = wd.blocks.indexOf(bl); updateNav();
+      view.y = bl.y - 24;
+      view.x = centerX();
+      applyView(); persistView(); notify();
+    }
+
+    async function docLayout(quiet) {
+      const files = (await Promise.all((note.sourceFileIds || []).map(id => DB.get('files', id)))).filter(Boolean);
+      const f = files.find(x => /\.pdf$/i.test(x.name) && x.pages) || files.find(x => x.pages);
+      if (!f) { if (!quiet) toast('这份笔记没有关联带页码的课件，先用「＋加一块」自己写'); return false; }
+      const n = f.pages || await Pdf.count(f.id).catch(() => 0);
+      if (!n) { if (!quiet) toast('读不到这份课件的页数'); return false; }
+      const byPage = {}, loose = [];
+      let head = '';
+      for (const raw of String(note.markdown || '').split('\n')) {
+        const t = raw.trim();
+        if (!t || /^<!--/.test(t)) continue;
+        if (/^#{1,4}\s+/.test(t)) { head = t.replace(/^#+\s*/, '').trim(); continue; }
+        const ps = [...new Set([...t.matchAll(/\[p\.?\s*(\d+)/g)].map(m => Number(m[1])))].filter(x => x >= 1 && x <= n);
+        if (!ps.length) { loose.push(t); continue; }
+        for (const pg of ps) {
+          const b = byPage[pg] = byPage[pg] || [];
+          const last = b[b.length - 1];
+          if (!last || last.h !== head) b.push({ h: head, lines: [t] });
+          else last.lines.push(t);
+        }
+      }
+      const plan = [];
+      for (const pg of Object.keys(byPage).map(Number).sort((a, b) => a - b)) {
+        const b = byPage[pg];
+        plan.push({ p: pg, text: b.map(x => (x.h ? `#### ${x.h}\n` : '') + x.lines.join('\n')).join('\n\n') });
+      }
+      let buf = '';
+      const flush = () => { if (buf.trim()) plan.push({ p: 0, text: buf.trim() }); buf = ''; };
+      for (const line of loose) { if ((buf + line).length > 800) flush(); buf += (buf ? '\n' : '') + line; }
+      flush();
+      if (!plan.length) { if (!quiet) toast('笔记里还没有标了页码 [p.N] 的段落'); return false; }
+      // 保留手写：按页码把旧位置的偏移带过来
+      const oldY = new Map(wd.blocks.map(b => [b.p, b.y]));
+      let k = Math.max(n, plan.length, ...plan.map(x => x.p));   // 不在课件里的段落：编号排在课件页码后面，不会撞号
+      plan.forEach(x => { if (!x.p) x.p = ++k; });
+      wd.blocks = plan;
+      layout(wd);
+      shiftInk(wd, oldY);
+      renderBlocks(); relayout(); persist();
+      if (!quiet) toast(`按课件排好了 ${plan.length} 块，手写都留着`);
+      return true;
+    }
+    $('[data-act=doc]', host).onclick = () => {
+      const b = $('[data-act=doc]', host);
+      if (wd.strokes.length && !b.dataset.armed) {
+        b.dataset.armed = 1; const old = b.textContent; b.textContent = '再点一次：重排（手写会留着）';
+        setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = old; } }, 3200);
+        return;
+      }
+      docLayout(false);
+    };
+    $('[data-act=export]', host).onclick = () => exportImages(note, wd);
+    $('[data-act=hw]', host).onclick = async () => {
+      const b = $('[data-act=hw]', host); b.disabled = true; const old = b.textContent;
+      try { clearTimeout(save); await DB.put('notes', note); await Recap.handwritingMerge(note, course, t => { b.textContent = t; }); toast('手写已经整理进笔记'); }
+      catch (e) { toast(e.message, 6000); }
+      b.disabled = false; b.textContent = old;
+    };
+
+    function exportImages(note, wd) {
+      const secs = wd.blocks.filter(bl => wd.strokes.some(s => s.p === bl.p) || bl.text);
+      if (!secs.length) { toast('画布还是空的'); return; }
+      toast('正在生成图片…');
+      const w = window.open('', '_blank');
+      if (!w) { toast('浏览器拦截了新窗口，允许弹出窗口后再试'); return; }
+      const imgs = secs.map(bl => {
+        const c = inkImage({ strokes: wd.strokes.filter(s => s.p === bl.p) }, 1400);
+        return c ? `<h3 style="font:600 15px -apple-system">P${bl.p}</h3><img src="${c.toDataURL('image/jpeg', .9)}">` : '';
+      });
+      w.document.write(`<title>${esc(note.title)} · 手写</title><style>body{margin:0;background:#888}img{display:block;width:100%;max-width:900px;margin:12px auto;background:#fff}h3{max-width:900px;margin:16px auto 0;color:#fff}@media print{body{background:#fff}img{margin:0;page-break-after:always;max-width:none}h3{color:#000}}</style>${imgs.join('')}<script>setTimeout(()=>print(),400)<\/script>`);
+      w.document.close();
+    }
+
+    // 双击空白处：在最后加一块并跳过去
+    stage.addEventListener('dblclick', e => {
+      if (P.tool !== 'select' || e.target.closest('.ic-block') || e.target.closest('.ic-text')) return;
+      const wy = toWorld(e.clientX, e.clientY)[1];
+      let idx = wd.blocks.findIndex(bl => wy < bl.y + 120);
+      if (idx < 0) idx = wd.blocks.length;
+      const maxP = wd.blocks.reduce((m, b) => Math.max(m, Number(b.p) || 0), 0);
+      wd.blocks.splice(idx, 0, { p: maxP + 1, y: idx < wd.blocks.length ? wd.blocks[idx].y : (wd.h || 0), text: '' });
+      renderBlocks(); relayout(); persist();
+      gotoBlock(idx);
+      setTimeout(() => startEdit(idx, e), 60);
+    });
+
+    /* ---- 查找 ---- */
+    function findModal() {
+      modal(`<h2>在笔记里找</h2>
+        <div class="field"><input id="fd-q" type="search" placeholder="输入几个字…" autocomplete="off"></div>
+        <div class="fd-list" id="fd-list"><div class="hint">输入后回车，或者直接点结果跳过去</div></div>`, (box, close) => {
+        const q = $('#fd-q', box), list = $('#fd-list', box);
+        const search = () => {
+          const k = q.value.trim().toLowerCase();
+          if (!k) { list.innerHTML = '<div class="hint">输入后回车，或者直接点结果跳过去</div>'; return; }
+          const hits = wd.blocks.map((b, i) => ({ b, i })).filter(x => (x.b.text || '').toLowerCase().includes(k)).slice(0, 20);
+          list.innerHTML = hits.length ? hits.map(({ b, i }) => {
+            const t = String(b.text || '');
+            const at = t.toLowerCase().indexOf(k);
+            const snip = t.slice(Math.max(0, at - 30), at + k.length + 50).replace(/\n/g, ' ');
+            return `<button class="fd-item" data-i="${i}"><span class="pill mute">P${b.p}</span><span>${esc(snip)}</span></button>`;
+          }).join('') : '<div class="hint">没找到</div>';
+          $$('.fd-item', list).forEach(btn => btn.onclick = () => { close(); gotoBlock(Number(btn.dataset.i)); flashBlock(Number(btn.dataset.i)); });
+        };
+        q.oninput = search;
+        q.onkeydown = e => { if (e.key === 'Enter') { const first = $('.fd-item', list); if (first) first.click(); } };
+        q.focus();
+      });
+    }
+    function flashBlock(i) {
+      const el = $$('.ic-block', worldEl)[i]; if (!el) return;
+      el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
+    }
+    const findBtn = $('[data-act=find]', host); if (findBtn) findBtn.onclick = findModal;
+
+    /* ---- 左边课件联动：画布挪到哪一块，就告诉左边显示第几页 ---- */
+    let pageT = null;
+    const notify = () => {
+      if (!onPageChange) return;
+      clearTimeout(pageT);
+      pageT = setTimeout(() => {
+        const bl = blockOf(wd, view.y + stage.clientHeight / view.z / 2);
+        if (bl) onPageChange(bl.p);
+      }, 260);
+    };
+
+    const pageBlock = p => wd.blocks.findIndex(b => b.p === p);
+    function centerX() {
+      const w = stage.clientWidth / view.z;
+      return w >= COL + 24 ? -(w - COL) / 2 : -12 / view.z;
+    }
+    current = {
+      gotoPage(p, quiet) {
+        const i = pageBlock(p); if (i < 0) return;
+        curBlock = i; updateNav();
+        view.y = wd.blocks[i].y - 24;
+        applyView(); persistView();
+      },
+      pageAtCenter() { const bl = blockOf(wd, view.y + stage.clientHeight / view.z / 2); return bl ? bl.p : null; },
+      destroy() { current = null; },
+      note, world: wd,
+    };
+
+    // 首次进来 / 换了窗口大小之后，如果一块都看不见，就把视图拉回第一块
+    const anyVisible = () => {
+      const x0 = view.x, y0 = view.y;
+      const x1 = x0 + stage.clientWidth / view.z, y1 = y0 + stage.clientHeight / view.z;
+      return wd.blocks.some(bl => bl.y < y1 && bl.y + 160 > y0 && COL > x0 - 40 && 0 < x1 + 40);
+    };
+    resize();
+    if (!savedView || !anyVisible()) {
+      // 第一次打开：缩到文字那一列刚好放得下（手机上也不会被切掉一半）
+      view.z = Math.min(1, Math.max(.55, (stage.clientWidth - 28) / COL));
+      view.x = centerX();
+      view.y = -24;
+    }
+    renderBlocks();
+    relayout();
+    syncTools();
+    applyView();
+    // 页面刚渲染出来时上方的卡片高度还会变一次，多贴合几次
+    requestAnimationFrame(() => resize());
+    setTimeout(() => { if (stage.isConnected) resize(); }, 260);
+    setTimeout(() => { if (stage.isConnected) resize(); }, 800);
+
+    const onTheme = () => { if (!stage.isConnected) { document.removeEventListener('tk-theme', onTheme); return; } syncTools(); paint(); renderTexts(); };
+    document.addEventListener('tk-theme', onTheme);
+    const ro = new ResizeObserver(() => { if (stage.isConnected) resize(); else cleanup(); });
+    ro.observe(stage);
+    // 上面那块「还没搞懂的」展开/收起、窗口缩放，画布都跟着重新贴合
+    let fitT = null;
+    const refit = () => {
+      if (!stage.isConnected) { cleanup(); return; }
+      clearTimeout(fitT); fitT = setTimeout(() => { if (stage.isConnected) resize(); }, 120);
+    };
+    window.addEventListener('resize', refit);
+    const bodyRo = new ResizeObserver(refit); bodyRo.observe(document.body);
+    // 离开这页就把监听全撤掉（以前每打开一次笔记就多挂一组，越用越卡）
+    function cleanup() {
+      if (cleaned) return; cleaned = true;
+      ro.disconnect(); bodyRo.disconnect(); window.removeEventListener('resize', refit);
+      document.removeEventListener('keydown', onKey); document.removeEventListener('keyup', onUp);
+      if (pending) { clearTimeout(save); pending = false; DB.put('notes', note).catch(() => {}); }
+    }
+    // 磁盘里的手写有变化（别的设备同步过来）
+    return { gotoPage: p => current && current.gotoPage(p) };
   }
-  const hasInk = note => (note.board?.pages || []).some(p => p.strokes.length);
-  return { mount, pageImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK };
+
+  return { mount, pageImage: inkImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK, world, sections, layout, blockOf, get current() { return current; } };
 })();
 
 /* ======================================================================
-   重点 / 记忆卡片 / 测验
+   重点 / 测验
    ====================================================================== */
 const Study = (() => {
   async function sourcesExcerpt(note, max = 30000) {
@@ -498,16 +1167,15 @@ const Study = (() => {
     for (const f of files) out += `\n# ${f.name}\n${(f.text || '').slice(0, per)}`;
     return out.trim();
   }
-  const PART_NAME = { points: '重点', cards: '记忆卡片', quiz: '测验题' };
+  const PART_NAME = { points: '重点', quiz: '测验题' };
   // 把新生成的几样合并进笔记，没重新生成的保留原样
   function merge(note, pack) {
-    note.study = Object.assign({ points: [], cards: [], quiz: [] }, note.study || {});
+    note.study = Object.assign({ points: [], quiz: [] }, note.study || {});
     if (pack.points) { note.study.points = pack.points; note.mastered = {}; }
-    if (pack.cards) { note.study.cards = pack.cards; note.hardCards = []; }
     if (pack.quiz) { note.study.quiz = pack.quiz; note.quizLog = null; }
     note.study.at = pack.at;
   }
-  const doneMsg = pack => '生成了 ' + [pack.points && `${pack.points.length} 个重点`, pack.cards && `${pack.cards.length} 张卡片`, pack.quiz && `${pack.quiz.length} 道题`].filter(Boolean).join('、');
+  const doneMsg = pack => '生成了 ' + [pack.points && `${pack.points.length} 个重点`, pack.quiz && `${pack.quiz.length} 道题`].filter(Boolean).join('、');
   async function run(note, parts, job) {
     let first = true;
     const label = parts.map(k => PART_NAME[k]).join('、');
@@ -515,7 +1183,7 @@ const Study = (() => {
     if (pack.points && !pack.points.length) throw new Error('没有生成出知识点，再试一次');
     return pack;
   }
-  async function generate(note, el, after, parts = ['points', 'cards', 'quiz']) {
+  async function generate(note, el, after, parts = ['points', 'quiz']) {
     if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
     if (!note.markdown && !(note.sourceFileIds || []).length) { toast('这份笔记还是空的，先生成笔记或选课件'); return; }
     const job = Jobs.start('study:' + note.id, '出' + parts.map(k => PART_NAME[k]).join('、') + '：' + note.title);
@@ -532,8 +1200,8 @@ const Study = (() => {
   function emptyGen(note, el, after, part) {
     if (State.studyGens.has(note.id) || Jobs.has('study:' + note.id)) { el.innerHTML = Jobs.slot('study:' + note.id) + '<p class="hint">好了会自动显示，可以先去看别的。</p>'; return; }
     const st = note.study || {};
-    const missing = ['points', 'cards', 'quiz'].filter(k => !(st[k] || []).length);
-    el.innerHTML = `<div class="empty"><strong>还没有${PART_NAME[part]}</strong>只生成${PART_NAME[part]}，用${note.markdown ? '笔记和课件' : '选中的课件'}来出（DeepSeek，不开思考，大约 ¥0.01–0.02）。
+    const missing = ['points', 'quiz'].filter(k => !(st[k] || []).length);
+    el.innerHTML = `<div class="empty"><strong>还没有${PART_NAME[part]}</strong>只生成${PART_NAME[part]}，用${note.markdown ? '笔记和课件' : '选中的课件'}来出。
       <div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" id="st-gen">${ICON.spark}生成${PART_NAME[part]}</button>${missing.length > 1 ? `<button class="btn" id="st-gen-all">${missing.map(k => PART_NAME[k]).join(' + ')} 一起生成</button>` : ''}</div></div>`;
     $('#st-gen', el).onclick = () => generate(note, el, after, [part]);
     const all = $('#st-gen-all', el); if (all) all.onclick = () => generate(note, el, after, missing);
@@ -557,38 +1225,6 @@ const Study = (() => {
     });
     confirmClick($('#st-re', el), '再点一次：重新生成重点（会清掉掌握记录）', () => generate(note, el, () => points(note, el), ['points']));
     if (focus) setTimeout(() => $('.kp.focus', el)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
-  }
-
-  function cards(note, el) {
-    const st = note.study; if (!st || !(st.cards || []).length) return emptyGen(note, el, () => cards(note, el), 'cards');
-    let order = st.cards.map((_, i) => i), i = 0, flipped = false, onlyHard = false;
-    const hard = new Set(note.hardCards || []);
-    const pool = () => onlyHard ? order.filter(k => hard.has(k)) : order;
-    const paint = () => {
-      const list = pool();
-      if (!list.length) { el.innerHTML = `<div class="empty"><strong>没有不熟的卡片了 👍</strong><div class="row" style="justify-content:center;margin-top:10px"><button class="btn" id="fc-all">看全部</button></div></div>`; $('#fc-all', el).onclick = () => { onlyHard = false; i = 0; paint(); }; return; }
-      i = Math.max(0, Math.min(i, list.length - 1));
-      const k = list[i], c = st.cards[k], pt = st.points.find(p => p.id === c.point);
-      el.innerHTML = `
-        <div class="flash ${flipped ? 'flipped' : ''}" id="fc" tabindex="0" role="button" aria-label="点击翻面">
-          ${pt ? `<span class="pill mute fc-tag">${esc(pt.title)}</span>` : ''}
-          <div class="fc-body">${flipped ? `<div class="fc-q">${esc(c.q)}</div><div class="md fc-a">${md(c.a)}</div>` : `<div class="fc-front">${esc(c.q)}</div>`}</div>
-          <div class="hint">${flipped ? '' : '先想几秒，再点一下看答案'}</div>
-        </div>
-        <div class="row" style="justify-content:space-between;margin-top:12px">
-          <span class="hint">${i + 1} / ${list.length}${onlyHard ? '（只看不熟的）' : ''}</span>
-          <div class="row"><button class="btn small ${hard.has(k) ? 'danger' : ''}" id="fc-hard">${hard.has(k) ? '★ 不熟' : '☆ 标为不熟'}</button><button class="btn small" id="fc-only">${onlyHard ? '看全部' : `只看不熟的（${hard.size}）`}</button><button class="btn small" id="fc-shuf">随机顺序</button></div>
-        </div>
-        <div class="row" style="justify-content:space-between;margin-top:10px"><button class="btn" id="fc-prev">‹ 上一张</button><button class="btn primary" id="fc-next">下一张 ›</button></div>`;
-      const fc = $('#fc', el); fc.onclick = () => { flipped = !flipped; paint(); };
-      fc.onkeydown = e => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); fc.click(); } };
-      $('#fc-prev', el).onclick = () => { i = (i - 1 + list.length) % list.length; flipped = false; paint(); };
-      $('#fc-next', el).onclick = () => { i = (i + 1) % list.length; flipped = false; paint(); };
-      $('#fc-shuf', el).onclick = () => { order = order.map(v => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map(v => v[1]); i = 0; flipped = false; paint(); };
-      $('#fc-only', el).onclick = () => { onlyHard = !onlyHard; i = 0; flipped = false; paint(); };
-      $('#fc-hard', el).onclick = async () => { hard.has(k) ? hard.delete(k) : hard.add(k); note.hardCards = [...hard]; await DB.put('notes', note); paint(); };
-    };
-    paint();
   }
 
   function quiz(note, el, { gotoPoint } = {}) {
@@ -616,14 +1252,23 @@ const Study = (() => {
             ${picked !== q.answer && pt ? `<div style="margin-top:8px"><button class="btn small" id="qz-pt">回到知识点：${esc(pt.title)}</button></div>` : ''}</div>` : ''}
         </div>
         <div class="row" style="justify-content:flex-end;margin-top:10px">${picked !== null ? `<button class="btn primary" id="qz-next">${i + 1 < set.length ? '下一题 ›' : '看成绩'}</button>` : ''}</div>`;
-      $$('.opt', el).forEach(b => b.onclick = () => { picked = Number(b.dataset.k); if (picked === q.answer) score++; else wrong.push(set[i]); paint(); });
+      $$('.opt', el).forEach(b => b.onclick = () => {
+        picked = Number(b.dataset.k);
+        const qi = set[i];
+        if (picked === q.answer) {
+          score++;
+          const rec = (note.wrong || []).find(x => x.qi === qi);
+          if (rec) { rec.ok = (rec.ok || 0) + 1; if (rec.ok >= 2) note.wrong = note.wrong.filter(x => x !== rec); DB.put('notes', note); }
+        } else { wrong.push(qi); Learn.wrongAdd(note, qi); DB.put('notes', note); }
+        paint();
+      });
       const n = $('#qz-next', el); if (n) n.onclick = () => { i++; picked = null; paint(); };
       const g = $('#qz-pt', el); if (g) g.onclick = () => gotoPoint && gotoPoint(q.point);
     };
     paint();
   }
   /* 笔记生成完自动出重点/卡片/测验（后台跑，不挡界面） */
-  async function background(noteId, parts = ['points', 'cards', 'quiz']) {
+  async function background(noteId, parts = ['points', 'quiz']) {
     if (State.studyGens.has(noteId) || !Settings.load().deepseekKey) return;
     State.studyGens.add(noteId); refreshTabs(noteId);
     let job = null;
@@ -641,11 +1286,103 @@ const Study = (() => {
   }
   function refreshTabs(noteId, done) {
     const h = location.hash.slice(1);
-    if (h.startsWith('note-' + noteId)) { const tab = h.split('~')[1] || 'note'; if (done && tab !== 'note' && tab !== 'board') renderNote(noteId, tab); else DB.get('notes', noteId).then(n => { const t = $('#n-tabs'); if (t && n) { t.innerHTML = noteTabsHTML(tab, n); $$('[data-ntab]', t).forEach(b => b.onclick = () => { history.replaceState(null, '', '#note-' + noteId + (b.dataset.ntab === 'note' ? '' : '~' + b.dataset.ntab)); renderNote(noteId, b.dataset.ntab); }); } }); }
+    if (h.startsWith('note-' + noteId)) { const tab = h.split('~')[1] || 'note'; if (done && tab !== 'note') renderNote(noteId, tab); else DB.get('notes', noteId).then(n => { const t = $('#n-tabs'); if (t && n) { t.innerHTML = noteTabsHTML(tab, n); $$('[data-ntab]', t).forEach(b => b.onclick = () => { history.replaceState(null, '', '#note-' + noteId + (b.dataset.ntab === 'note' ? '' : '~' + b.dataset.ntab)); renderNote(noteId, b.dataset.ntab); }); } }); }
   }
   const progress = note => { const pts = (note.study && note.study.points) || []; return { done: pts.filter(p => (note.mastered || {})[p.id]).length, total: pts.length }; };
-  return { points, cards, quiz, progress, generate, background };
+  return { points, quiz, progress, generate, background };
 })();
+
+/* ======================================================================
+   笔记里的两个平行标签：课件（一页一页对应）· 词汇（术语 + 音标）
+   ====================================================================== */
+async function docTab(note, course, el) {
+  const files = (await Promise.all((note.sourceFileIds || []).map(id => DB.get('files', id)))).filter(Boolean);
+  const f = files.find(x => x.pages) || files[0];
+  if (!f) { el.innerHTML = '<div class="empty"><strong>这份笔记还没关联课件</strong>生成笔记时选了课件，这里就会一页一页给出要点。</div>'; return; }
+  const pages = splitPages(f.text);
+  const total = Math.max(f.pages || 0, ...pages.map(x => x.n), 1);
+  let kp = new Map(((f.keypoints) || []).map(x => [x.n, x]));
+  const pdf = isPdf(f);
+
+  const rowsHTML = () => {
+    const list = Array.from({ length: total }, (_, i) => i + 1);
+    return list.map(n => {
+      const k = kp.get(n);
+      const page = pages.find(x => x.n === n);
+      const firstLine = (page && page.text || '').split('\n').map(l => l.trim()).filter(Boolean)[0] || '';
+      const has = new RegExp(`\\[p\\.?\\s*${n}(?:\\b|\\])`).test(note.markdown || '');
+      return `<div class="kp-page" data-p="${n}">
+        <div class="kp-head">
+          <span class="dm-p">P${n}</span>
+          <b class="grow">${esc(k && k.title ? k.title : (firstLine ? firstLine.slice(0, 24) + (firstLine.length > 24 ? '…' : '') : '第 ' + n + ' 页'))}</b>
+          <button class="btn small ghost" data-open="${n}" ${pdf || page ? '' : 'disabled'}>看课件</button>
+          <button class="btn small ${k ? 'primary' : ''}" data-send="${n}" ${k ? '' : 'disabled'}>${has ? '已写进笔记' : '写进笔记'}</button>
+        </div>
+        ${k && k.points.length
+          ? `<ul class="kp-points">${k.points.map(x => `<li class="${x.strong ? 'strong' : ''}">${esc(x.t)}</li>`).join('')}</ul>`
+          : `<div class="hint kp-empty">${k ? '这一页没有可提炼的文字（可能是纯图）。' : '还没提取这一页的要点。'}</div>`}
+      </div>`;
+    }).join('');
+  };
+
+  el.innerHTML = `<div class="kp-wrap">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+      <div class="grow"><b>${esc(f.name)}</b><div class="hint">${total} 页 · 每页几句中文要点，重点加粗；想边看课件边写就进「上课工作台」</div></div>
+      <button class="btn small" id="dp-ai">${kp.size ? '重新提取' : ICON.spark + '提取每页要点'}</button>
+    </div>
+    <div class="kp-list" id="kp-list">${rowsHTML()}</div>
+  </div>`;
+
+  const bind = () => {
+    $$('[data-open]', el).forEach(b => b.onclick = () => {
+      const p = Number(b.dataset.open);
+      openDocModal(f.id);
+      let n = 0; const jump = () => {
+        const t = document.querySelector(`#dv-host .pdfpage[data-p="${p}"], #dv-host .docpage[data-p="${p}"]`);
+        if (t) { t.scrollIntoView({ block: 'start', behavior: 'smooth' }); return; }
+        if (n++ < 20) setTimeout(jump, 200);
+      };
+      setTimeout(jump, 300);
+    });
+    $$('[data-send]', el).forEach(b => b.onclick = () => writePage(Number(b.dataset.send)));
+  };
+
+  async function writePage(p) {
+    const k = kp.get(p); if (!k) return;
+    const block = `### 第 ${p} 页要点\n${k.points.map(x => `- ${x.t} [p.${p}]`).join('\n')}\n`;
+    let md = String(note.markdown || '');
+    const re = new RegExp(`###\\s*第\\s*${p}\\s*页要点\\n(?:[-*].*\\n)*`, 'g');
+    md = md.replace(re, '').replace(/\n{3,}/g, '\n\n').trimEnd();
+    note.markdown = md ? md + '\n\n' + block : block;
+    note.board = note.board || { pages: [{ bg: null, h: 1414, strokes: [] }] };
+    if (note.board.layout === 'doc') note.board.dirty = 1;
+    await DB.put('notes', note);
+    toast(`第 ${p} 页的要点写进笔记了`);
+    $('#kp-list', el).innerHTML = rowsHTML(); bind();
+  }
+
+  bind();
+
+  const ai = $('#dp-ai', el);
+  ai.onclick = async () => {
+    if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
+    ai.disabled = true; ai.textContent = '正在提取…';
+    const job = Jobs.start('kp:' + f.id, '提取每页要点：' + f.name);
+    try {
+      const list = await AI.pagePoints({ name: f.name, pages: pages.map(x => ({ n: x.n, text: x.text })), onText: t => job.len(t.length) });
+      job.done();
+      const fresh = await DB.get('files', f.id);
+      fresh.keypoints = list; await DB.put('files', fresh);
+      kp = new Map(list.map(x => [x.n, x]));
+      toast(`把 ${list.length} 页的要点都提出来了`);
+      $('#kp-list', el).innerHTML = rowsHTML(); bind();
+    } catch (e) { job.done(); toast(e.message, 6000); }
+    ai.disabled = false; ai.textContent = '重新提取';
+  };
+
+  // 第一次进来还没提取过：直接开始（省一次点击）
+  if (!kp.size && Settings.load().deepseekKey) setTimeout(() => { if (ai.isConnected) ai.click(); }, 400);
+}
 
 /* ======================================================================
    思维导图：直接用笔记的标题层级画，不花 token
@@ -677,7 +1414,7 @@ const MindMap = (() => {
     if (!root.kids.length) { el.innerHTML = '<div class="empty"><strong>笔记还没有内容</strong>生成笔记之后，这里会按笔记的标题自动画出思维导图。</div>'; return; }
     let zoom = 1;
     const collapsed = new Set();
-    el.innerHTML = `<div class="mm-tools noprint"><button class="btn small" data-z="-">−</button><button class="btn small" data-z="0">适应宽度</button><button class="btn small" data-z="+">＋</button><button class="btn small ghost" id="mm-all">全部展开</button><span class="hint">点圆点可以收起 / 展开</span></div><div class="mm-wrap"><svg class="mm"></svg></div>`;
+    el.innerHTML = `<div class="mm-tools noprint"><button class="btn small" data-z="-">−</button><button class="btn small" data-z="0">适应宽度</button><button class="btn small" data-z="+">＋</button><button class="btn small ghost" id="mm-all">全部展开</button><span class="hint">按住拖动可以平移 · 滚轮放大缩小 · 点圆点收起 / 展开</span></div><div class="mm-wrap" id="mm-wrap"><svg class="mm"></svg></div>`;
     const svg = $('svg', el), wrap = $('.mm-wrap', el);
     const COLORS_ = ['#2C47A5', '#2B7A4B', '#B5532A', '#7A4BB0', '#A23B62', '#1F7A8C', '#8A6D1F'];
     const measure = (() => { const c = document.createElement('canvas').getContext('2d'); return (t, bold) => { c.font = `${bold ? 700 : 500} 14px ${getComputedStyle(document.body).fontFamily}`; return c.measureText(t).width; }; })();
@@ -711,7 +1448,11 @@ const MindMap = (() => {
           <text x="${X(n) + PADX}" y="${Y(n) + 5}" font-size="14" font-weight="${n.depth < 2 ? 700 : 500}" fill="${n.depth < 2 ? '#fff' : 'var(--ink)'}">${esc(fitText(n.t, n.w - PADX * 2, n.depth < 2))}</text>
           ${n.kids.length && n.depth > 0 ? `<circle cx="${X(n) + n.w + 7}" cy="${Y(n)}" r="6" fill="var(--sheet)" stroke="${n.color}" class="mm-tg"/>${collapsed.has(n.id) ? `<text x="${X(n) + n.w + 7}" y="${Y(n) + 4}" font-size="11" text-anchor="middle" fill="${n.color}" pointer-events="none">${n.kids.length}</text>` : ''}` : ''}
         </g>`).join('');
-      $$('.mm-n', svg).forEach(g => g.onclick = () => { const id = g.dataset.id; if (id === 'r') return; collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); draw(); });
+      $$('.mm-n', svg).forEach(g => g.onclick = () => {
+        if (suppressClick) return; // 刚才是在拖地图，不是点节点
+        const id = g.dataset.id; if (id === 'r') return;
+        collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); draw();
+      });
     }
     $$('[data-z]', el).forEach(b => b.onclick = () => {
       const z = b.dataset.z;
@@ -721,6 +1462,53 @@ const MindMap = (() => {
     });
     $('#mm-all', el).onclick = () => { collapsed.clear(); draw(); };
     draw();
+
+    /* ---------- 拖动平移 / 滚轮缩放（只在地图上生效，滚轮不拦页面其它地方） ---------- */
+    let drag = null, suppressClick = false;
+    const beginDrag = e => {
+      if (e.pointerType === 'touch') return; // 触屏留给页面滚动
+      if (e.button !== 0) return;
+      drag = { x: e.clientX, y: e.clientY, sl: wrap.scrollLeft, st: wrap.scrollTop, moved: false };
+      wrap.classList.add('panning');
+      try { wrap.setPointerCapture(e.pointerId); } catch (err) {}
+    };
+    const moveDrag = e => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      wrap.scrollLeft = drag.sl - dx;
+      wrap.scrollTop = drag.st - dy;
+    };
+    const endDrag = () => {
+      if (!drag) return;
+      suppressClick = drag.moved;
+      if (drag.moved) setTimeout(() => { suppressClick = false; }, 60);
+      drag = null; wrap.classList.remove('panning');
+    };
+    wrap.addEventListener('pointerdown', beginDrag);
+    wrap.addEventListener('pointermove', moveDrag);
+    wrap.addEventListener('pointerup', endDrag);
+    wrap.addEventListener('pointercancel', endDrag);
+    wrap.addEventListener('pointerleave', endDrag);
+
+    function zoomAt(k, cx, cy) {
+      const next = Math.max(.25, Math.min(3, zoom * k));
+      if (next === zoom) return;
+      const r = wrap.getBoundingClientRect();
+      const ox = cx - r.left + wrap.scrollLeft, oy = cy - r.top + wrap.scrollTop;
+      const ratio = next / zoom;
+      zoom = next;
+      draw();
+      // 让鼠标下面那个点留在原地，缩放时地图不会「跳走」
+      wrap.scrollLeft = ox * ratio - (cx - r.left);
+      wrap.scrollTop = oy * ratio - (cy - r.top);
+    }
+    wrap.addEventListener('wheel', e => {
+      if (e.ctrlKey && Math.abs(e.deltaY) < 2) return; // 触控板捏合交给浏览器
+      e.preventDefault();
+      const step = e.deltaMode === 1 ? 0.16 : 0.0012; // 滚轮按「行」给的时候也不同
+      zoomAt(Math.exp(-e.deltaY * step), e.clientX, e.clientY);
+    }, { passive: false });
     // 太宽就先缩到适应宽度
     const vb = svg.viewBox.baseVal; if (vb.width > wrap.clientWidth && wrap.clientWidth) { zoom = Math.max(.45, (wrap.clientWidth - 10) / vb.width); draw(); }
   }
@@ -732,7 +1520,7 @@ const MindMap = (() => {
    ====================================================================== */
 const CHAT_WINDOWS = [[0, '全部'], [10, '10秒'], [30, '30秒'], [60, '1分'], [120, '2分'], [180, '3分'], [300, '5分']];
 const ChatOpt = {
-  get() { try { return Object.assign({ win: 0, mode: 'fast' }, JSON.parse(localStorage.getItem('tingkeben.chatopt') || '{}')); } catch (e) { return { win: 0, mode: 'fast' }; } },
+  get() { try { return Object.assign({ win: 0, mode: 'fast', src: 'all' }, JSON.parse(localStorage.getItem('tingkeben.chatopt') || '{}')); } catch (e) { return { win: 0, mode: 'fast', src: 'all' }; } },
   set(p) { try { localStorage.setItem('tingkeben.chatopt', JSON.stringify(Object.assign(this.get(), p))); } catch (e) {} },
 };
 const Chat = (() => {
@@ -772,6 +1560,7 @@ const Chat = (() => {
         <div class="chat-quote" id="chat-quote" hidden>引用：<span></span><button aria-label="去掉引用">×</button></div>
         <div class="chat-opts">
           <div class="chat-opt"><span>老师讲的</span><div class="seg" id="chat-win" role="radiogroup" aria-label="用老师最近多久讲的内容">${CHAT_WINDOWS.map(([v, l]) => `<button data-w="${v}">${l}</button>`).join('')}</div></div>
+          <div class="chat-opt"><span>资料</span><div class="seg" id="chat-src" role="radiogroup" aria-label="要不要读材料"><button data-s2="all" title="读这门课的笔记、课件和录音再回答">📚 读资料</button><button data-s2="none" title="什么都不读，直接聊天（更快、不占上下文）">💬 直接聊</button></div></div>
           <div class="chat-opt"><span>模式</span><div class="seg" id="chat-mode" role="radiogroup" aria-label="回答模式"><button data-m="fast" title="不思考，直接简短回答，一两秒出字">⚡ 快速</button><button data-m="deep" title="先认真想再回答，慢一些、更准、更详细">🧠 详细思考</button></div></div>
         </div>
         <div class="chat-in">
@@ -797,9 +1586,13 @@ const Chat = (() => {
     const syncOpts = () => {
       $$('#chat-win [data-w]', host).forEach(b => b.classList.toggle('on', Number(b.dataset.w) === opt.win));
       $$('#chat-mode [data-m]', host).forEach(b => b.classList.toggle('on', b.dataset.m === opt.mode));
+      $$('#chat-src [data-s2]', host).forEach(b => b.classList.toggle('on', b.dataset.s2 === opt.src));
+      const winWrap = $('#chat-win', host);
+      if (winWrap) winWrap.closest('.chat-opt').style.opacity = opt.src === 'none' ? '.45' : '';
     };
     $$('#chat-win [data-w]', host).forEach(b => b.onclick = () => { opt.win = Number(b.dataset.w); ChatOpt.set({ win: opt.win }); syncOpts(); });
     $$('#chat-mode [data-m]', host).forEach(b => b.onclick = () => { opt.mode = b.dataset.m; ChatOpt.set({ mode: opt.mode }); syncOpts(); });
+    $$('#chat-src [data-s2]', host).forEach(b => b.onclick = () => { opt.src = b.dataset.s2; ChatOpt.set({ src: opt.src }); syncOpts(); });
     syncOpts();
 
     async function send(text, { scope, label, win } = {}) {
@@ -811,7 +1604,11 @@ const Chat = (() => {
       const sessionId = note && note.sessionId;
       const session = live ? { segments: live.segments, title: '正在录的这节课' } : sessionId ? await DB.get('sessions', sessionId) : null;
       let context, noteLine = '';
-      if (scope === 'recent') {
+      const pure = opt.src === 'none' && scope !== 'recent';
+      if (pure) {
+        context = '';
+        noteLine = '直接聊 · 没读资料';
+      } else if (scope === 'recent') {
         const secs = w || 60;
         const human = secs < 60 ? secs + ' 秒' : Math.round(secs / 60) + ' 分钟';
         const segs = (session ? session.segments : []);
@@ -832,7 +1629,7 @@ const Chat = (() => {
       const history = store.chat.slice(-9, -1).filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }));
       try {
         const ans = await AI.deepseekStream({
-          system: AI.chatSystem({ courseName: course && course.name, context }) + (opt.mode === 'deep' ? '\n\n【详细思考模式】把道理讲透：先给结论，再分步骤解释，必要时举例、指出容易混淆的地方。' : '\n\n【快速模式】回答要短：先一句话给结论，最多再补 3 个要点，不要铺垫。'),
+          system: AI.chatSystem({ courseName: course && course.name, context, free: pure }) + (opt.mode === 'deep' ? '\n\n【详细思考模式】把道理讲透：先给结论，再分步骤解释，必要时举例、指出容易混淆的地方。' : '\n\n【快速模式】回答要短：先一句话给结论，最多再补 3 个要点，不要铺垫。'),
           messages: [...history, { role: 'user', content: q }],
           thinking: opt.mode === 'deep', maxTokens: opt.mode === 'deep' ? 8000 : 1500, signal: busy.ctl.signal, purpose: 'chat',
           onThinking: opt.mode === 'deep' ? t => { busy.think = t; paint(); } : undefined,
@@ -934,7 +1731,8 @@ const Recap = (() => {
   async function handwriting(note, onProgress) {
     const s = Settings.load();
     if (!s.geminiKey) throw new Error('识别手写要用 Gemini（免费），先到「设置 → AI 和 API key」填 Gemini key');
-    const pages = (note.board?.pages || []).map((p, i) => ({ p, n: i + 1 })).filter(x => x.p.strokes && x.p.strokes.length);
+    // 无限画布：按「板块」取图，每块单独认
+    const pages = Board.sections(note).filter(x => (x.strokes || []).length).map((x, i) => ({ p: x, n: i + 1 }));
     if (!pages.length) return '';
     const use = pages.slice(0, HW_MAX_PAGES);
 
@@ -1013,14 +1811,15 @@ const Recap = (() => {
   }
 
   async function run(note, course, { onStatus } = {}) {
-    const session = note.sessionId ? await DB.get('sessions', note.sessionId) : null;
-    if (!session || !session.segments.length) throw new Error('这份笔记还没有关联课堂录音');
+    // 同一份笔记可能录了好几节课，全部一起整理，后录的不会顶掉前面的
+    const sessions = (await noteSessions(note)).filter(s => (s.segments || []).length);
+    if (!sessions.length) throw new Error('这份笔记还没有关联课堂录音');
     if (!Settings.load().deepseekKey) throw new Error('先去设置里填 DeepSeek key');
     const job = Jobs.start('recap:' + note.id, '整理这节课：' + note.title);
-    try { return await runInner(note, course, session, job, onStatus); } finally { job.done(); }
+    try { return await runInner(note, course, sessions, job, onStatus); } finally { job.done(); }
   }
-  async function runInner(note, course, session, job, onStatus) {
-    const inkPages = (note.board?.pages || []).filter(p => p.strokes && p.strokes.length).length;
+  async function runInner(note, course, sessions, job, onStatus) {
+    const inkPages = Board.sections(note).filter(x => (x.strokes || []).length).length;
     if (inkPages) job.phase('正在识别画板上的手写', 0, .3, { expectSec: Math.min(90, 6 + inkPages * 4) });
     onStatus && onStatus('正在识别手写…');
     let hw = '';
@@ -1033,7 +1832,11 @@ const Recap = (() => {
     if (!body) return { full: true, handwriting: hw };
     onStatus && onStatus('正在整理老师讲的内容…');
     job.phase('正在读录音转写（老师讲了什么）', .3, .4, { expectSec: 8 });
-    const user = `课程：${course ? course.name : ''}\n笔记标题：${note.title}\n\n<课件笔记>\n${body.slice(0, 60000)}\n</课件笔记>\n\n<学生标记的重点时间>\n${(session.highlights || []).map(h => `[${fmtTime(h.t)}] ${h.near || ''}`).join('\n') || '（没有）'}\n</学生标记的重点时间>\n\n<学生没听懂的地方（请在「课堂上老师提到的」里加一个小节「我没听懂的地方」，用中文讲清楚）>\n${(session.confused || []).map(c => `[${fmtTime(c.t)}] ${c.near || ''}`).join('\n') || '（没有）'}\n</学生没听懂的地方>\n\n<学生手写>\n${hw || '（没有手写）'}\n</学生手写>\n\n<录音转写>\n${sessionTranscript(session).slice(0, 150000)}\n</录音转写>`;
+    const marks = sessions.flatMap(x => (x.highlights || []).map(h => `[${x.title} ${fmtTime(h.t)}] ${h.near || ''}`));
+    const cfs = sessions.flatMap(x => (x.confused || []).map(c => `[${x.title} ${fmtTime(c.t)}] ${c.near || ''}`));
+    // 多段录音按时间顺序拼起来，每段前面标个标题，AI 才知道是同一门课的第几次
+    const transcript = sessions.map((x, i) => (sessions.length > 1 ? `### 第 ${i + 1} 段 · ${x.title}（${fmtDate(x.startedAt)}）\n` : '') + sessionTranscript(x)).join('\n\n');
+    const user = `课程：${course ? course.name : ''}\n笔记标题：${note.title}\n\n<课件笔记>\n${body.slice(0, 60000)}\n</课件笔记>\n\n<学生标记的重点时间>\n${marks.join('\n') || '（没有）'}\n</学生标记的重点时间>\n\n<学生没听懂的地方（请在「课堂上老师提到的」里加一个小节「我没听懂的地方」，用中文讲清楚）>\n${cfs.join('\n') || '（没有）'}\n</学生没听懂的地方>\n\n<学生手写>\n${hw || '（没有手写）'}\n</学生手写>\n\n<录音转写${sessions.length > 1 ? '（这门课录了 ' + sessions.length + ' 段）' : ''}>\n${transcript.slice(0, 180000)}\n</录音转写>`;
     let out = '';
     out = await AI.deepseekStream({ system: SYSTEM, user, thinking: false, maxTokens: 8000, purpose: 'recap', onText: t => { if (!out) job.phase('正在写「课堂上老师提到的」', .4, .97, { expectLen: 3500 }); out = t; job.len(t.length).sub(`已写 ${t.length} 字`); onStatus && onStatus(`正在写课堂总结…（${t.length} 字）`); } });
     note.markdown = `${body}\n\n${START}\n${out.trim()}\n${END}\n`;
@@ -1048,7 +1851,7 @@ const Recap = (() => {
     if (!Settings.load().geminiKey) throw new Error('识别手写要用 Gemini（免费），先去设置里填 Gemini key');
     const job = Jobs.start('hw:' + note.id, '识别手写：' + note.title);
     try {
-    const inkPages = (note.board?.pages || []).filter(p => p.strokes && p.strokes.length).length;
+    const inkPages = Board.sections(note).filter(x => (x.strokes || []).length).length;
     const total = Math.min(HW_MAX_PAGES, inkPages);
     job.phase('正在识别手写', 0, .55, { expectSec: Math.min(90, 6 + total * 4) });
     onStatus && onStatus('正在识别手写…');
@@ -1107,6 +1910,10 @@ async function renderPdfPageInto(el, fileId, pageNum) {
   const c = await Pdf.render(fileId, pageNum, Math.min(2400, Math.round(cssW * dpr)));
   const canvas = document.createElement('canvas'); canvas.width = c.width; canvas.height = c.height; canvas.getContext('2d').drawImage(c, 0, 0);
   el.innerHTML = ''; el.style.aspectRatio = 'auto'; el.appendChild(canvas);
+  // 画上去之后把页码徽标补回来（清空 innerHTML 会把它一起删掉）
+  const badge = document.createElement('span');
+  badge.className = 'pnum'; badge.textContent = 'P' + pageNum;
+  el.appendChild(badge);
   try {
     const tl = document.createElement('div'); tl.className = 'textLayer';
     tl.style.width = vp.width + 'px'; tl.style.height = vp.height + 'px'; tl.style.setProperty('--scale-factor', vp.scale);
@@ -1249,7 +2056,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
     $$('[data-m]', host).forEach(b => b.onclick = () => { mode = b.dataset.m; paint(); });
     const body = $('#dv-body', host);
     const trNeeded = () => {
-      body.innerHTML = `<div class="empty"><strong>还没翻译</strong>整份课件逐页翻成中文，术语保留英文（DeepSeek，约 ¥${DocTr.estimate(f).toFixed(2)}）。翻好之后「中文」和「对照」都能看。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="dv-tr">翻译整份课件</button></div></div>`;
+      body.innerHTML = `<div class="empty"><strong>还没翻译</strong>整份课件逐页翻成中文，术语保留英文。翻好之后「中文」和「对照」都能看。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="dv-tr">翻译整份课件</button></div></div>`;
       $('#dv-tr', body).onclick = () => run();
     };
     if (mode === 'prep') return Prep.mount(body, f, course);
@@ -1265,7 +2072,10 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
     const textPages = splitPages(f.text);
     if (!pdf) n = textPages.length ? Math.max(...textPages.map(p => p.n)) : 0;
     const tr = trByPage(f.translation), refs = noteRefsByPage(note && note.markdown);
-    const pageBox = p => pdf ? `<div class="pdfpage" data-p="${p}"><div class="ph">第 ${p} 页</div></div>` : `<div class="docpage" data-p="${p}"><div class="hint">第 ${p} 页</div><div class="doc-text">${esc((textPages.find(x => x.n === p) || {}).text || '')}</div></div>`;
+    // 每页右下角标一个页码，和笔记里的 [p.N] 对得上
+    const pageBox = p => pdf
+      ? `<div class="pdfpage" data-p="${p}"><div class="ph">第 ${p} 页</div><span class="pnum">P${p}</span></div>`
+      : `<div class="docpage" data-p="${p}"><div class="hint">第 ${p} 页</div><div class="doc-text">${esc((textPages.find(x => x.n === p) || {}).text || '')}</div><span class="pnum">P${p}</span></div>`;
     if (mode === 'pair') {
       if (!f.translation && !DocTr.running.has(f.id) && !Object.keys(refs).length) return trNeeded();
       body.innerHTML = (DocTr.running.has(f.id) ? Jobs.slot('tr:' + f.id) : '') + (f.translation || DocTr.running.has(f.id) ? '' : `<div class="banner"><div class="grow">还没翻译，右边只显示笔记里引用这一页的内容。</div><button class="btn small primary" id="dv-tr2">翻译整份课件</button></div>`) +
@@ -1281,9 +2091,9 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
       $$('.pdfpage', body).forEach(el => io.observe(el));
     }
     const sel = mode === 'pair' ? '.pair' : pdf ? '.pdfpage' : '.docpage';
-    const cur = new IntersectionObserver(ents => ents.forEach(en => { if (en.isIntersecting && en.intersectionRatio > .3) { const p = Number(en.target.dataset.p); host.dataset.page = p; const pg = $('#dv-page', host); if (pg) pg.textContent = `第 ${p} / ${n} 页`; onPage && onPage(p); } }), { root: body, threshold: [.3] });
+    const cur = new IntersectionObserver(ents => ents.forEach(en => { if (en.isIntersecting && en.intersectionRatio > .3) { const p = Number(en.target.dataset.p); host.dataset.page = p; const pg = $('#dv-page', host); if (pg) pg.textContent = `${p}/${n}`; onPage && onPage(p); } }), { root: body, threshold: [.3] });
     $$(sel, body).forEach(el => cur.observe(el));
-    host.dataset.page = 1; $('#dv-page', host).textContent = `共 ${n} 页`;
+    host.dataset.page = 1; $('#dv-page', host).textContent = `1/${n}`;
     const goto = e => { if (!host.isConnected) { document.removeEventListener('tkb-goto-page', goto); return; } const el = $(`${sel}[data-p="${e.detail.page}"]`, body); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
     document.addEventListener('tkb-goto-page', goto);
     const add = $('#dv-add', host); add.hidden = !(host._onAddPage && pdf); add.onclick = () => host._onAddPage && host._onAddPage(f.id, Number(host.dataset.page || 1));
@@ -1345,7 +2155,7 @@ const Prep = (() => {
     const pk = f.prep;
     if (!pk) {
       if (running.has(f.id)) { el.innerHTML = Jobs.slot('prep:' + f.id); running.get(f.id).then(() => el.isConnected && mount(el, f, course)).catch(() => el.isConnected && mount(el, f, course)); return; }
-      el.innerHTML = `<div class="empty"><strong>还没有课前包</strong>上课前 5 分钟看一眼：这节讲什么、3 个关键概念、可能听不懂的地方，再加一份中英术语表（带例句和发音）。DeepSeek 约 ¥0.01–0.03。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="pp-go">${ICON.spark}生成课前包</button></div></div>`;
+      el.innerHTML = `<div class="empty"><strong>还没有课前包</strong>上课前 5 分钟看一眼：这节讲什么、3 个关键概念、可能听不懂的地方，再加一份中英术语表（带例句和发音）。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="pp-go">${ICON.spark}生成课前包</button></div></div>`;
       $('#pp-go', el).onclick = async () => {
         if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
         const pr = make(f, course);
@@ -1356,8 +2166,14 @@ const Prep = (() => {
       return;
     }
     const v = pk.preview;
+    const hard = f.hard;
     el.innerHTML = `
       <div class="prep">
+        ${hard && hard.pages.length ? `<div class="prep-card hard-card">
+          <div class="prep-k">先啃这几页 · 最难的 ${hard.pages.length} 页</div>
+          <div class="hard-list">${hard.pages.map(p => `<div class="hard-item"><span class="hard-p">P${p.page}</span><div class="grow">${esc(p.why)}</div></div>`).join('')}</div>
+          ${hard.overall ? `<div class="hint" style="margin-top:8px">${esc(hard.overall)}</div>` : ''}
+        </div>` : `<div class="row" style="justify-content:flex-end"><button class="btn small ghost" id="pp-diff">${ICON.spark}标出最难读的 3 页</button></div>`}
         <div class="prep-card">
           <div class="prep-k">5 分钟预习</div>
           <p class="prep-sum">${esc(v.summary)}</p>
@@ -1366,10 +2182,13 @@ const Prep = (() => {
           ${v.hard.length ? `<div class="prep-k">上课可能听不懂的地方</div><ul class="prep-h">${v.hard.map(h => `<li>${esc(h)}</li>`).join('')}</ul>` : ''}
           ${v.listen.length ? `<div class="prep-k">注意听老师说这些</div><div class="prep-l">${v.listen.map(t => `<button class="chip" data-say="${esc(t)}">🔊 ${esc(t)}</button>`).join('')}</div>` : ''}
         </div>
-        <div class="row" style="justify-content:space-between;margin:14px 0 6px"><b>术语表 · ${pk.terms.length} 个</b><div class="row" style="gap:4px"><button class="btn small ghost" id="pp-copy">复制</button><button class="btn small ghost" id="pp-re">重新生成</button></div></div>
+        <div class="row" style="justify-content:space-between;margin:14px 0 6px"><b>术语表 · ${pk.terms.length} 个</b><a class="hint" href="#vocab~${f.courseId}" title="术语会自动进生词本，按遗忘曲线推">已进生词本 · 去背 ›</a></div>
+        <div class="row" style="justify-content:flex-end;margin:-6px 0 6px"><div class="row" style="gap:4px"><button class="btn small ghost" id="pp-copy">复制</button><button class="btn small ghost" id="pp-re">重新生成</button></div></div>
         <div class="terms">${pk.terms.map(t => `<div class="term"><div class="term-h"><button class="say" data-say="${esc(t.en)}" aria-label="朗读">🔊</button><b>${esc(t.en)}</b><span class="term-zh">${esc(t.zh)}</span></div>${t.explain ? `<div class="term-x">${esc(t.explain)}</div>` : ''}${t.example ? `<div class="term-e"><button class="say small" data-say="${esc(t.example)}" aria-label="朗读例句">🔊</button><span>${esc(t.example)}</span></div><div class="term-ez">${esc(t.example_zh)}</div>` : ''}</div>`).join('')}</div>
       </div>`;
     $$('[data-say]', el).forEach(b => b.onclick = () => speak(b.dataset.say));
+    const pd = $('#pp-diff', el);
+    if (pd) pd.onclick = async () => { pd.disabled = true; pd.textContent = '正在读…'; try { await Learn.diffFile(f, course && course.name); mount(el, f, course); } catch (e) { toast(e.message, 6000); pd.disabled = false; pd.textContent = '标出最难读的 3 页'; } };
     $('#pp-copy', el).onclick = async () => { try { await navigator.clipboard.writeText(pk.terms.map(t => `${t.en}\t${t.zh}\t${t.explain}`).join('\n')); toast('已复制（可以粘贴到 Excel / Anki）'); } catch (e) { toast('复制失败'); } };
     confirmClick($('#pp-re', el), '再点一次重新生成', async () => { f.prep = null; const full = await DB.get('files', f.id); full.prep = null; await DB.put('files', full); mount(el, f, course); $('#pp-go', el)?.click(); });
   }
@@ -1413,6 +2232,33 @@ const SelPop = (() => {
     if (local) return local;
     throw new Error('免费翻译暂时都用不了');
   }
+  /* 选区 → 屏幕坐标。
+     一行和好几行的差别很大：getBoundingClientRect() 给的是「整块的外框」，
+     多行选区时会顶到第一行的顶上，工具栏飞到很远的地方或者盖住第一行。
+     所以这里按每一行的 clientRect 来算：
+       · 上面放得下就浮在第一行上方；
+       · 放不下（贴着屏幕顶、或者多行已经占满）就落到最后一行的下面。 */
+  let range = null;
+  function rects() {
+    try { return [...range.getClientRects()].filter(r => (r.width || r.height) && r.bottom > -2000); } catch (e) { return []; }
+  }
+  function place() {
+    if (!pop || pop.hidden || !range) return;
+    const rs = rects(); if (!rs.length) return hide();
+    const first = rs[0], last = rs[rs.length - 1];
+    const top = Math.min(...rs.map(r => r.top)), bottom = Math.max(...rs.map(r => r.bottom));
+    if (bottom < 0 || top > window.innerHeight) return hide(); // 整段已经滚出屏幕
+    const w = pop.offsetWidth || 220, h = pop.offsetHeight || 40;
+    // 横向跟第一行（或最后一行）的中点对齐，别用整块的宽度
+    const anchor = top - h - 10 >= 8 ? first : last;
+    const cx = anchor.left + Math.min(anchor.width, 260) / 2;
+    const left = Math.max(8, Math.min(window.innerWidth - w - 8, cx - w / 2));
+    let y = top - h - 10;
+    if (y < 8) y = bottom + 10;                       // 上面放不下就放下面
+    if (y + h > window.innerHeight - 8) y = Math.max(8, window.innerHeight - h - 8);
+    pop.style.left = Math.round(left) + 'px';
+    pop.style.top = Math.round(y) + 'px';
+  }
   function show() {
     const s = window.getSelection(); if (!s || s.isCollapsed) return hide();
     const t = String(s).trim(); if (t.length < 1 || t.length > 3000) return hide();
@@ -1420,17 +2266,25 @@ const SelPop = (() => {
     if (!node || !node.closest('.doc-body, .md, .captions')) return hide();
     if (node.closest('textarea, input, .chat-in')) return hide();
     text = t; ensure();
-    const r = s.getRangeAt(0).getBoundingClientRect();
+    range = s.getRangeAt(0).cloneRange();
     $('.selpop-out', pop).hidden = true;
     pop.hidden = false;
-    const w = pop.offsetWidth || 220;
-    pop.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + 'px';
-    const top = r.top - 46; pop.style.top = (top < 8 ? r.bottom + 8 : top) + 'px';
+    place();
+    // 工具栏尺寸要等它显示出来才知道（第一次可能是 0）
+    if (!pop.offsetWidth) requestAnimationFrame(place);
   }
-  function hide() { if (pop) pop.hidden = true; }
+  function hide() { range = null; if (pop) pop.hidden = true; }
   document.addEventListener('selectionchange', () => { clearTimeout(hideT); hideT = setTimeout(() => { const s = window.getSelection(); if (!s || s.isCollapsed) hide(); }, 200); });
   ['mouseup', 'touchend', 'keyup'].forEach(ev => document.addEventListener(ev, e => { if (pop && pop.contains(e.target)) return; setTimeout(show, 30); }));
-  window.addEventListener('scroll', hide, true);
+  /* 滚动时跟着选区走：原来的做法是一滚就把它收掉，多行段落滚一点就点不到了。
+     现在重新量一次位置；只有整段滚出屏幕才收起。 */
+  let raf = 0;
+  const follow = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; place(); });
+  };
+  window.addEventListener('scroll', follow, true);
+  window.addEventListener('resize', follow);
   return { hide };
 })();
 /* 没有工作台的页面：选中「问 AI」就打开右侧抽屉 */
@@ -1455,7 +2309,8 @@ const Deadlines = (() => {
       const ev = await Ext.call('listDeadlines', {}, 60000);
       const d = load();
       const manual = d.items.filter(x => x.manual);
-      d.items = [...manual, ...ev.map(e => ({ ...e, id: 'm' + e.id }))]; d.at = Date.now(); save(d);
+      const doneIds = new Set(d.items.filter(x => x.done).map(x => x.id));
+      d.items = [...manual, ...ev.map(e => ({ ...e, id: 'm' + e.id, done: doneIds.has('m' + e.id) }))]; d.at = Date.now(); save(d);
       if (!silent) toast(`更新了 ${ev.length} 个截止日期`);
       return true;
     } catch (e) {
@@ -1494,7 +2349,7 @@ const Deadlines = (() => {
 /* 工作台布局偏好：Mac 和 iPad 分开记（iPad 默认：课件 + 画板，不开右栏） */
 const DeskPref = {
   key: () => 'tingkeben.desk' + (Device.ipad ? '.ipad' : ''),
-  defaults: () => Device.ipad ? { left: true, mid: true, right: false, rtab: 'chat', one: 'left', split: true, mtab: 'board', w: { left: 1, mid: 1, right: .8 }, rmin: false } : { left: true, mid: true, right: true, rtab: 'chat', one: 'mid', split: false, mtab: 'note', w: { left: 1, mid: 1.15, right: .85 }, rmin: false },
+  defaults: () => Device.ipad ? { left: true, mid: true, right: false, rtab: 'chat', one: 'left', split: true, mtab: 'note', w: { left: 1, mid: 1, right: .8 }, rmin: false } : { left: true, mid: true, right: true, rtab: 'chat', one: 'mid', split: false, mtab: 'note', w: { left: 1, mid: 1.15, right: .85 }, rmin: false },
   get() { try { return Object.assign(this.defaults(), JSON.parse(localStorage.getItem(this.key()) || '{}')); } catch (e) { return this.defaults(); } },
   set(p) { try { localStorage.setItem(this.key(), JSON.stringify(Object.assign(this.get(), p))); } catch (e) {} },
 };
@@ -1531,7 +2386,7 @@ async function renderDesk(noteId) {
           <div class="dbody" id="dk-mid"></div>
         </section>
         <section class="dcol" data-col="right">
-          <div class="dhead tabs" id="dk-rtabs"><button data-r="chat">问 AI</button><button data-r="live">实时翻译</button><span class="grow"></span><button class="dk-min" id="dk-rmin" title="收成一个圆按钮" aria-label="把 AI 栏收起来">—</button></div>
+          <div class="dhead tabs" id="dk-rtabs"><button data-r="chat">问 AI</button><button data-r="live">${Settings.load().liveEnglishOnly !== false ? '录音转写' : '实时翻译'}</button><span class="grow"></span><button class="dk-min" id="dk-rmin" title="收成一个圆按钮" aria-label="把 AI 栏收起来">—</button></div>
           <div class="dbody" id="dk-right"></div>
         </section>
       </div>
@@ -1654,18 +2509,31 @@ async function renderDesk(noteId) {
 
   // 左栏：课件
   const left = $('#dk-doc');
+  let deskLock = () => {};
   const showDoc = async () => {
     const f = files.find(x => x.id === fileId);
     if (!f) { left.innerHTML = '<div class="empty">这门课还没有课件。先在课程页导入或从 Moodle 同步。</div>'; return; }
     const full = await DB.get('files', f.id);
+    // 「＋到画板」：在笔记画布里给这一页开一块（已经有就直接跳过去），去中间写
+    // （以前写进了旧的 board.pages，换成无限画布后那里已经不显示了，点了没反应）
     left._onAddPage = async (fid, page) => {
-      note.board = note.board || { pages: [] };
-      const bp = note.board.pages; if (bp.length === 1 && !bp[0].bg && !bp[0].strokes.length) bp.length = 0;
-      bp.push({ bg: { fileId: fid, page }, h: Math.round(1000 * await Pdf.aspect(fid, page)), strokes: [] });
-      await DB.put('notes', note); toast(`课件第 ${page} 页已加到画板，去中间「画板」写`);
-      if (midTab === 'board') showMid('board');
+      const wd = Board.world(note);
+      let i = wd.blocks.findIndex(b => b.p === page);
+      if (i < 0) {
+        // 放在「页码比它小的最后一块」后面，保持跟课件顺序一致
+        let last = -1; wd.blocks.forEach((b, k) => { if (b.p < page) last = k; });
+        i = last + 1;
+        if (wd.blocks.length === 1 && !String(wd.blocks[0].text || '').trim() && !wd.strokes.length) { wd.blocks = []; i = 0; }
+        wd.blocks.splice(i, 0, { p: page, y: i < wd.blocks.length ? wd.blocks[i].y : (wd.h || 0), text: '' });
+        await DB.put('notes', note);
+        toast(`第 ${page} 页已经在笔记里开了一块，直接写`);
+      }
+      showMid('note');
+      setTimeout(() => Board.current && Board.current.gotoPage(page), 80);
     };
-    viewer = mountDocViewer(left, full, { note, course });
+    let lockBoard = 0;
+    viewer = mountDocViewer(left, full, { note, course });   // 不自动联动，页码自己看
+    deskLock = ms => { lockBoard = Date.now() + ms; };
   };
   $('#dk-file').onchange = async e => { fileId = e.target.value; note.deskFile = fileId; if (!(note.sourceFileIds || []).includes(fileId)) note.sourceFileIds = [...(note.sourceFileIds || []), fileId]; await DB.put('notes', note); showDoc(); };
   showDoc();
@@ -1676,11 +2544,16 @@ async function renderDesk(noteId) {
     midTab = tab; DeskPref.set({ mtab: tab });
     $('#dk-mtabs').innerHTML = noteTabsHTML(tab, note);
     $$('#dk-mtabs [data-ntab]').forEach(b => b.onclick = () => showMid(b.dataset.ntab));
-    mid.className = 'dbody' + (tab === 'board' ? ' flush' : '');
-    if (tab === 'note') return deskNote(note, course, mid, () => showMid('note'));
+    mid.className = 'dbody';
+    // 「笔记」就是白板：课件顺序的文字 + 手写，和笔记页里是同一个东西
+    if (tab === 'note') {
+      mid.className = 'dbody flush';
+      // 画布挪到哪一块，左边课件跟到那一页（双向联动，和笔记页一样）
+      return Board.mount(mid, note, { course, onPageJump: p => document.dispatchEvent(new CustomEvent('tkb-goto-page', { detail: { page: p } })) });
+    }
     mountNoteTool(tab, note, course, mid, { focus: opt.focus, toPoint: pid => showMid('points', { focus: pid }) });
   };
-  showMid(['note', 'board', 'points', 'cards', 'quiz', 'map'].includes(P.mtab) ? P.mtab : 'note');
+  showMid(['note', 'doc', 'vocab', 'points', 'quiz', 'map', 'text'].includes(P.mtab) ? P.mtab : 'note');
 
   // 右栏：实时翻译 / 问 AI
   const right = $('#dk-right');
@@ -1737,20 +2610,35 @@ function deskLive(note, course, el) {
     el.innerHTML = `<div class="empty"><strong>正在录另一门课</strong>${esc(sess.course.name)}<div class="row" style="justify-content:center;margin-top:10px"><a class="btn" href="#live">去看</a></div></div>`; return;
   }
   if (!sess) {
+    const enOnly = s.liveEnglishOnly !== false;
     el.innerHTML = `
       <div class="dk-rec">
         <button class="recbtn" id="dk-start" aria-label="开始录音"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg></button>
-        <div><strong>开始录音</strong><div class="hint">实时转写英文 + 中文字幕，录音会关联到这份笔记</div></div>
+        <div><strong>开始录音</strong><div class="hint">${enOnly ? '只转写英文（不翻中文），录完用来整理笔记' : '实时转写英文 + 中文字幕'}；这是一段新的录音，之前的都留着</div></div>
       </div>
+      <label class="switch small" style="margin-top:10px"><input type="checkbox" id="dk-enonly" ${enOnly ? 'checked' : ''}>只录英文，不翻中文（省额度，笔记照样能整理）</label>
       ${!s.geminiKey ? '<div class="banner"><div class="grow">还没填 Gemini API key</div><a class="btn small primary" href="#settings~ai">去设置</a></div>' : ''}
-      ${note.sessionId ? `<div class="hint" style="margin-top:12px">这份笔记已经关联了一段录音，再录会换成新的那段。<a href="#session-${note.sessionId}">看上次的录音</a></div>` : ''}`;
+      <div class="hint" style="margin-top:10px">开始录音后，这里会出现「★ 重点」和「❓ 没听懂」两个按钮。老师讲到关键处点一下，课后会单独列出来。</div>
+      <div id="dk-prev" class="dk-prev"></div>`;
+    $('#dk-enonly', el).onchange = e => { Settings.save({ liveEnglishOnly: e.target.checked }); deskLive(note, course, el); };
+    (async () => {
+      const list = await noteSessions(note);
+      const host = $('#dk-prev', el); if (!host) return;
+      host.innerHTML = list.length ? `<div class="hint" style="margin:14px 0 6px">这份笔记已经录过 ${list.length} 段，都还在：</div>${list.slice().reverse().map((x, i) => `<a class="dk-prev-item" href="#session-${x.id}"><span class="grow">第 ${list.length - i} 段 · ${fmtTime(x.duration)} · ${(x.segments || []).length} 句</span><span class="hint">${fmtDate(x.startedAt)}</span></a>`).join('')}` : '';
+    })();
     $('#dk-start', el).onclick = async () => {
-      if ((Settings.load().draftMode || 'free') === 'free') AI.prepareLocalTranslator();
+      if (await micState() === 'denied') { micHelp(() => $('#dk-start', el).click()); return; }
+      if ((Settings.load().liveEnglishOnly !== false) === false && (Settings.load().draftMode || 'free') === 'free') AI.prepareLocalTranslator();
       const btn = $('#dk-start', el); btn.disabled = true;
       const live = new LiveSession({ course, onUpdate: segs => liveUI.update(segs), onInterim: t => liveUI.interim(t), onStatus: st => liveUI.status(st), onError: m => liveUI.error(m), onLevel: r => liveUI.level(r) });
       live.focusFileId = note.deskFile || (note.sourceFileIds || [])[0];
       try { await live.start(); live.noteId = note.id; State.live = live; renderSide(); deskLive(note, course, el); }
-      catch (e) { btn.disabled = false; toast(e.name === 'NotAllowedError' ? '没有麦克风权限。到浏览器设置里允许这个网站使用麦克风。' : e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message, 6000); try { live.capture && live.capture.stop(); } catch (x) {} }
+      catch (e) {
+        btn.disabled = false;
+        if (e.name === 'NotAllowedError' || /permission|denied/i.test(String(e.message || ''))) micHelp(() => $('#dk-start', el).click());
+        else toast(e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message, 6000);
+        try { live.capture && live.capture.stop(); } catch (x) {}
+      }
     };
     return;
   }
@@ -1778,8 +2666,10 @@ function deskLive(note, course, el) {
     const rec = await sess.stop();
     State.live = null; clearInterval(tick); renderSide();
     const fresh = await DB.get('notes', note.id) || note;
-    fresh.sessionId = rec.id; await DB.put('notes', fresh); Object.assign(note, fresh);
-    el.innerHTML = `<div class="empty"><strong>录好了 · ${fmtTime(rec.duration)} · ${rec.segments.length} 句</strong>下一步：把老师讲的和你的手写一起整理进笔记。<div class="row" style="justify-content:center;margin-top:12px"><a class="btn" href="#session-${rec.id}">看转写回放</a><button class="btn primary" id="dk-recap">${ICON.spark}手写笔记 + 课堂录音优化笔记</button></div></div>`;
+    await linkSession(fresh, rec.id); Object.assign(note, fresh);
+    const total = (fresh.sessionIds || []).length;
+    el.innerHTML = `<div class="empty"><strong>录好了 · ${fmtTime(rec.duration)} · ${rec.segments.length} 句</strong>${total > 1 ? `这是第 ${total} 段，前面几段都留着，整理笔记时会一起用上。` : '下一步：把老师讲的和你的手写一起整理进笔记。'}<div class="row" style="justify-content:center;margin-top:12px"><a class="btn" href="#session-${rec.id}">看转写回放</a><button class="btn" id="dk-again">再录一段</button><button class="btn primary" id="dk-recap">${ICON.spark}手写笔记 + 课堂录音优化笔记</button></div></div>`;
+    $('#dk-again', el).onclick = () => deskLive(note, course, el);
     $('#dk-recap', el).onclick = () => enhanceNote(note, course, () => renderDesk(note.id));
   };
 }
@@ -1829,35 +2719,473 @@ async function coursePointsModal(course) {
     <div class="row" style="justify-content:flex-end"><button class="btn" data-close>关闭</button></div>`);
 }
 async function mockExamModal(course) {
-  const notes = (await DB.byIndex('notes', 'courseId', course.id)).filter(n => n.study && n.study.quiz.length).sort((a, b) => a.createdAt - b.createdAt);
-  if (!notes.length) { toast('还没有笔记生成过测验题'); return; }
-  modal(`<h2>模拟考试</h2><p class="hint" style="margin:0">从选中的笔记里随机抽题，限时作答，交卷后看成绩和解析。</p>
-    <div class="checklist">${notes.map(n => `<label><input type="checkbox" value="${n.id}" checked>${esc(n.title)} <span class="hint">${n.study.quiz.length} 题</span></label>`).join('')}</div>
-    <div class="row"><div class="field grow"><label for="me-n">题数</label><input id="me-n" type="number" min="5" max="60" value="20"></div><div class="field grow"><label for="me-t">限时（分钟）</label><input id="me-t" type="number" min="5" max="180" value="30"></div></div>
-    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="me-go">开始考试</button></div>`, (box, close) => {
-    $('#me-go', box).onclick = () => {
-      const ids = $$('.checklist input:checked', box).map(i => i.value);
-      const pool = notes.filter(n => ids.includes(n.id)).flatMap(n => n.study.quiz.map(q => ({ ...q, noteId: n.id, noteTitle: n.title })));
-      if (!pool.length) { toast('至少选一篇'); return; }
-      const qs = pool.sort(() => Math.random() - .5).slice(0, Math.max(5, Number($('#me-n', box).value) || 20));
+  const notes = (await DB.byIndex('notes', 'courseId', course.id)).filter(n => n.study && (n.study.quiz || []).length).sort((a, b) => a.createdAt - b.createdAt);
+  if (!notes.length) { toast('还没有笔记生成过测验题 —— 先去笔记里出一次「测验」'); return; }
+  // 笔记 → 周次（从来源课件推断），用来按 Topic 范围筛
+  const weeks = {};
+  for (const n of notes) {
+    const fs = await Promise.all((n.sourceFileIds || []).map(id => DB.get('files', id)));
+    const w = fs.filter(Boolean).map(f => weekOf(f).n).filter(x => x && x < 900);
+    weeks[n.id] = w.length ? Math.min(...w) : 0;
+  }
+  const cfg = (course.exams && course.exams[0]) || { weights: {} };
+  const wOf = id => (cfg.weights || {})[id] ?? 1;
+  const minW = Math.min(...notes.map(n => weeks[n.id] || 99)), maxW = Math.max(...notes.map(n => weeks[n.id] || 0));
+  modal(`<h2>模拟考试 · 按权重组卷</h2>
+    <p class="hint" style="margin:0">真考试里各 topic 占分不一样。给每份笔记填一个权重（1 = 正常，2 = 考得多，0 = 不考），题目按权重分，不是平均抽。</p>
+    <div class="row" style="margin-top:12px"><div class="field grow"><label for="me-from">从 Week</label><input id="me-from" type="number" min="0" value="${minW === 99 ? 1 : minW}"></div>
+      <div class="field grow"><label for="me-to">到 Week</label><input id="me-to" type="number" min="0" value="${maxW || 12}"></div>
+      <div class="field grow"><label for="me-n">题数</label><input id="me-n" type="number" min="5" max="60" value="${cfg.count || 20}"></div>
+      <div class="field grow"><label for="me-t">限时（分钟）</label><input id="me-t" type="number" min="5" max="180" value="30"></div></div>
+    <div class="mk-weights">${notes.map(n => `<div class="wk-row"><span class="grow">${esc(n.title)} <span class="hint">${weeks[n.id] ? 'Week ' + weeks[n.id] + ' · ' : ''}${n.study.quiz.length} 题</span></span><input type="number" min="0" max="10" step="0.5" value="${wOf(n.id)}" data-w="${n.id}"></div>`).join('')}</div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="me-go">组卷</button></div>`, (box, close) => {
+    const applyRange = () => {
+      const a = Number($('#me-from', box).value) || 0, b = Number($('#me-to', box).value) || 999;
+      $$('[data-w]', box).forEach(inp => { const w = weeks[inp.dataset.w]; if (w && w >= 900) return; inp.value = (!w || (w >= a && w <= b)) ? (Number(inp.value) || 1) : 0; });
+    };
+    $('#me-from', box).onchange = applyRange; $('#me-to', box).onchange = applyRange;
+    $('#me-go', box).onclick = async () => {
+      const weights = {}; $$('[data-w]', box).forEach(i => { weights[i.dataset.w] = Number(i.value) || 0; });
+      const count = Math.max(5, Math.min(60, Number($('#me-n', box).value) || 20));
       const mins = Math.max(5, Number($('#me-t', box).value) || 30);
-      close(); runExam(course, qs, mins);
+      const c2 = await DB.get('courses', course.id);
+      c2.exams = [{ id: (c2.exams && c2.exams[0] && c2.exams[0].id) || DB.uid('ex_'), count, weights, at: Date.now() }];
+      await DB.put('courses', c2);
+      Object.assign(course, { exams: c2.exams });
+      close();
+      try {
+        const { qs, pools } = await Learn.paperFor(course, { weights, count });
+        if (!qs.length) { toast('没有抽到题，把权重调回来试试'); return; }
+        Learn.runPaper(course, qs, mins, {
+          title: '模拟考试', meta: `${pools.length} 个 topic 按权重组卷`,
+          onWrong: q => Learn.wrongHit(q.noteId, q.qi, false),
+          onRight: q => Learn.wrongHit(q.noteId, q.qi, true),
+        });
+      } catch (e) { toast(e.message, 6000); }
     };
   });
 }
-function runExam(course, qs, minutes) {
-  const ans = new Array(qs.length).fill(null), end = Date.now() + minutes * 60e3, L = 'ABCDEF';
-  view.innerHTML = `<div class="head"><div><h1>模拟考试 · ${esc(course.name)}</h1><div class="meta">${qs.length} 题 · 限时 ${minutes} 分钟</div></div><div class="row"><span class="clock" id="ex-clock"></span><button class="btn primary" id="ex-submit">交卷</button></div></div>
-    <div class="exam">${qs.map((q, i) => `<div class="card pad quiz" data-i="${i}"><div class="qq">${i + 1}. ${esc(q.q)}</div><div class="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}"><b>${L[k]}</b><span>${esc(o)}</span></button>`).join('')}</div></div>`).join('')}</div>`;
-  $$('.exam .quiz').forEach(c => $$('.opt', c).forEach(b => b.onclick = () => { ans[Number(c.dataset.i)] = Number(b.dataset.k); $$('.opt', c).forEach(x => x.classList.toggle('sel', x === b)); }));
-  const tick = setInterval(() => { const c = $('#ex-clock'); if (!c) { clearInterval(tick); return; } const left = Math.max(0, end - Date.now()); c.textContent = fmtTime(left / 1000); if (!left) submit(); }, 500);
-  const submit = () => {
-    clearInterval(tick);
-    const score = qs.filter((q, i) => ans[i] === q.answer).length;
-    view.innerHTML = `<div class="head"><div><h1>成绩：${score} / ${qs.length}</h1><div class="meta">${Math.round(score / qs.length * 100)} 分 · 错题下面有解析</div></div><a class="btn" href="#course-${course.id}~notes">回课程</a></div>
-      <div class="exam">${qs.map((q, i) => `<div class="card pad quiz"><div class="qq">${i + 1}. ${esc(q.q)}</div><div class="opts">${q.options.map((o, k) => `<div class="opt ${k === q.answer ? 'right' : k === ans[i] ? 'wrong' : ''}"><b>${L[k]}</b><span>${esc(o)}</span></div>`).join('')}</div>
-        <div class="explain ${ans[i] === q.answer ? 'ok' : 'bad'}"><b>${ans[i] === q.answer ? '对' : ans[i] === null ? '没答' : '错'}</b> · ${esc(q.explain)} <a href="#note-${q.noteId}~points">（${esc(q.noteTitle)}）</a></div></div>`).join('')}</div>`;
-    window.scrollTo(0, 0);
-  };
-  $('#ex-submit').onclick = () => { const blank = ans.filter(a => a === null).length; if (blank && !$('#ex-submit').dataset.armed) { $('#ex-submit').dataset.armed = 1; $('#ex-submit').textContent = `还有 ${blank} 题没答，再点交卷`; return; } submit(); };
+/* ======================================================================
+   一段课件可以上好几节课：每次录音都是新的一段，追加到 note.sessionIds，
+   note.sessionId 只表示「最近那一段」。
+   ====================================================================== */
+async function noteSessions(note) {
+  const ids = [...new Set([].concat(note.sessionIds || [], note.sessionId || []).filter(Boolean))];
+  const out = [];
+  for (const id of ids) { const s = await DB.get('sessions', id); if (s) out.push(s); }
+  return out.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
 }
+async function linkSession(note, sid) {
+  note.sessionIds = [...new Set([...(note.sessionIds || []), sid])];
+  note.sessionId = sid; // 最近一段，老代码仍然读这个字段
+  await DB.put('notes', note);
+  return note;
+}
+
+/* ======================================================================
+   5.0 学习闭环（2026-11-01）
+   —— 生词本（艾宾浩斯）/ 课件难度预判 / 没听懂清单 / 老师划的重点 /
+      录音按话题分段 / 复习优先级 / 错题本 / 加权模考 / 复制给 AI
+
+   三条原则：
+   1. 能用本地数据算出来的（优先级、错题、进度）绝不调用 AI；
+   2. 必须用 AI 的（难度预判、没听懂重讲、话题分段、划重点整理）都是
+      手指点一下才跑，能省的一次都不多花；
+   3. 状态全部写回 courses / files / notes / sessions，跟着云同步走。
+   ====================================================================== */
+const Learn = (() => {
+  const DAY = 86400e3;
+  const weekStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };
+
+  /* ==================== 1. 生词本（艾宾浩斯） ==================== */
+  const BOX = [1, 3, 7, 16, 35, 60]; // 第 n 次答对后隔几天再见
+  const vocCache = new Map();
+  const dirty = new Set();
+  let flushT = null;
+  function flushLater(course) {
+    dirty.add(course.id);
+    clearTimeout(flushT);
+    // 攒 1.2 秒再存，避免每点一个词就写一次库、触发一次云同步
+    flushT = setTimeout(async () => {
+      const ids = [...dirty]; dirty.clear();
+      for (const id of ids) {
+        const c = await DB.get('courses', id);
+        const hit = vocCache.get(id);
+        if (c && hit && hit.course) { c.vocab = hit.course.vocab || {}; await DB.put('courses', c); }
+      }
+    }, 1200);
+  }
+  async function vocab(courseId) {
+    if (vocCache.has(courseId)) return vocCache.get(courseId);
+    const [files, course] = await Promise.all([DB.byIndex('files', 'courseId', courseId), DB.get('courses', courseId)]);
+    const map = new Map();
+    for (const f of files) for (const t of ((f.prep && f.prep.terms) || [])) {
+      const k = String(t.en || '').toLowerCase().trim();
+      if (!k || map.has(k)) continue;
+      map.set(k, { key: k, en: String(t.en), zh: t.zh || '', explain: t.explain || '', example: t.example || '', example_zh: t.example_zh || '', from: f.name });
+    }
+    const st = (course && course.vocab) || {};
+    const items = [...map.values()].map(v => {
+      const s = st[v.key];
+      return Object.assign(v, { box: s ? s.box : -1, due: s ? s.due : 0, ok: (s && s.ok) || 0, seen: (s && s.seen) || 0 });
+    });
+    const out = { course, items };
+    vocCache.set(courseId, out);
+    return out;
+  }
+  const dueItems = v => v.items.filter(i => i.due <= Date.now()).sort((a, b) => a.due - b.due);
+  const vstats = v => ({
+    total: v.items.length,
+    due: dueItems(v).length,
+    learned: v.items.filter(i => i.box >= 0).length,
+    solid: v.items.filter(i => i.box >= 3).length,
+  });
+  async function gradeWord(courseId, item, good) {
+    const v = await vocab(courseId);
+    if (!v.course) return;
+    const c = v.course;
+    c.vocab = c.vocab || {};
+    const cur = c.vocab[item.key] || { box: -1, ok: 0, seen: 0 };
+    if (good) { cur.box = Math.min(BOX.length - 1, cur.box + 1); cur.ok = (cur.ok || 0) + 1; }
+    else { cur.box = 0; cur.ok = 0; } // 忘了就从头开始，10 分钟后再考一次
+    cur.seen = (cur.seen || 0) + 1;
+    cur.due = Date.now() + (good ? BOX[cur.box] * DAY : 10 * 60e3);
+    cur.at = Date.now();
+    c.vocab[item.key] = cur;
+    item.box = cur.box; item.due = cur.due; item.seen = cur.seen; item.ok = cur.ok;
+    flushLater(c);
+  }
+  /* 走一遍今天该背的词：先英→中，再点「认识 / 不认识」 */
+  function vocabPage(el, courses, courseId) {
+    const cid = courseId || (courses[0] && courses[0].id);
+    if (!cid) { el.innerHTML = '<div class="empty"><strong>还没有课程</strong>先建一门课、生成课前包，术语会自动进生词本。</div>'; return; }
+    let idx = 0, show = false, order = [];
+    const paint = async () => {
+      const v = await vocab(cid);
+      const st = vstats(v);
+      if (!v.items.length) {
+        el.innerHTML = `<div class="empty"><strong>这门课还没有生词</strong>课前包里的术语表会自动收进生词本 —— 到「课件 → 课前包」生成一份，回来这里就有词可背了。</div>`;
+        return;
+      }
+      if (!order.length) order = dueItems(v).slice(0, 20).map(i => i.key);
+      const now = order.map(k => v.items.find(i => i.key === k)).filter(Boolean);
+      const head = `<div class="card pad vocab-top"><div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div class="grow"><b>今天要背 ${st.due} 个</b><div class="hint">总共 ${st.total} 个 · 背过 ${st.learned} · 记牢 ${st.solid}（答对 4 次以上）</div>
+        <div class="sb-bar green" style="margin-top:8px"><i style="width:${st.total ? Math.round(st.solid / st.total * 100) : 0}%"></i></div></div>
+        <div class="row"><button class="btn small ${show ? '' : 'on'}" data-mode="all">看全部 ${st.total}</button></div></div></div>`;
+      if (!now.length) {
+        el.innerHTML = head + `<div class="empty"><strong>今天的词都背完了 👍</strong>明天这个时候再来。想多背可以点上面的「看全部」。</div>`;
+        const all = $('[data-mode=all]', el); if (all) all.onclick = async () => {
+          const v2 = await vocab(cid); order = v2.items.slice().sort((a, b) => a.box - b.box).map(i => i.key); paint();
+        };
+        return;
+      }
+      idx = Math.max(0, Math.min(idx, now.length - 1));
+      const w = now[idx];
+      el.innerHTML = head + `
+        <div class="vword" id="vw">
+          <div class="vw-en"><button class="say" data-say="${esc(w.en)}" aria-label="朗读">🔊</button>${esc(w.en)}</div>
+          ${show ? `<div class="vw-zh">${esc(w.zh)}</div>${w.explain ? `<div class="vw-ex">${esc(w.explain)}</div>` : ''}${w.example ? `<div class="vw-sent"><button class="say small" data-say="${esc(w.example)}" aria-label="朗读例句">🔊</button><span>${esc(w.example)}</span><em>${esc(w.example_zh)}</em></div>` : ''}` : `<div class="hint">先自己想想它是什么意思，再翻面</div>`}
+          <div class="hint vw-src">出自：${esc(w.from || '')}</div>
+        </div>
+        <div class="row" style="justify-content:space-between;margin-top:12px">
+          <span class="hint">${idx + 1} / ${now.length}${w.box >= 0 ? ` · 第 ${w.box + 1} 档 · 下次 ${new Date(w.due).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })}` : ' · 新词'}</span>
+          <div class="row"><button class="btn small" id="vw-skip">跳过</button>${show ? `<button class="btn small danger" id="vw-no">不认识</button><button class="btn small primary" id="vw-yes">认识</button>` : `<button class="btn primary" id="vw-flip">翻面</button>`}</div>
+        </div>`;
+      $$('[data-say]', el).forEach(b => b.onclick = () => Prep.speak(b.dataset.say));
+      const flip = $('#vw-flip', el); if (flip) flip.onclick = () => { show = true; paint(); };
+      $('#vw', el).onclick = () => { if (!show) { show = true; paint(); } };
+      $('#vw-skip', el).onclick = () => { idx++; show = false; paint(); };
+      const yes = $('#vw-yes', el); if (yes) yes.onclick = async () => { await gradeWord(cid, w, true); idx++; show = false; paint(); };
+      const no = $('#vw-no', el); if (no) no.onclick = async () => { await gradeWord(cid, w, false); idx++; show = false; paint(); };
+    };
+    paint();
+  }
+
+  /* ==================== 2. 课件难度预判 ==================== */
+  async function diffFile(file, courseName) {
+    if (!Settings.load().deepseekKey) throw new Error('难度预判要用 DeepSeek，先去设置填 key');
+    if (!(file.text || '').trim()) throw new Error('这份课件还没读出文字，先识别/同步一次');
+    const job = Jobs.start('diff:' + file.id, '预判难度：' + file.name);
+    job.phase('正在读这份课件', .05, .9, { expectSec: 12 });
+    try {
+      const out = await AI.deepseekStream({
+        thinking: false, json: true, maxTokens: 1400, purpose: 'prep',
+        onText: t => job.len(t.length),
+        system: '你是商科课程助教，帮英语不好的中国留学生找出「最该先啃」的几页。只输出 JSON。',
+        user: `课程：${courseName || ''}\n课件：${file.name}\n\n判断这份课件里最难的 3 页（概念最密、公式最多、或者学生最容易听不懂的地方），以及整体难度。只输出 JSON：\n{"hardest":[{"page":12,"why":"这页为什么难（一句中文）"}],"overall":"整体难度和怎么读（一句中文）","tips":["针对这几页的读法建议（2 条）"]}\n\n<课件>\n${String(file.text).slice(0, 60000)}\n</课件>`,
+      });
+      const j = AI.parseJSON(out);
+      file.hard = {
+        pages: (j.hardest || []).slice(0, 3).map(x => ({ page: Number(x.page) || 0, why: String(x.why || '') })),
+        overall: String(j.overall || ''), tips: (j.tips || []).map(String).slice(0, 3), at: Date.now(),
+      };
+      const fresh = await DB.get('files', file.id);
+      if (fresh) { fresh.hard = file.hard; await DB.put('files', fresh); }
+      return file.hard;
+    } finally { job.done(); }
+  }
+  let diffChain = Promise.resolve();
+  /* 导入完自动排一遍（一次最多 8 份，免得一次导入 30 份课件跑半小时、花掉几块钱） */
+  function diffAuto(files, courseName) {
+    const s = Settings.load();
+    if (s.autoDiff === false || !s.deepseekKey) return 0;
+    const list = files.filter(f => !f.hard && (f.text || '').length > 1200 && f.status === 'ready').slice(0, 8);
+    for (const f of list) diffChain = diffChain.then(() => diffFile(f, courseName)).catch(() => {});
+    return list.length;
+  }
+
+  /* ==================== 3. 没听懂 → 复习清单 ==================== */
+  const TODO = note => (note.todo = note.todo || []);
+  async function confusedList(note, session, course) {
+    const cf = (session.confused || []);
+    if (!cf.length) throw new Error('这节课还没有点过「没听懂」');
+    if (!Settings.load().deepseekKey) throw new Error('要用 DeepSeek，先去设置填 key');
+    const job = Jobs.start('cf:' + session.id, '整理没听懂的地方');
+    try {
+      job.phase('正在整理你没听懂的地方', .06, .95, { expectSec: 14 });
+      const around = cf.slice(0, 8).map(c => {
+        const near = (session.segments || []).filter(g => Math.abs(g.t - c.t) < 90).map(g => `[${fmtTime(g.t)}] ${g.en}`).join('\n');
+        return `【没听懂 ${fmtTime(c.t)}】\n${near || c.near || ''}`;
+      }).join('\n\n');
+      const out = await AI.deepseekStream({
+        thinking: false, json: true, maxTokens: 3000, purpose: 'chat',
+        onText: t => job.len(t.length),
+        system: '你是耐心的商科助教，学生英语不好。把学生课上没听懂的地方整理成能照着复盘的清单。只输出 JSON。',
+        user: `课程：${course ? course.name : ''}\n课堂：${session.title}\n学生标记了 ${cf.length} 处没听懂。下面是每处前后老师说的话（语音识别可能有错）：\n\n${around}\n\n只输出 JSON：\n{"items":[{"title":"一句话：没听懂的是什么（中文，带英文术语）","explain":"用中文讲清楚（3-5 句，术语写 中文（English））","check":"复习时怎么自己验证懂了（一句）"}]}\n最多 5 条，按重要性排序。不要编老师没讲过的东西。`,
+      });
+      const j = AI.parseJSON(out);
+      const items = (j.items || []).filter(x => x && x.title).slice(0, 5).map((x, i) => ({
+        id: DB.uid('td_'), t: String(x.title), detail: String(x.explain || ''), check: String(x.check || ''),
+        done: false, at: Date.now(), from: 'confused', sessionId: session.id, i,
+      }));
+      if (!items.length) throw new Error('没整理出内容，再点一次');
+      // 同一节课重复整理时替换旧的，别堆成几十条
+      note.todo = TODO(note).filter(x => x.sessionId !== session.id).concat(items);
+      await DB.put('notes', note);
+      return items;
+    } finally { job.done(); }
+  }
+  async function todoToggle(note, id) {
+    const it = TODO(note).find(x => x.id === id); if (!it) return;
+    it.done = !it.done; it.doneAt = it.done ? Date.now() : 0;
+    await DB.put('notes', note);
+  }
+
+  /* ==================== 4. 老师亲口划的重点 ==================== */
+  function gatherMarks(sessions) {
+    const out = [];
+    for (const s of sessions) {
+      for (const h of (s.highlights || [])) out.push({ t: h.t, text: h.near || '', sid: s.id, title: s.title, kind: 'mark' });
+      for (const g of (s.segments || [])) if (g.important && !g.starred) out.push({ t: g.t, text: g.en || '', sid: s.id, title: s.title, kind: 'auto' });
+    }
+    return out.sort((a, b) => a.sid === b.sid ? a.t - b.t : a.title.localeCompare(b.title));
+  }
+  async function buildMarks(course) {
+    const sessions = await DB.byIndex('sessions', 'courseId', course.id);
+    const raw = gatherMarks(sessions);
+    if (!raw.length) throw new Error('这门课还没有标记或自动高亮的内容');
+    if (!Settings.load().deepseekKey) throw new Error('要用 DeepSeek，先去设置填 key');
+    const job = Jobs.start('marks:' + course.id, '整理考前重点：' + course.name);
+    try {
+      job.phase('正在把老师划过的地方合成一张纸', .06, .95, { expectSec: 16 });
+      const lines = raw.slice(0, 120).map((x, i) => `${i + 1}. [${x.title} ${fmtTime(x.t)}] ${String(x.text).slice(0, 260)}`).join('\n');
+      const out = await AI.deepseekStream({
+        thinking: false, json: true, maxTokens: 4000, purpose: 'recap',
+        onText: t => job.len(t.length),
+        system: '你是帮学生备考的助教。老师课上反复强调、明确说了考试/作业相关的内容，整理成考前只看这一页的清单。只输出 JSON。',
+        user: `课程：${course.name}\n下面是这个学期课堂里「我按过标记」和「系统判定为考试/作业/老师强调」的原话（语音识别可能有错字）：\n\n${lines}\n\n只输出 JSON：\n{"items":[{"title":"考点（中文 + English 术语）","why":"老师原话的意思，一句话","level":"必考/可能考/了解"}],"summary":"这门课考前最该抓的 3 件事（一句中文）"}\n合并重复的说法，按重要性排序，最多 18 条。不要编没出现过的内容。`,
+      });
+      const j = AI.parseJSON(out);
+      course.marks = {
+        items: (j.items || []).filter(x => x && x.title).slice(0, 18).map(x => ({ title: String(x.title), why: String(x.why || ''), level: String(x.level || '') })),
+        summary: String(j.summary || ''), at: Date.now(), n: raw.length,
+      };
+      await DB.put('courses', course);
+      return course.marks;
+    } finally { job.done(); }
+  }
+
+  /* ==================== 5. 录音按话题分段 ==================== */
+  async function buildTopics(session, course) {
+    if ((session.segments || []).length < 12) throw new Error('这段录音太短，不用分段');
+    if (!Settings.load().deepseekKey) throw new Error('要用 DeepSeek，先去设置填 key');
+    const job = Jobs.start('topic:' + session.id, '按话题分段');
+    try {
+      job.phase('正在听这节课讲了几个话题', .06, .95, { expectSec: 18 });
+      const lines = session.segments.slice(0, 900).map(g => `[${fmtTime(g.t)}] ${g.en}`).join('\n');
+      const out = await AI.deepseekStream({
+        thinking: false, json: true, maxTokens: 2000, purpose: 'recap',
+        onText: t => job.len(t.length),
+        system: '你是课堂录音的编辑，负责按老师换话题的位置切段落。只输出 JSON。',
+        user: `课程：${course ? course.name : ''}\n下面是一节课的转写（每行开头是时间）。老师讲到新话题的地方切开，给每段起一个 8-16 字的中文小标题。只输出 JSON：\n{"topics":[{"t":123,"title":"小标题"}]}\n第一段必须从 0 开始；每 2-6 分钟一段；最多 12 段；标题要具体（写讲的是什么内容，不要写「继续讲解」）。\n\n<转写>\n${lines}\n</转写>`,
+      });
+      const j = AI.parseJSON(out);
+      const tps = (j.topics || []).map(x => ({ t: Math.max(0, Number(x.t) || 0), title: String(x.title || '').trim() }))
+        .filter(x => x.title).sort((a, b) => a.t - b.t).slice(0, 12);
+      if (tps.length < 2) throw new Error('没能切出话题，再点一次');
+      session.topics = tps;
+      await DB.put('sessions', session);
+      return tps;
+    } finally { job.done(); }
+  }
+
+  /* ==================== 6. 复习优先级（不花钱） ==================== */
+  function priority(notes, courses) {
+    const out = [];
+    const now = Date.now();
+    for (const d of Deadlines.upcoming(10)) {
+      const days = (d.due - now) / DAY;
+      if (days > 21) continue;
+      const key = String(d.course || '');
+      const course = d.courseId ? courses.find(c => c.id === d.courseId)
+        : courses.find(c => key && (key.includes(c.code || '\u0000') || c.name.includes(key) || key.includes(shortName(c.name))));
+      const pool = notes.filter(n => (!course || n.courseId === course.id) && n.status !== 'generating');
+      const picks = pool.map(n => {
+        const p = Study.progress(n);
+        const rate = p.total ? p.done / p.total : (n.markdown ? .5 : 0);
+        return { n, rate, p };
+      }).sort((a, b) => a.rate - b.rate).slice(0, 3);
+      if (!picks.length) continue;
+      out.push({ d, course, days, picks });
+      if (out.length >= 3) break;
+    }
+    return out;
+  }
+  function week(notes) {
+    const ws = weekStart();
+    const ns = notes.filter(n => (n.createdAt || 0) >= ws && n.status !== 'generating');
+    const total = ns.reduce((a, n) => a + ((n.study && n.study.points) || []).length, 0);
+    const done = ns.reduce((a, n) => a + Study.progress(n).done, 0);
+    return { n: ns.length, total, done, rate: total ? done / total : 0 };
+  }
+
+  /* ==================== 7. 错题本 ==================== */
+  function wrongAdd(note, qi) {
+    const st = note.study || {};
+    const q = (st.quiz || [])[qi]; if (!q) return;
+    note.wrong = note.wrong || [];
+    const hit = note.wrong.find(x => x.qi === qi && x.q === q.q);
+    if (hit) { hit.at = Date.now(); hit.ok = 0; }
+    else note.wrong.push({ qi, q: q.q, at: Date.now(), ok: 0 });
+    // 一轮最多记 40 道，别把笔记撑大
+    if (note.wrong.length > 40) note.wrong = note.wrong.slice(-40);
+  }
+  function wrongList(notes, courses) {
+    const out = [];
+    for (const n of notes) for (const w of (n.wrong || [])) {
+      const q = (n.study && n.study.quiz || [])[w.qi];
+      if (!q || q.q !== w.q) continue; // 题重新生成过，对不上了就跳过
+      out.push({ q, noteId: n.id, noteTitle: n.title, courseId: n.courseId, courseName: (courses.find(c => c.id === n.courseId) || {}).name || '', n2: w.ok || 0, qi: w.qi });
+    }
+    return out.sort((a, b) => b.n2 - a.n2);
+  }
+  /* 答完一题就写库：答对累计两次自动出本，答错就进本 */
+  async function wrongHit(noteId, qi, good) {
+    const note = await DB.get('notes', noteId); if (!note) return;
+    if (good) {
+      const w = (note.wrong || []).find(x => x.qi === qi);
+      if (w) { w.ok = (w.ok || 0) + 1; if (w.ok >= 2) note.wrong = note.wrong.filter(x => x !== w); }
+    } else wrongAdd(note, qi);
+    await DB.put('notes', note);
+  }
+  async function wrongResolve(noteId, qi, good) {
+    const note = await DB.get('notes', noteId); if (!note) return;
+    const w = (note.wrong || []).find(x => x.qi === qi); if (!w) return;
+    if (good) w.ok = (w.ok || 0) + 1; else w.ok = 0;
+    if (w.ok >= 2) note.wrong = note.wrong.filter(x => x.qi !== qi); // 连对两次就出本
+    await DB.put('notes', note);
+  }
+
+  /* ==================== 8. 加权模考 ==================== */
+  /* 每份笔记（≈ 一个 topic）一个权重，题目按权重分，而不是平均抽 */
+  function pickWeighted(pools, total) {
+    const sum = pools.reduce((a, p) => a + p.weight, 0) || 1;
+    const bag = [], seen = new Set();
+    const push = (q, w) => {
+      const k = String(q.q || '').replace(/\s/g, '');
+      if (seen.has(k)) return; // 两节课里出过同一题只算一次
+      seen.add(k); bag.push(Object.assign({}, q, { _w: w }));
+    };
+    pools.forEach(p => {
+      const want = Math.max(1, Math.round(total * p.weight / sum));
+      p.qs.slice().sort(() => Math.random() - .5).slice(0, Math.min(want, p.qs.length)).forEach(q => push(q, p.weight));
+    });
+    // 还不够题数就从所有题里补（还是去重）
+    if (bag.length < total) pools.forEach(p => p.qs.slice().sort(() => Math.random() - .5).forEach(q => { if (bag.length < total) push(q, p.weight); }));
+    return bag.sort(() => Math.random() - .5).slice(0, total);
+  }
+  async function paperFor(course, cfg) {
+    const notes = (await DB.byIndex('notes', 'courseId', course.id)).filter(n => n.study && (n.study.quiz || []).length);
+    const pools = notes.map(n => ({
+      note: n,
+      weight: Math.max(0, Number((cfg.weights || {})[n.id] ?? 1)),
+      qs: n.study.quiz.map((q, qi) => Object.assign({}, q, { noteId: n.id, noteTitle: n.title, courseId: course.id, qi })),
+    })).filter(p => p.weight > 0 && p.qs.length);
+    if (!pools.length) throw new Error('这门课还没有笔记生成过测验题（先去笔记里出一次测验）');
+    const qs = pickWeighted(pools, Math.max(5, Math.min(60, cfg.count || 20)));
+    return { qs, pools };
+  }
+
+  /* ==================== 9. 打包给别的 AI ==================== */
+  function packPrompt(note, course, opts = {}) {
+    const st = note.study || {};
+    const parts = [];
+    parts.push(`你是我的学习助教。下面是「${course ? course.name : '这门课'}」的课堂笔记资料，请基于它帮我${opts.task || '查漏补缺、出几道题考我'}。用中文回答，专业术语写成 中文（English）。`);
+    if (opts.note !== false && note.markdown) parts.push(`\n## 笔记\n${note.markdown.slice(0, 14000)}`);
+    if (opts.points !== false && (st.points || []).length) parts.push(`\n## 知识点（已掌握用 ✓）\n${st.points.map(p => `${(note.mastered || {})[p.id] ? '✓' : '·'} ${p.title}`).join('\n')}`);
+    if (opts.wrong !== false && (note.wrong || []).length) {
+      const w = (note.wrong || []).map(x => `- ${x.q}`).slice(0, 20);
+      parts.push(`\n## 我做错过的题\n${w.join('\n')}`);
+    }
+    const td = (note.todo || []).filter(x => !x.done);
+    if (opts.todo !== false && td.length) parts.push(`\n## 我还没搞懂的\n${td.map(x => `- ${x.t}`).join('\n')}`);
+    parts.push('\n请先指出我最该补的 3 个地方，再给我讲解和练习。');
+    return parts.join('\n');
+  }
+
+  /* ==================== 通用：一题一题的做题器（错题本 / 模考共用） ==================== */
+  function runPaper(course, qs, minutes, opts = {}) {
+    const ans = new Array(qs.length).fill(null), L = 'ABCDEF';
+    const end = minutes ? Date.now() + minutes * 60e3 : 0;
+    const title = opts.title || '模拟考试';
+    const onWrong = opts.onWrong || (() => {});
+    const onRight = opts.onRight || (() => {});
+    view.innerHTML = `<div class="head"><div><h1>${esc(title)}${course ? ' · ' + esc(course.name) : ''}</h1><div class="meta">${qs.length} 题${minutes ? ` · 限时 ${minutes} 分钟` : ' · 不限时'}${opts.meta ? ' · ' + esc(opts.meta) : ''}</div></div>
+      <div class="row">${minutes ? '<span class="clock" id="ex-clock"></span>' : ''}<button class="btn primary" id="ex-submit">交卷</button></div></div>
+      <div class="exam">${qs.map((q, i) => `<div class="card pad quiz" data-i="${i}"><div class="qq">${i + 1}. ${esc(q.q)} ${q.noteTitle ? `<span class="hint">· ${esc(q.noteTitle)}</span>` : ''}</div><div class="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}"><b>${L[k]}</b><span>${esc(o)}</span></button>`).join('')}</div></div>`).join('')}</div>`;
+    $$('.exam .quiz').forEach(c => $$('.opt', c).forEach(b => b.onclick = () => { ans[Number(c.dataset.i)] = Number(b.dataset.k); $$('.opt', c).forEach(x => x.classList.toggle('sel', x === b)); }));
+    let tick = null;
+    const submit = () => {
+      if (tick) clearInterval(tick);
+      const score = qs.filter((q, i) => ans[i] === q.answer).length;
+      const byNote = new Map();
+      qs.forEach((q, i) => {
+        const k = q.noteTitle || '其他';
+        const b = byNote.get(k) || { n: 0, ok: 0 };
+        b.n++; if (ans[i] === q.answer) b.ok++;
+        byNote.set(k, b);
+        if (q.noteId && q.qi != null) (ans[i] === q.answer ? onRight : onWrong)(q);
+      });
+      view.innerHTML = `<div class="head"><div><h1>成绩：${score} / ${qs.length}</h1><div class="meta">${Math.round(score / qs.length * 100)} 分 · 错题下面有解析${opts.back ? '' : ''}</div></div><div class="row"><a class="btn" href="#review">回复习</a></div></div>
+        ${byNote.size > 1 ? `<div class="card pad"><b>按 topic 看</b><div class="mk-rows">${[...byNote.entries()].map(([k, b]) => `<div class="mk-row"><span class="grow">${esc(k)}</span><span class="sb-bar green mk-bar"><i style="width:${Math.round(b.ok / b.n * 100)}%"></i></span><span class="hint">${b.ok}/${b.n}</span></div>`).join('')}</div></div>` : ''}
+        <div class="exam">${qs.map((q, i) => `<div class="card pad quiz"><div class="qq">${i + 1}. ${esc(q.q)}</div><div class="opts">${q.options.map((o, k) => `<div class="opt ${k === q.answer ? 'right' : k === ans[i] ? 'wrong' : ''}"><b>${L[k]}</b><span>${esc(o)}</span></div>`).join('')}</div>
+          <div class="explain ${ans[i] === q.answer ? 'ok' : 'bad'}"><b>${ans[i] === q.answer ? '对' : ans[i] === null ? '没答' : '错'}</b> · ${esc(q.explain || '')} ${q.noteId ? `<a href="#note-${q.noteId}~points">（${esc(q.noteTitle)}）</a>` : ''}</div></div>`).join('')}</div>`;
+      window.scrollTo(0, 0);
+    };
+    if (minutes) tick = setInterval(() => { const c = $('#ex-clock'); if (!c) { clearInterval(tick); return; } const left = Math.max(0, end - Date.now()); c.textContent = fmtTime(left / 1000); if (!left) submit(); }, 500);
+    $('#ex-submit').onclick = () => { const blank = ans.filter(a => a === null).length; if (blank && !$('#ex-submit').dataset.armed) { $('#ex-submit').dataset.armed = 1; $('#ex-submit').textContent = `还有 ${blank} 题没答，再点交卷`; return; } submit(); };
+  }
+
+  return {
+    vocab, vocabPage, gradeWord, dueItems, vstats,
+    diffFile, diffAuto,
+    confusedList, todoToggle, TODO,
+    gatherMarks, buildMarks,
+    buildTopics,
+    priority, week,
+    wrongAdd, wrongList, wrongResolve, wrongHit,
+    paperFor, pickWeighted, runPaper,
+    packPrompt, DAY, weekStart,
+  };
+})();

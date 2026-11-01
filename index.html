@@ -13,9 +13,103 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="styles.css?v=11011003">
+<script>
+/* 外观：跟随系统 / 浅色 / 深色。在样式表之前定下来，打开时不会先闪一下白 */
+(function () {
+  var t = 'auto'; try { t = (JSON.parse(localStorage.getItem('tingkeben.settings') || '{}').theme) || 'auto'; } catch (e) {}
+  var m = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : { matches: false };
+  function ap() {
+    var d = t === 'dark' || (t === 'auto' && m.matches);
+    document.documentElement.dataset.theme = d ? 'dark' : 'light';
+    var mc = document.querySelector('meta[name=theme-color]'); if (mc) mc.content = d ? '#0E1220' : '#2C47A5';
+    try { document.dispatchEvent(new CustomEvent('tk-theme', { detail: d ? 'dark' : 'light' })); } catch (e) {}
+  }
+  ap();
+  if (m.addEventListener) m.addEventListener('change', ap);
+  window.__tkTheme = function (v) { t = v || 'auto'; ap(); };
+})();
+</script>
+<link rel="stylesheet" href="styles.css?v=11011019">
 </head>
 <body>
+<!-- 开屏（2026-11-01 v3）：深色电影感 + 终端开机。ASCII 字标从乱码「解码」成型、扫光，下面逐行跑自检。
+     点一下 / 按任意键可以跳过；JS 没跑起来也会在 4 秒后自己退场；系统「减弱动态效果」时只静态显示。 -->
+<div id="splash" aria-hidden="true">
+  <canvas class="sp-field" id="sp-field"></canvas>
+  <div class="sp-vignette"></div>
+  <div class="sp-stage">
+    <div class="sp-mark"><span class="sp-orbit"></span><img src="icon-192.png" alt=""></div>
+    <pre class="sp-ascii" id="sp-ascii" data-art="████████╗██╗███╗   ██╗ ██████╗ ██╗  ██╗███████╗██████╗ ███████╗███╗   ██╗\n╚══██╔══╝██║████╗  ██║██╔════╝ ██║ ██╔╝██╔════╝██╔══██╗██╔════╝████╗  ██║\n   ██║   ██║██╔██╗ ██║██║  ███╗█████╔╝ █████╗  ██████╔╝█████╗  ██╔██╗ ██║\n   ██║   ██║██║╚██╗██║██║   ██║██╔═██╗ ██╔══╝  ██╔══██╗██╔══╝  ██║╚██╗██║\n   ██║   ██║██║ ╚████║╚██████╔╝██║  ██╗███████╗██████╔╝███████╗██║ ╚████║\n   ╚═╝   ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═══╝"></pre>
+    <div class="sp-name"><b>听课本</b><span class="sp-ver" id="sp-ver"></span></div>
+    <div class="sp-sub">COURSEWARE · NOTES · INK · AUDIO</div>
+    <div class="sp-term">
+      <div class="sp-prompt"><span class="sp-ps">yuenkit@tingkeben</span><span class="sp-path">~</span><span class="sp-cmd" id="sp-cmd"></span><i class="sp-caret"></i></div>
+      <ul class="sp-checks" id="sp-checks" aria-live="polite"></ul>
+    </div>
+    <div class="sp-bar"><i id="sp-prog"></i></div>
+    <div class="sp-credit">crafted by <b>yuenkit</b> · 个人使用</div>
+  </div>
+  <div class="sp-skip">点击任意处跳过</div>
+</div>
+<script>
+/* 开屏动画：放在页面最前面，主程序还在加载时就开始播 */
+(function () {
+  var sp = document.getElementById('splash'); if (!sp) return;
+  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var pre = document.getElementById('sp-ascii'), art = pre.getAttribute('data-art').replace(/\\n/g, '\n');
+  var v = (document.querySelector('link[href*="styles.css?v="]') || {}).href || '';
+  var ver = (v.match(/v=(\d+)/) || [])[1] || '';
+  var vEl = document.getElementById('sp-ver'); if (vEl && ver) vEl.textContent = 'build ' + ver;
+  // 1. ASCII 字标：从左到右一列列「解码」
+  var GL = '01<>/\\|=+*#%@$&░▒▓';
+  var cols = art.split('\n')[0].length, t0 = performance.now(), DUR = reduce ? 0 : 900;
+  function frame(now) {
+    var k = DUR ? Math.min(1, (now - t0) / DUR) : 1, edge = k * (cols + 14), out = '';
+    var rows = art.split('\n');
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r], line = '';
+      for (var c = 0; c < row.length; c++) {
+        var ch = row[c];
+        if (ch === ' ') { line += ' '; continue; }
+        if (c < edge - 14) line += ch;
+        else if (c < edge) line += GL[(Math.random() * GL.length) | 0];
+        else line += ' ';
+      }
+      out += line + (r < rows.length - 1 ? '\n' : '');
+    }
+    pre.textContent = out;
+    if (k < 1) requestAnimationFrame(frame); else { pre.textContent = art; pre.classList.add('lit'); }
+  }
+  requestAnimationFrame(frame);
+  // 2. 终端里打一行命令
+  var cmd = './tingkeben --boot', cEl = document.getElementById('sp-cmd'), i = 0;
+  (function type() { if (!cEl) return; cEl.textContent = cmd.slice(0, ++i); if (i < cmd.length) setTimeout(type, reduce ? 0 : 26); })();
+  // 3. 背景：往中心汇聚的光点（很少的点，不费电）
+  var cv = document.getElementById('sp-field');
+  if (cv && !reduce) {
+    var ctx = cv.getContext('2d'), dpr = Math.min(2, devicePixelRatio || 1), W, H, P = [];
+    var size = function () { W = cv.width = innerWidth * dpr; H = cv.height = innerHeight * dpr; };
+    size(); addEventListener('resize', size);
+    for (var n = 0; n < 90; n++) P.push({ a: Math.random() * 6.283, r: Math.random(), s: .002 + Math.random() * .006, z: Math.random() });
+    (function tick() {
+      if (!sp.isConnected || sp.classList.contains('out')) return;
+      ctx.clearRect(0, 0, W, H);
+      var cx = W / 2, cy = H * .42, R = Math.hypot(W, H) * .55;
+      for (var j = 0; j < P.length; j++) {
+        var p = P[j]; p.r -= p.s; if (p.r < .02) { p.r = 1; p.a = Math.random() * 6.283; }
+        var x = cx + Math.cos(p.a) * p.r * R, y = cy + Math.sin(p.a) * p.r * R * .7;
+        var al = Math.min(1, (1 - p.r) * 1.6) * (.25 + p.z * .55);
+        ctx.fillStyle = 'rgba(' + (p.z > .7 ? '255,214,120' : '125,170,255') + ',' + al + ')';
+        ctx.fillRect(x, y, (1 + p.z * 1.6) * dpr, (1 + p.z * 1.6) * dpr);
+      }
+      requestAnimationFrame(tick);
+    })();
+  }
+  // 点一下 / 按键跳过
+  var skip = function () { window.__tkSplashSkip = true; if (window.exitSplash) window.exitSplash(0); else { sp.classList.add('out'); setTimeout(function () { sp.remove(); }, 600); } };
+  sp.addEventListener('pointerdown', skip); addEventListener('keydown', function k() { removeEventListener('keydown', k); if (document.getElementById('splash')) skip(); });
+})();
+</script>
 <div class="app">
   <aside class="side" id="side">
     <div class="brand"><img src="icon-192.png" alt=""><span class="lbl">听课本</span><button class="side-tog" id="side-tog" aria-label="收起或展开侧边栏" title="收起 / 展开侧边栏"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button></div>
@@ -35,15 +129,15 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="device.js?v=11011003"></script>
-<script src="db.js?v=11011003"></script>
-<script src="sync.js?v=11011003"></script>
-<script src="extract.js?v=11011003"></script>
-<script src="ai.js?v=11011003"></script>
-<script src="live.js?v=11011003"></script>
-<script src="study.js?v=11011003"></script>
-<script src="schedule.js?v=11011003"></script>
-<script src="app.js?v=11011003"></script>
+<script src="device.js?v=11011019"></script>
+<script src="db.js?v=11011019"></script>
+<script src="sync.js?v=11011019"></script>
+<script src="extract.js?v=11011019"></script>
+<script src="ai.js?v=11011019"></script>
+<script src="live.js?v=11011019"></script>
+<script src="study.js?v=11011019"></script>
+<script src="schedule.js?v=11011019"></script>
+<script src="app.js?v=11011019"></script>
 <script>
 /* 离线缓存：断网 / 教室 WiFi 很差时也能打开。见 sw.js */
 if ('serviceWorker' in navigator) {

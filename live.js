@@ -29,6 +29,9 @@ class PCM16 extends AudioWorkletProcessor {
 registerProcessor('pcm16', PCM16);
 `;
 
+/* 只录英文：录音的唯一用途是课后整理笔记，实时中文翻译用别的软件就够了 */
+function liveEnglishOnly() { try { return Settings.load().liveEnglishOnly !== false; } catch (e) { return true; } }
+
 class AudioCapture {
   constructor(onChunk) { this.onChunk = onChunk; }
   async start() {
@@ -227,9 +230,12 @@ class LiveSession {
         this.seedGlossary = {}; terms.slice(0, 60).forEach(t => { this.seedGlossary[t.en] = t.zh; });
       }
     }
+    // 同一门课同一天录第二段时，标题带上时间，列表里一眼能分清
+    const hm = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    const today = new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
     this.record = {
       id: DB.uid('s_'), courseId: this.course ? this.course.id : null,
-      title: `${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} 课堂录音`,
+      title: `${today} ${hm} 课堂录音`,
       startedAt: Date.now(), duration: 0, segments: [], highlights: [], confused: [], glossary: {}, hasAudio: s.saveAudio,
     };
     if (this.seedGlossary) Object.assign(this.glossary, this.seedGlossary);
@@ -244,12 +250,15 @@ class LiveSession {
     this.capture = new AudioCapture((pcm, rms) => {
       this.transcriber.sendAudio(pcm);
       this.onLevel && this.onLevel(rms);
+      // 声音够响就算「在说话」，用来判断老师有没有停顿（只录英文时按停顿断句）
+      if (rms > 0.008) { this.lastLoudAt = Date.now(); this.heard(); }
       if (s.saveAudio) { this.audioChunks.push(pcm); if (this.audioChunks.length >= 600) this.flushAudio(); }
     });
     await this.capture.start();
     this.transcriber.start();
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch (e) { /* 不支持就算了 */ }
     this.watchQuiet();
+    this.watchSegments();
     await DB.put('sessions', this.record);
   }
   elapsed() { return Math.round((Date.now() - this.t0) / 1000); }
@@ -272,6 +281,56 @@ class LiveSession {
     }, 30000);
   }
   heard() { this.lastVoiceAt = Date.now(); this.quietWarned = false; }
+
+  /* ---------- 只录英文时的自然断句 ----------
+     以前为了尽快翻译，草稿攒到十几个词就急着切，切口经常落在词组中间（"because the" / "which is"）。
+     现在录音只用来整理笔记，不需要抢时间，所以改成按「说话人真的停了」来断：
+       · 音量掉下去 0.7 秒 = 老师停顿 → 在停顿处（优先逗号后）收一句
+       · 定稿（Gemini 在停顿后给的 final）自带标点 → 直接在 . ? ! 处切
+       · 一直不停口：讲满 14 秒、攒够 26 个词才在逗号处切一段，不硬切
+     翻译模式（关掉「只录英文」）还是走原来的快速切分。 */
+  watchSegments() {
+    clearInterval(this.segTimer);
+    this.lastLoudAt = Date.now();
+    this.segTimer = setInterval(() => {
+      if (this.stopped) { clearInterval(this.segTimer); return; }
+      if (!liveEnglishOnly() || !this.turn) return;
+      const pending = splitWords(this.turn.text).length - this.turn.committed;
+      if (pending < 3) return;
+      const quietFor = Date.now() - (this.lastLoudAt || 0);
+      if (quietFor >= 700) { this.cutNatural('pause'); this.showDraft(); return; }
+      if (pending >= 26 && Date.now() - (this.turn.startAt || Date.now()) > 14000) { this.cutNatural('long'); this.showDraft(); }
+    }, 200);
+  }
+  /* 定稿里自带标点：按句子切开，碎句并到前一句 */
+  commitSentenceWords(words) {
+    const parts = [];
+    let cur = [];
+    for (const w of words) {
+      cur.push(w);
+      if (/[.?!]["')\]]?$/.test(w) && cur.length >= 3) { parts.push(cur); cur = []; }
+    }
+    if (cur.length) parts.push(cur);
+    if (parts.length > 1 && parts[parts.length - 1].length < 4) parts[parts.length - 2] = parts[parts.length - 2].concat(parts.pop());
+    for (const part of parts) this.commitWords(part);
+  }
+  cutNatural(reason) {
+    if (!this.turn) return;
+    const rest = splitWords(this.turn.text).slice(this.turn.committed);
+    if (!rest.length) return;
+    if (reason === 'force') { this.commitSentenceWords(rest); return; }
+    if (rest.length < 3) return;
+    let cut = rest.length - 1;
+    if (reason === 'pause') {
+      // 停顿前最后几个词里挑一个逗号收尾，句子更像人说的
+      for (let k = rest.length - 1; k >= Math.max(2, rest.length - 7); k--) if (/[,;:]$/.test(rest[k])) { cut = k; break; }
+    } else {
+      // 讲了很久没停：切在整句中间偏后的逗号处
+      cut = Math.min(rest.length - 1, Math.max(8, Math.round(rest.length * .7)));
+      for (let k = cut; k >= 6; k--) if (/[,;:]$/.test(rest[k])) { cut = k; break; }
+    }
+    this.commitWords(rest.slice(0, cut + 1));
+  }
   /* Gemini 实时转写的规律（实测）：讲者不停顿时，只有一份一直变长的“草稿”(interim)，
      要等讲者停下来才给一次“定稿”(final)，一段可能长达一分钟。
      所以直接从草稿里切句子：一句话后面已经接着说了几个词，这句就不会再变了，马上拿去翻译。 */
@@ -283,9 +342,15 @@ class LiveSession {
     if (this.turn && !sameStart(this.turn.text, t)) { this.commitWords(splitWords(this.turn.text).slice(this.turn.committed)); this.turn = null; }
     if (!this.turn) this.turn = { text: '', committed: 0, tail: [], pendingSince: Date.now() };
     this.turn.text = t;
-    this.cutSentences(false);
+    if (this.turn.startAt == null) this.turn.startAt = Date.now();
     this.showDraft();
     clearTimeout(this.stableTimer);
+    if (liveEnglishOnly()) {
+      // 草稿只是因为停顿才停下来的（1.4 秒没再变长），这时候收一句最自然
+      this.stableTimer = setTimeout(() => { if (this.turn) { this.cutNatural('pause'); this.showDraft(); } }, 1400);
+      return;
+    }
+    this.cutSentences(false);
     // 讲者停顿了一会儿：剩下的半句也先翻
     this.stableTimer = setTimeout(() => { if (this.turn) { this.cutSentences(true); this.showDraft(); } }, 800);
   }
@@ -328,10 +393,12 @@ class LiveSession {
     const text = ws.join(' ').trim();
     if (!text || !/[a-z0-9]/i.test(text)) return;
     const seg = { id: DB.uid('g_'), t: Math.max(0, this.elapsed() - Math.round(ws.length * 0.35) - 1), en: text, zh: '', status: 'pending', important: EMPHASIS.test(text) };
+    this.draftVer = (this.draftVer || 0) + 1; this.draftZh = ''; this.draftFor = '';
+    // 只录英文：这句直接算完成，不排队翻译、不花任何额度
+    if (liveEnglishOnly()) { seg.status = 'done'; this.segments.push(seg); this.emit(); return; }
     // 草稿基本就是这一句的话，先把草稿中文挂上，正式翻译出来前不会空白
     const dw = splitWords(this.draftFor || '').length;
     if (this.draftZh && dw && ws.length >= dw * 0.75 && ws.length <= dw * 1.6) seg.zhDraft = this.draftZh;
-    this.draftVer = (this.draftVer || 0) + 1; this.draftZh = ''; this.draftFor = '';
     this.segments.push(seg);
     seg.queuedAt = Date.now();
     this.tq.push(seg);
@@ -353,7 +420,8 @@ class LiveSession {
         if (tail.every((w, k) => norm[i + k] === w)) { start = i + tail.length; break; }
       }
     }
-    this.commitWords(words.slice(start));
+    if (liveEnglishOnly()) this.commitSentenceWords(words.slice(start));
+    else this.commitWords(words.slice(start));
     this.turn = null;
     this.showDraft();
   }
@@ -366,6 +434,7 @@ class LiveSession {
   }
   paintDraft() { this.onInterim && this.onInterim({ en: this.draftEn || '', zh: this.draftZh || '' }); }
   draftOn() {
+    if (liveEnglishOnly()) return false;
     const s = Settings.load(), mode = s.draftMode || 'free';
     if (mode === 'off') return false;
     if (mode === 'free') return AI.localReady();
@@ -393,9 +462,11 @@ class LiveSession {
     if (this.draftEn && this.draftEn !== this.draftFor) this.kickDraft();
   }
   flushBuffer() {
-    // 停止录音时：草稿里剩下的也翻掉
+    // 停止录音时：草稿里剩下的也收掉
     clearTimeout(this.stableTimer);
-    if (this.turn) { this.cutSentences(true); this.turn = null; }
+    if (!this.turn) return;
+    if (liveEnglishOnly()) this.cutNatural('force'); else this.cutSentences(true);
+    this.turn = null;
   }
   /* 翻译节奏：两次请求之间至少隔 gap 毫秒（免费版默认 6 秒 ≈ 每分钟 10 次），
      等待期间新来的句子合并进同一次请求；遇到 429 自动放慢。 */
@@ -467,6 +538,7 @@ class LiveSession {
   async retry(segId) {
     const seg = this.segments.find(s => s.id === segId);
     if (!seg) return;
+    if (liveEnglishOnly()) { seg.status = 'done'; seg.zh = ''; this.emit(); return; }
     seg.status = 'pending'; seg.queuedAt = 0; this.tq.push(seg); this.emit(); this.pump();
   }
   /* 没听懂：记下时间和前后几句，课后让 AI 用中文重讲 */
@@ -504,7 +576,7 @@ class LiveSession {
     await DB.put('audio', { id: this.record.id + '_' + String(this.audioIdx).padStart(4, '0'), sessionId: this.record.id, idx: this.audioIdx++, blob });
   }
   async stop() {
-    this.stopped = true; clearTimeout(this.draftTimer); clearInterval(this.quietTimer);
+    this.stopped = true; clearTimeout(this.draftTimer); clearInterval(this.quietTimer); clearInterval(this.segTimer);
     this.capture && this.capture.stop();
     await (this.transcriber && this.transcriber.stop());
     this.flushBuffer();

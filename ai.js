@@ -189,7 +189,7 @@ const AI = (() => {
     { id: 'cerebras', label: 'Cerebras', keyField: 'cerebrasKey', modelField: 'cerebrasModel', defModel: 'llama-3.3-70b', kind: 'openai', base: 'https://api.cerebras.ai/v1', rpm: 30, rpd: 14400, tpm: 60000, signup: 'https://cloud.cerebras.ai', note: '没申请到也没关系，会自动跳过' },
     { id: 'mistral', label: 'Mistral', keyField: 'mistralKey', modelField: 'mistralModel', defModel: 'mistral-small-latest', kind: 'openai', base: 'https://api.mistral.ai/v1', rpm: 50, rpd: 50000, tpm: 500000, signup: 'https://console.mistral.ai/api-keys', note: '免费档要同意数据用于训练' },
     { id: 'gemini4', label: 'Gemini 3.6 Flash', keyField: 'geminiKey', modelField: 'gmPool4', defModel: 'gemini-3.6-flash', kind: 'gemini', rpm: 5, rpd: 20, tpm: 250000, shareKey: 'Gemini', note: '翻得好但每天只有 20 次，放最后' },
-    { id: 'deepseek', label: 'DeepSeek（付费）', keyField: 'deepseekKey', modelField: 'deepseekModel', defModel: 'deepseek-flash', kind: 'openai', base: DEEPSEEK, rpm: 300, rpd: 1e9, tpm: 1e9, paid: true, extra: { thinking: { type: 'disabled' } }, note: '每小时约 ¥0.5–1' },
+    { id: 'deepseek', label: 'DeepSeek（付费）', keyField: 'deepseekKey', modelField: 'deepseekModel', defModel: 'deepseek-flash', kind: 'openai', base: DEEPSEEK, rpm: 300, rpd: 1e9, tpm: 1e9, paid: true, extra: { thinking: { type: 'disabled' } }, note: '' },
   ];
   const USAGE_KEY = 'tingkeben.usage';
   const recent = {}, recentTok = {}, cooldown = {};
@@ -365,7 +365,7 @@ const AI = (() => {
   const localReady = () => !!localT;
 
   /* 草稿翻译：句子还没说完就先翻已经说出来的部分（灰色字幕）
-     免费模式用 Chrome 内置翻译；DeepSeek 模式更准但每小时多花 ¥1–2 */
+     免费模式用 Chrome 内置翻译；DeepSeek 模式更准 */
   async function translateDraft(opts) {
     const mode = Settings.load().draftMode || 'free';
     if (mode === 'free') {
@@ -502,20 +502,19 @@ ${extra ? '学生的额外要求：' + extra : ''}
 以下是材料：${material}`;
   }
 
-  /* ---------- 学习工具：重点 / 记忆卡片 / 测验（一次生成，JSON） ---------- */
+  /* ---------- 学习工具：重点 / 测验（一次生成，JSON） ---------- */
   const STUDY_SYSTEM = `你是给英语不好的中国留学生（Monash 马来西亚分校商科 Diploma）做复习材料的助教。只根据给你的笔记和课件出题，不要编材料里没有的内容。
 中英分开：用简体中文写，专业术语写成「中文（English）」，英文原词放在括号里。考试是英文的，所以测验题题干后面附上关键英文原词。
 只输出一个 JSON 对象，不要任何多余文字。`;
-  /* parts：要哪几样，['points','cards','quiz'] 的任意组合，只出要的那几样，省 token */
+  /* parts：要哪几样，['points','quiz'] 的组合，只出要的那几样，省 token */
   const STUDY_PARTS = {
     points: { name: '重点知识点', schema: '"points": [ { "id": "p1", "title": "知识点名称，写成 中文（English）", "items": ["要点 1：一句中文，术语写成 中文（English）", "要点 2", "要点 3"], "page": "来源页码，比如 第5页；不知道就空字符串" } ]', rule: '- points 6-12 个知识点，每个 2-4 条要点（短句，能直接背），覆盖整份材料最重要、最可能考的内容，按学习顺序排。' },
-    cards: { name: '记忆卡片', schema: '"cards": [ { "q": "正面：一个问题（中文，可带英文术语）", "a": "背面：简短答案（1-3 句）", "point": "对应的知识点 id" } ]', rule: '- cards 15-25 张，定义、公式、区别、例子都要有；计算类写成「已知…求…」。' },
     quiz: { name: '测验题', schema: '"quiz": [ { "type": "single", "q": "题目", "options": ["A 选项","B 选项","C 选项","D 选项"], "answer": 0, "explain": "为什么对、其他为什么错（2-3 句）", "point": "知识点 id" } ]', rule: '- quiz 10-15 道单选题，四个选项，干扰项要像真的；至少 1/3 是计算或情景应用题（如果材料有计算）。answer 是正确选项的下标（0-3），正确答案的位置要打乱，别总是同一个。\n- options 里不要写 A. B. 这样的字母前缀；explain 里也不要用字母指代选项，直接说内容（选项顺序会被打乱）。' },
   };
-  function studyPrompt({ title, markdown, sources, parts = ['points', 'cards', 'quiz'], points: known }) {
+  function studyPrompt({ title, markdown, sources, parts = ['points', 'quiz'], points: known }) {
     const want = Object.keys(STUDY_PARTS).filter(k => parts.includes(k));
     const linkable = want.includes('points') || (known && known.length);
-    const pointRule = (want.includes('cards') || want.includes('quiz'))
+    const pointRule = want.includes('quiz')
       ? (linkable ? '- 每张卡片、每道题都必须填 point，指向一个知识点 id。' : '- 没有知识点列表，point 填空字符串。') : '';
     return `给这份材料生成复习材料，只要：${want.map(k => STUDY_PARTS[k].name).join('、')}。JSON 格式：
 {
@@ -529,10 +528,10 @@ ${!want.includes('points') && known && known.length ? `\n已有的知识点（po
 ${markdown ? `\n<笔记>\n${markdown}\n</笔记>` : ''}
 ${sources ? `\n<课件原文${markdown ? '（节选）' : ''}>\n${sources}\n</课件原文>` : ''}`;
   }
-  async function studyPack({ title, markdown, sources, signal, onText, parts = ['points', 'cards', 'quiz'], points: known }) {
+  async function studyPack({ title, markdown, sources, signal, onText, parts = ['points', 'quiz'], points: known }) {
     let j;
     const want = Object.keys(STUDY_PARTS).filter(k => parts.includes(k));
-    const maxTokens = 2000 + want.reduce((n, k) => n + ({ points: 4500, cards: 4500, quiz: 6000 })[k], 0);
+    const maxTokens = 2000 + want.reduce((n, k) => n + ({ points: 4500, quiz: 6000 })[k], 0);
     for (let attempt = 0; ; attempt++) {
       const text = await deepseekStream({ system: STUDY_SYSTEM, user: studyPrompt({ title, markdown, sources, parts: want, points: known }), signal, onText, thinking: false, json: true, maxTokens, purpose: 'study' });
       try { j = parseJSON(text); break; } catch (e) { if (attempt >= 1) throw e; } // 偶尔格式坏掉，自动再来一次
@@ -542,7 +541,6 @@ ${sources ? `\n<课件原文${markdown ? '（节选）' : ''}>\n${sources}\n</�
     if (want.includes('points')) points = out.points = (j.points || []).filter(p => p && p.title).map((p, i) => ({ id: String(p.id || 'p' + (i + 1)), title: String(p.title), items: (Array.isArray(p.items) ? p.items : [p.detail]).filter(Boolean).map(String), page: String(p.page || '') }));
     const ids = new Set(points.map(p => p.id));
     const fix = id => ids.has(String(id)) ? String(id) : '';
-    if (want.includes('cards')) out.cards = (j.cards || []).filter(c => c && c.q && c.a).map(c => ({ q: String(c.q), a: String(c.a), point: fix(c.point) }));
     if (want.includes('quiz')) out.quiz = (j.quiz || []).filter(q => q && q.q && Array.isArray(q.options) && q.options.length >= 2).map(q => {
       // 打乱选项顺序（模型爱把正确答案放在 B）；去掉选项开头自带的 "A." 之类
       const ans = Math.max(0, Math.min(q.options.length - 1, Number(q.answer) || 0));
@@ -569,9 +567,9 @@ ${sources ? `\n<课件原文${markdown ? '（节选）' : ''}>\n${sources}\n</�
     "hard": [ "上课可能听不懂的地方（一句话说明，并告诉学生听到哪个英文词时要注意）" ],
     "listen_for": [ "老师可能会说的英文关键句或短语" ]
   },
-  "terms": [ { "en": "英文术语（课件原词）", "zh": "中文", "explain": "一句中文解释", "example": "一个简短英文例句（课堂/商业场景）", "example_zh": "例句中文" } ]
+  "terms": [ { "en": "英文术语（课件原词）", "ipa": "英式音标，例如 /əˈkruːəl/", "zh": "中文", "explain": "一句中文解释", "example": "一个简短英文例句（课堂/商业场景）", "example_zh": "例句中文" } ]
 }
-要求：concepts 正好 3 个；hard 2-4 条；listen_for 3-5 条；terms 15-35 个，按课件出现顺序，只收专业词和学生可能不认识的学术词，不收 the/and 这类常用词。
+要求：concepts 正好 3 个；hard 2-4 条；listen_for 3-5 条；terms 15-35 个，按课件出现顺序，只收专业词和学生可能不认识的学术词，不收 the/and 这类常用词。ipa 用英式（RP），写成 /.../ 结尾，不确定就留空字符串，不要编。
 
 <课件>
 ${String(text).slice(0, 60000)}
@@ -584,9 +582,23 @@ ${String(text).slice(0, 60000)}
     const pv = j.preview || {};
     return {
       preview: { summary: String(pv.summary || ''), concepts: (pv.concepts || []).slice(0, 4).map(c => ({ term: String(c.term || ''), why: String(c.why || '') })), hard: (pv.hard || []).map(String), listen: (pv.listen_for || []).map(String) },
-      terms: (j.terms || []).filter(t => t && t.en && t.zh).map(t => ({ en: String(t.en).trim(), zh: String(t.zh).trim(), explain: String(t.explain || ''), example: String(t.example || ''), example_zh: String(t.example_zh || '') })),
+      terms: (j.terms || []).filter(t => t && t.en && t.zh).map(t => ({ en: String(t.en).trim(), ipa: String(t.ipa || '').trim(), zh: String(t.zh).trim(), explain: String(t.explain || ''), example: String(t.example || ''), example_zh: String(t.example_zh || '') })),
       at: Date.now(),
     };
+  }
+
+  /* ---------- 补音标：给已经生成过的术语补 IPA（一次一批，便宜） ---------- */
+  async function ipaFor(words) {
+    if (!words.length) return {};
+    const out = await deepseekStream({
+      thinking: false, json: true, maxTokens: 2000, purpose: 'prep',
+      system: '你是英语发音词典。只输出 JSON，不要解释。',
+      user: `给下面这些英文术语标注英式音标（RP），用国际音标，写成 /.../。不确定的留空字符串，不要编。只输出 JSON：{"items":[{"en":"术语","ipa":"/.../"}]}\n\n${words.map(w => '- ' + w).join('\n')}`,
+    });
+    const j = parseJSON(out);
+    const map = {};
+    (j.items || []).forEach(x => { if (x && x.en) map[String(x.en).trim().toLowerCase()] = String(x.ipa || '').trim(); });
+    return map;
   }
 
   /* ---------- 没听懂：用中文重新解释那一段 ---------- */
@@ -595,7 +607,18 @@ ${String(text).slice(0, 60000)}
   }
 
   /* ---------- 问 AI（围绕笔记 / 课件 / 录音） ---------- */
-  function chatSystem({ courseName, context }) {
+  function chatSystem({ courseName, context, free }) {
+    if (free || !String(context || '').trim()) {
+      return `你是「听课本」里的学习助教，学生是英语不太好的中国留学生，在读 Monash 马来西亚分校商科 Diploma（${courseName || '某门课'}）。
+这次学生没让你读任何资料，就是直接聊天/问问题：按你已有的知识回答，别假装看过他的课件或录音。
+回答规则：
+- 用简体中文，口语、简短，先给结论再解释。专业术语写成「中文（English）」。
+- 需要用到他的课程材料时，明确说「这个要看你课件里的定义，可以切到『读资料』再问」。
+- 拿不准的地方标「（不确定）」。
+- 要你出题时：一次 1-3 道，答案和解析写在每题下面。
+- 计算题一步一步写。
+- 不要替他写要交的作业或论文全文。`;
+    }
     return `你是「听课本」里的学习助教，学生是英语不太好的中国留学生，在读 Monash 马来西亚分校商科 Diploma（${courseName || '某门课'}）。
 回答规则：
 - 用简体中文，口语、简短，先给结论再解释。专业术语写成「中文（English）」。
@@ -644,5 +667,21 @@ ${context}
     return { names, balance };
   }
 
-  return { Costs, prepPack, confusedPrompt, studyPack, chatSystem, DOC_TR_SYSTEM, docTranslatePrompt, parseJSON, deepseekStream, gemini, ocr, translateBatch, translateDraft, translateProvider, POOL, poolStatus, translateWith, prepareLocalTranslator, localReady, localAvailability, localState: () => localState, notesPrompt, NOTES_SYSTEM, testGemini, testDeepseek, notesProvider, AIError, GEMINI };
+  /* ---------- 每页要点：不论这页讲什么，都从这页文字里提炼要点，标出重点 ---------- */
+  async function pagePoints({ name, pages, onText }) {
+    const body = pages.map(p => `[第${p.n}页]\n${String(p.text || '').slice(0, 1600)}`).join('\n\n');
+    const out = await deepseekStream({
+      thinking: false, json: true, maxTokens: 6000, purpose: 'prep', onText,
+      system: '你是商科助教，负责把课件一页一页讲清楚。学生英语不好，用简体中文写，专业术语写成 中文（English）。只输出 JSON。',
+      user: `课件：${name}\n\n给每一页提炼要点。不要照抄英文，用中文讲这页在说什么；术语保留英文原词。只输出 JSON：\n{"pages":[{"n":1,"title":"6-14 字小标题","points":[{"t":"一条要点（不超过 40 字）","strong":true}]}]}\n\n规则：\n- 每页 2-5 条；这页没什么内容就给 1 条或空数组。\n- strong=true 只给真正的重点：定义、公式、考点、老师一定会问的东西。每页最多 2 条。\n- 页数必须和下面完全一致，不要合并、不要漏页。\n\n${body}`,
+    });
+    const j = parseJSON(out);
+    return (j.pages || []).filter(x => x && x.n).map(x => ({
+      n: Number(x.n),
+      title: String(x.title || '').trim(),
+      points: (x.points || []).filter(y => y && y.t).slice(0, 6).map(y => ({ t: String(y.t).slice(0, 120), strong: !!y.strong })),
+    }));
+  }
+
+  return { Costs, prepPack, confusedPrompt, studyPack, ipaFor, pagePoints, chatSystem, DOC_TR_SYSTEM, docTranslatePrompt, parseJSON, deepseekStream, gemini, ocr, translateBatch, translateDraft, translateProvider, POOL, poolStatus, translateWith, prepareLocalTranslator, localReady, localAvailability, localState: () => localState, notesPrompt, NOTES_SYSTEM, testGemini, testDeepseek, notesProvider, AIError, GEMINI };
 })();
