@@ -92,6 +92,31 @@ const Sync = (() => {
 
   const TOMB_TTL = 60 * 864e5; // 云端墓碑留 60 天，之后清掉，索引才不会被越撑越大
 
+  /* 冲突副本（借鉴 BBNotes 的 ConflictCopyJournal）
+     两边都在上次同步之后改过同一条记录时，原来的规则是「谁的 updatedAt 大谁活」——另一边的
+     改动就无声无息地没了。用户会觉得「我的笔记在两台设备之间消失」。现在改成：照旧采用较新
+     的那份，但把被顶掉的那份存成一条「（冲突副本）」，由用户自己决定要不要合并。
+     只对 课程/笔记/录音转写 做；课件是从 Moodle 重新导入的，复制一份反而添乱。 */
+  const CONFLICT_OK = ['courses', 'notes', 'sessions'];
+  const stable = v => Array.isArray(v) ? '[' + v.map(stable).join(',') + ']'
+    : v && typeof v === 'object' ? '{' + Object.keys(v).sort().filter(k => k !== 'updatedAt' && k !== 'playAt').map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}'
+    : JSON.stringify(v);
+  function conflictCopy(store, loc, rem) {
+    if (!CONFLICT_OK.includes(store)) return false;
+    if (!loc || !loc.id) return false;
+    if (stable(loc) === stable(rem)) return false;
+    const label = loc.title || loc.name || '未命名';
+    const dup = Object.assign({}, loc, {
+      id: loc.id + '-c' + Date.now().toString(36).slice(-5),
+      title: loc.title ? label + '（冲突副本）' : loc.title,
+      name: loc.name ? label + '（冲突副本）' : loc.name,
+      createdAt: Date.now(),
+    });
+    delete dup.updatedAt;
+    if (store === 'sessions') dup.hasAudio = false; // 音频还挂在原来那条上，副本只留文字
+    return dup;
+  }
+
   /* 写云端索引前，重新读一次再合并。原来是把开始时读到的那份索引整份写回去，
      另一台设备在这期间上传的记录就会被覆盖掉（表现：某条笔记在两台设备上「消失」）。 */
   async function mergeIndex(mine) {
@@ -188,6 +213,7 @@ const Sync = (() => {
     clearTimeout(timer); nextAt = 0;
     running = (async () => {
       const t0 = Date.now();
+      const lastSync = Number(localStorage.getItem(LAST) || 0);
       prog = { done: 0, total: 0, label: '检查云端…', bytesDone: 0, bytesTotal: 0 }; emit();
       const tick = (label, bytes = 0) => { prog.done++; prog.label = label; prog.bytesDone += bytes; onProgress && onProgress(`${prog.done} / ${prog.total} · ${label}`); emit(); };
       try {
@@ -240,7 +266,16 @@ const Sync = (() => {
             tick(`上传课件原文件 · ${o.r.name}`, o.bytes);
           } else if (o.kind === 'down') {
             const r = await getJSON(`tingkeben/db/${o.key}.json`);
-            if (r) { await DB.put(o.store, r, { fromSync: true }); down++; }
+            if (r) {
+              // 两边都动过同一条：先把本机这份另存为冲突副本，再采用云端的
+              if (o.loc && lastSync && stamp(o.loc) > lastSync && stamp(r) > lastSync) {
+                try {
+                  const dup = conflictCopy(o.store, o.loc, r);
+                  if (dup) { await DB.put(o.store, dup); up++; }
+                } catch (e) { /* 副本没存下来不影响主流程 */ }
+              }
+              await DB.put(o.store, r, { fromSync: true }); down++;
+            }
             tick(`下载${NAMES[o.store]} · ${nameOf(o.store, r)}`);
           } else if (o.kind === 'delLocal') {
             await DB.del(o.store, o.id, { fromSync: true }); if (o.store === 'sessions') await DB.delByIndex('audio', 'sessionId', o.id); del++;

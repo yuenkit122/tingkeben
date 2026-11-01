@@ -70,9 +70,10 @@ async function loadCourses() {
 
 function renderSide() {
   const r = location.hash.slice(1) || 'home';
-  const items = [['home', '课程主页', ICON.home], ['review', '复习', ICON.book], ['live', State.live ? '录音中…' : '课堂录音', ICON.mic], ['ask', '问 AI', ICON.chat], ['settings', '设置', ICON.gear]];
-  const isOn = id => r === id || (id === 'live' && r.startsWith('live')) || (id === 'ask' && r.startsWith('ask')) || (id === 'review' && r.startsWith('review')) || (id === 'settings' && r.startsWith('settings'));
-  $('#nav').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}" title="${label}">${ic}<span class="lbl">${label}</span>${id === 'live' && State.live ? ' <span class="pill bad">REC</span>' : ''}</a>`).join('');
+  const items = [['home', '课程主页', ICON.home], ['review', '复习', ICON.book], ['ask', '问 AI', ICON.chat], ['settings', '设置', ICON.gear]];
+  const isOn = id => r === id || (id === 'ask' && r.startsWith('ask')) || (id === 'review' && r.startsWith('review')) || (id === 'settings' && r.startsWith('settings')) ||
+    (id === 'home' && (r.startsWith('course') || r.startsWith('note') || r.startsWith('desk') || r.startsWith('session') || r.startsWith('live')));
+  $('#nav').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}" title="${label}">${ic}<span class="lbl">${label}</span>${id === 'home' && State.live ? ' <span class="pill bad">REC</span>' : ''}</a>`).join('');
   $('#tabbar').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}">${ic}${label}</a>`).join('');
   const short = c => (c.code || courseCode(c.name)).replace(/^[A-Z]+/, '') || c.name.slice(0, 2);
   $('#side-courses').innerHTML = State.courses.map(c => `<a class="course-link ${r === 'course-' + c.id ? 'on' : ''}" href="#course-${c.id}" title="${esc(c.name)}"><span class="cshort">${esc(short(c))}</span><span class="lbl">${esc(c.name)}</span></a>`).join('') ||
@@ -102,6 +103,10 @@ async function route() {
     console.error(e);
     view.innerHTML = `<div class="empty"><strong>页面出错了</strong>${esc(e.message)}</div>`;
   }
+  // 每次换页让内容重新淡入（上课工作台是全屏网格，CSS 里已经排除）
+  view.classList.remove('tk-in');
+  void view.offsetWidth;
+  view.classList.add('tk-in');
 }
 window.addEventListener('hashchange', route);
 
@@ -113,12 +118,13 @@ async function renderHome() {
   const recent = notes.sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
   view.innerHTML = `
     <div class="head">
-      <div><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记</div></div>
-      <div class="row"><a class="btn" href="#live">${ICON.mic}开始录音</a><button class="btn" id="new-course">＋ 新建课程</button><button class="btn primary" id="sync-moodle">${ICON.up}从 Moodle 同步</button></div>
+      <div class="grow"><h1>我的课程</h1><div class="meta">把 Moodle 课件放进对应课程，AI 帮你整理成中英对照笔记；没有课件也能先手写、先录音</div></div>
+      <div class="row"><button class="btn" id="new-course">＋ 新建课程</button><button class="btn primary" id="sync-moodle">${ICON.up}从 Moodle 同步</button></div>
     </div>
     ${!Sync.ready() ? `<div class="banner"><div class="grow"><strong>在别的设备用过听课本？</strong><br><span style="font-size:14px;color:var(--muted)">登录云服务，课程、笔记和所有 API key 会自动出现，不用重新设置。</span></div><button class="btn primary small" id="home-login">登录云服务</button></div>` : ''}
     ${!State.courses.length ? `<div class="banner"><div class="grow"><strong>第一次用？</strong><br><span style="font-size:14px;color:var(--muted)">在 Chrome 打开 Moodle 并登录，点右上角「听课本助手」扩展图标，勾选课程后点「同步到听课本」，4 门课和每周的课件会自动导进来。</span></div><button class="btn primary small" id="sync-moodle-2">怎么装扩展</button></div>` : ''}
     ${!k.gemini || !k.notes ? `<div class="banner"><div class="grow"><strong>先填 API key</strong><br><span style="font-size:14px;color:var(--muted)">${!k.notes ? '生成笔记需要 DeepSeek 的 key' : ''}${!k.notes && !k.gemini ? '；' : ''}${!k.gemini ? '实时转写翻译需要 Gemini 的 key' : ''}。key 只存在这台设备上。</span></div><a class="btn primary small" href="#settings~ai">去设置</a></div>` : ''}
+    ${State.courses.length ? scheduleCard() : ''}
     ${State.courses.length ? homeSummary(notes) + weekPrep(files) : ''}
     <div class="grid">
       ${State.courses.map((c, i) => `
@@ -133,14 +139,52 @@ async function renderHome() {
     ${recent.length ? `<h2 style="font-size:18px">最近的笔记</h2><div class="card list">${recent.map(noteItem).join('')}</div>` : ''}`;
   $('#new-course').onclick = $('#new-course-2').onclick = () => courseModal();
   const hl = $('#home-login'); if (hl) hl.onclick = () => cloudLoginModal();
+  $$('[data-study]').forEach(b => b.onclick = () => studyFlow({ courseId: b.dataset.study || null }));
   $$('[data-prep]').forEach(b => b.onclick = () => openDocModal(b.dataset.prep, 'prep'));
   const dr = $('#dl-refresh'); if (dr) dr.onclick = async () => { dr.disabled = true; await Deadlines.refresh(); if (dr.isConnected) renderHome(); };
   const da = $('#dl-add'); if (da) da.onclick = () => Deadlines.addModal(renderHome);
   $$('[data-dl-del]').forEach(b => confirmClick(b, '删', () => { Deadlines.remove(b.dataset.dlDel); renderHome(); }));
   $('#sync-moodle').onclick = () => syncModal();
+  const sAdd = $('#sched-add'); if (sAdd) sAdd.onclick = () => Schedule.addModal(renderHome);
+  const sList = $('#sched-list'); if (sList) sList.onclick = () => scheduleModal();
   const s2 = $('#sync-moodle-2'); if (s2) s2.onclick = () => Ext.version() ? modal(`<h2>扩展已经装好了</h2><ol style="margin:0;padding-left:20px;line-height:1.9"><li>Chrome 新开一个标签页，打开 <b>learning.monash.edu</b> 并登录</li><li>点浏览器右上角的「听课本助手」图标（在拼图图标里，可以点图钉固定）</li><li>勾选课程 →「同步到听课本」</li></ol><div class="row" style="justify-content:flex-end"><a class="btn primary" href="${MOODLE}/my/courses.php" target="_blank" rel="noopener">打开 Moodle</a></div>`) : extGuide();
 }
-/* 主页：每门课最新一周的课前包 */
+/* 主页：下一节课（借鉴 Otter 的日历联动） */
+function scheduleCard() {
+  const list = Schedule.load();
+  const head = `<div class="row" style="justify-content:space-between;align-items:flex-start"><div class="grow"><b>课表</b><div class="hint">填好每周上课时间，开课前 10 分钟提醒开录，录音自动归到那门课</div></div><button class="btn small" id="sched-add">＋ 添加</button></div>`;
+  if (!list.length) return `<div class="card pad sched">${head}</div>`;
+  const n = Schedule.next();
+  if (!n) return `<div class="card pad sched">${head.replace('填好每周上课时间，开课前 10 分钟提醒开录，录音自动归到那门课', '接下来两周没有课，去检查一下课表')}</div>`;
+  const c = State.courses.find(x => x.id === n.entry.courseId);
+  return `<div class="card pad sched${n.live ? ' on' : ''}">
+    <div class="sched-row">
+      <div class="sched-when"><span class="pill ${n.live ? 'ok' : 'mute'}">${n.live ? '正在上课' : Schedule.when(n)}</span><span class="hint">${Schedule.countdown(n)}</span></div>
+      <div class="grow sched-name-box"><div class="sched-name">${esc(Schedule.courseName(n.entry))}</div><div class="hint">${esc(n.entry.start)}–${esc(n.entry.end)}${n.entry.room ? ' · ' + esc(n.entry.room) : ''}</div></div>
+      <div class="row" style="gap:8px"><button class="btn small ghost" id="sched-list">课表</button><button class="btn small ${n.live ? 'primary' : ''}" data-study="${esc(n.entry.courseId || '')}">${ICON.mic}${n.live ? '开始上课' : '提前进课堂'}</button></div>
+    </div>
+  </div>`;
+}
+function scheduleModal() {
+  const rows = Schedule.load().slice().sort((a, b) => a.day - b.day || String(a.start).localeCompare(String(b.start)));
+  modal(`<div class="row"><h2 class="grow">课表</h2><button class="btn small" data-close>关闭</button></div>
+    ${rows.length ? `<div class="sched-list">${rows.map(e => `<div class="sched-item"><span class="sched-day">${Schedule.DAY[e.day] || ''}</span><span class="sched-time">${esc(e.start)}–${esc(e.end)}</span><span class="grow">${esc(Schedule.courseName(e))}${e.room ? ` <span class="hint">${esc(e.room)}</span>` : ''}</span><button class="btn small ghost" data-sc-del="${esc(e.id)}" aria-label="删除这节">✕</button></div>`).join('')}</div>` : '<div class="hint" style="margin:10px 0">还没有课。添加后，首页会显示下一节课，到点提醒你开录。</div>'}
+    <div class="row" style="justify-content:space-between;margin-top:16px;gap:10px;flex-wrap:wrap">
+      <label class="switch" style="margin:0"><input type="checkbox" id="sc-remind" ${Schedule.remindOn() ? 'checked' : ''}>开课前 10 分钟提醒</label>
+      <button class="btn primary small" id="sc-add2">＋ 添加</button>
+    </div>
+    <div class="hint" style="margin-top:8px">提醒用的是页面里的定时器：听课本要开着（挂在后台也行），关掉浏览器就不会响。</div>`, box => {
+    $$('[data-sc-del]', box).forEach(b => confirmClick(b, '删除', () => { Schedule.remove(b.dataset.scDel); scheduleModal(); }));
+    $('#sc-add2', box).onclick = () => Schedule.addModal(() => scheduleModal());
+    $('#sc-remind', box).onchange = async e => {
+      if (!e.target.checked) { Schedule.setRemind(false); return; }
+      const p = await Schedule.askNotify();
+      Schedule.setRemind(true);
+      if (p === 'denied') toast('浏览器通知被拒绝了，只能在页面里提醒', 6000);
+      else if (p === 'granted') toast('已开启，开课前 10 分钟提醒');
+    };
+  });
+}
 function weekPrep(files) {
   const rows = State.courses.map(c => {
     const fs = files.filter(f => f.courseId === c.id && f.status === 'ready' && weekOf(f).n < 800 && phaseOf(f) !== '作业考试');
@@ -249,13 +293,17 @@ async function renderCourse(id, tab) {
   $('#c-gen').onclick = () => generateModal({ course, preselect: State.selected || [] });
   $('#c-points').onclick = () => coursePointsModal(course);
   $('#c-mock').onclick = () => mockExamModal(course);
-  $('#c-desk').onclick = () => startClassModal(course);
+  $('#c-desk').onclick = () => studyFlow({ courseId: course.id });
   const body = $('#tab-body');
   if (tab === 'files') renderFilesTab(course, body);
   else if (tab === 'notes') {
     notes.sort((a, b) => b.createdAt - a.createdAt);
-    body.innerHTML = notes.length ? `<div class="card list">${notes.map(noteItem).join('')}</div>`
-      : `<div class="empty"><strong>还没有笔记</strong>先在「课件」里导入 Moodle 课件，勾选后点「生成笔记」。</div>`;
+    body.innerHTML = notes.length ? `<div class="row" style="justify-content:flex-end;margin-bottom:10px"><button class="btn small primary" id="c-newnote">＋ 空白笔记</button></div><div class="card list">${notes.map(noteItem).join('')}</div>`
+      : `<div class="empty"><strong>还没有笔记</strong>
+          <div style="margin:6px 0 14px">不用等课件：可以先建一份空白笔记，进去手写或录音，课件以后再补。</div>
+          <div class="row" style="justify-content:center"><button class="btn" id="c-newnote">＋ 空白笔记</button><button class="btn primary" id="c-newnote2">${ICON.mic}手写 + 录音</button></div></div>`;
+    const nb = $('#c-newnote', body); if (nb) nb.onclick = async () => { const n = await newBlankNote(course); location.hash = 'note-' + n.id; };
+    const nb2 = $('#c-newnote2', body); if (nb2) nb2.onclick = () => studyFlow({ courseId: course.id });
   } else {
     sessions.sort((a, b) => b.startedAt - a.startedAt);
     body.innerHTML = sessions.length ? `<div class="card list">${sessions.map(s => `<a class="item" href="#session-${s.id}"><div class="grow"><div class="t">${esc(s.title)}</div><div class="s">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句</div></div></a>`).join('')}</div>`
@@ -323,7 +371,10 @@ async function renderFilesTab(course, body) {
           ${f.status === 'ready' || /\.pdf$/i.test(f.name) ? '<button class="btn small ghost" data-act="view">打开</button>' : ''}${f.status === 'ready' ? `<button class="btn small ghost" data-act="prep" title="5 分钟预习卡 + 术语表">${f.prep ? '课前包 ✓' : '课前包'}</button>` : ''}${f.status === 'ready' ? '<button class="btn small ghost" data-act="class" title="用这份课件上课：左边课件、中间笔记、右边翻译">上课</button>' : ''}
           <button class="btn small ghost" data-act="del">删除</button>
         </div>
-      </div>`).join('')}</div>` : `<div class="empty"><strong>这门课还没有课件</strong>在 Moodle 打开课程 → 进入 Week 文件夹 → 点「Download folder」下载 ZIP，或者一个个下载 PDF/PPT，然后放到上面。</div>`}
+      </div>`).join('')}</div>` : `<div class="empty"><strong>这门课还没有课件</strong>
+        <div style="margin:6px 0 12px">课件可以以后再补 —— 手写板和课堂录音都不需要课件。</div>
+        <button class="btn primary" id="nb-study">${ICON.mic}不用课件，先开始学</button>
+        <div class="hint" style="margin-top:12px">要导课件：在 Moodle 打开课程 → 进入 Week 文件夹 → 点「Download folder」下载 ZIP，或者一个个下载 PDF/PPT，然后放到上面。</div></div>`}
     <div class="bar noprint" id="selbar" ${State.selected.length ? '' : 'hidden'}>
       <span class="grow">已选 <b id="selcount">${State.selected.length}</b> 个课件</span>
       <button class="btn small" id="sel-clear">取消</button>
@@ -331,6 +382,7 @@ async function renderFilesTab(course, body) {
     </div>`;
 
   const input = $('#file-in', body), drop = $('#drop', body);
+  const nbStudy = $('#nb-study', body); if (nbStudy) nbStudy.onclick = () => studyFlow({ courseId: course.id });
   input.onchange = () => { importFiles(course, [...input.files]); input.value = ''; };
   ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
   ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
@@ -571,7 +623,14 @@ const GenPref = {
 async function generateModal({ course, preselect = [], sessionId = null, noteId = null, title: presetTitle = '' }) {
   const files = sortFiles((await DB.byIndex('files', 'courseId', course.id)).filter(f => f.status === 'ready'));
   const sessions = (await DB.byIndex('sessions', 'courseId', course.id)).sort((a, b) => b.startedAt - a.startedAt);
-  if (!files.length && !sessions.length) { toast('这门课还没有能用的课件或录音，先导入课件'); return; }
+  if (!files.length && !sessions.length) {
+    modal(`<h2>还没有能用的材料</h2>
+      <p class="hint" style="margin:0">生成笔记要先有课件的文字，或者一段课堂录音。不过可以先建一份空白笔记，进去手写、录音，材料齐了再回来生成。</p>
+      <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="gm-study">${ICON.mic}手写笔记 + 课堂录音</button></div>`, (box, close) => {
+      $('#gm-study', box).onclick = () => { close(); studyFlow({ courseId: course.id }); };
+    });
+    return;
+  }
   const firstSel = files.find(f => preselect.includes(f.id));
   const defTitle = presetTitle || (sessionId ? (sessions.find(s => s.id === sessionId)?.title || '课堂笔记') : firstSel ? firstSel.name.replace(/\.[^.]+$/, '') : '');
   const p = AI.notesProvider();
@@ -696,6 +755,74 @@ async function startGeneration({ course, fileIds, sessionId, title, style, extra
   return note.id;
 }
 
+/* ---------- 学习流程：手写笔记 + 课堂录音 ---------- */
+
+/* 新建一份空白笔记。不要求先有课件 —— 画板和录音本来就不依赖课件，
+   课件只是左边拿来对照的东西，随时后补。 */
+async function newBlankNote(course, { files = [], title = '' } = {}) {
+  const f = files[0] || null;
+  const n = {
+    id: DB.uid('n_'), courseId: course.id, createdAt: Date.now(),
+    title: title || `${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} 课堂笔记`,
+    markdown: '', status: 'done', sourceFileIds: files.slice(), deskFile: f, model: '',
+  };
+  await DB.put('notes', n);
+  return n;
+}
+
+/* 一个入口：进去就是「中间画板 + 右栏实时录音」，课件可有可无。
+   以前想学习必须先导课件，没课件就只能在空页面干瞪眼；现在课件只影响左栏。 */
+async function studyFlow({ courseId = null, noteId = null, title = '' } = {}) {
+  const courses = State.courses;
+  if (!courses.length) { toast('先在首页点「新建课程」，建一门课再开始'); return; }
+  const course = courses.find(c => c.id === courseId) || courses[0];
+  const [allFiles, allNotes] = await Promise.all([
+    DB.byIndex('files', 'courseId', course.id),
+    DB.byIndex('notes', 'courseId', course.id),
+  ]);
+  const ready = sortFiles(allFiles.filter(f => f.status === 'ready' || isPdf(f)));
+  const notes = allNotes.sort((a, b) => b.createdAt - a.createdAt);
+  modal(`<h2>${ICON.mic}手写笔记 + 课堂录音</h2>
+    <p class="hint" style="margin:0">不用课件也能开始。iPad 上用 Apple Pencil 在「画板」写，右栏同时录音并出中文字幕；下课后点「优化笔记」，AI 把老师讲的和你手写的合到一起。</p>
+    <div class="field"><label for="sf-c">哪门课</label><select id="sf-c">${courses.map(c => `<option value="${c.id}" ${c.id === course.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+    <div class="field"><label for="sf-f">左边放哪份课件（可以不选）</label>
+      <select id="sf-f"><option value="">不用课件 / 还没有</option>${ready.map(f => `<option value="${f.id}">${esc(weekOf(f).label)} · ${esc(f.name)}</option>`).join('')}</select>
+      <span class="hint">${ready.length ? '只影响左栏显示，不影响手写和录音；上课时也能换' : '这门课还没有课件，左栏先空着。课件以后导进来，再进工作台一样能看'}</span></div>
+    <div class="field"><label for="sf-n">记在哪份笔记</label>
+      <select id="sf-n"><option value="">新建一份空白笔记</option>${notes.map(n => `<option value="${n.id}" ${n.id === noteId ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}</select></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="sf-go">${ICON.mic}进入：画板 + 录音</button></div>`, (box, close) => {
+    $('#sf-c', box).onchange = e => { close(); studyFlow({ courseId: e.target.value }); };
+    $('#sf-go', box).onclick = async () => {
+      const fid = $('#sf-f', box).value;
+      const chosen = $('#sf-n', box).value;
+      let n = chosen ? await DB.get('notes', chosen) : null;
+      if (!n) n = await newBlankNote(course, { files: fid ? [fid] : [], title });
+      if (fid) {
+        n.deskFile = fid;
+        if (!(n.sourceFileIds || []).includes(fid)) n.sourceFileIds = [...(n.sourceFileIds || []), fid];
+        await DB.put('notes', n);
+      }
+      // 进工作台先把分栏对到手写和录音：中间画板 + 右边实时翻译
+      DeskPref.set({ mtab: 'board', rtab: 'live' });
+      close();
+      location.hash = 'desk-' + n.id;
+    };
+  });
+}
+
+/* 课堂结束后：手写 + 录音一起交给 AI 整理进笔记（有录音走完整流程，只有手写就只认手写） */
+async function enhanceNote(note, course, after) {
+  const ink = typeof Board !== 'undefined' && Board.hasInk(note);
+  if (!note.sessionId && !ink) { toast('这节课还没有录音，画板上也还没写东西。先录一段或在「画板」写点内容'); return; }
+  if (note.sessionId) return runRecap(note, course, after);
+  const close = modal(`<h2>手写笔记 → 笔记</h2><div data-job-slot="hw:${note.id}"><div class="thinking"><span class="spin"></span>准备中…</div></div><div id="en-st" class="hint" hidden></div><p class="hint" style="margin:0">会把画板上的手写识别出来，整理成「我的手写笔记」加到笔记最后，不会动你已经写好的部分。</p>`);
+  try {
+    await Recap.handwritingMerge(note, course, t => { const el = $('#en-st'); if (el) { el.hidden = false; el.textContent = t; } });
+    close(); toast('手写已经整理进笔记');
+    after && after();
+  } catch (e) { close(); toast(e.message, 6000); }
+}
+
 /* 上课：找这份课件已有的笔记，没有就建一份空白的，然后进工作台 */
 async function startClass(course, fileIds, title) {
   const notes = await DB.byIndex('notes', 'courseId', course.id);
@@ -761,7 +888,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
     mountNoteTool(tab, note, course, pane, { focus: opt.focus, toPoint: pid => { history.replaceState(null, '', '#note-' + id + '~points'); renderNote(id, 'points', { focus: pid }); } });
     return;
   }
-  pane.innerHTML = `<div class="row noprint" id="note-acts" style="justify-content:flex-end;margin-bottom:10px"></div><article class="sheet"><div id="note-body" class="md"></div></article>`;
+  pane.innerHTML = `<div class="row noprint note-acts" id="note-acts"></div><article class="sheet"><div id="note-body" class="md"></div></article>`;
   const body = $('#note-body'), acts = $('#note-acts');
 
   if (gen) {
@@ -785,7 +912,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
   else body.innerHTML = md(note.markdown) + (note.error ? `<p class="noprint" style="color:var(--warn)">（${esc(note.error)}，内容可能不完整）</p>` : '');
   linkPageRefs(body, note);
   acts.innerHTML = `
-    ${note.sessionId ? `<button class="btn small primary" id="n-recap" title="把老师讲的、你手写的，整理进笔记下半部分">${ICON.spark}录音总结 → 笔记</button>` : `<button class="btn small" id="n-link">关联课堂录音</button>`}
+    ${note.sessionId || Board.hasInk(note) ? `<button class="btn small primary" id="n-recap" title="把老师讲的和你手写的整理进笔记下半部分">${ICON.spark}手写笔记 + 课堂录音优化笔记</button>` : `<button class="btn small" id="n-link">关联课堂录音</button>`}
     <button class="btn small" id="n-edit">编辑</button>
     <button class="btn small" id="n-copy">复制</button>
     <button class="btn small" id="n-pdf">导出 PDF</button>
@@ -799,7 +926,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
     await startGeneration({ course, fileIds: note.sourceFileIds || [], sessionId: note.sessionId, title: note.title, style: note.style || 'detailed', extra: note.extra, noteId: note.id });
     renderNote(id);
   };
-  const rc = $('#n-recap'); if (rc) rc.onclick = () => runRecap(note, course, () => renderNote(id));
+  const rc = $('#n-recap'); if (rc) rc.onclick = () => enhanceNote(note, course, () => renderNote(id));
   const lk = $('#n-link'); if (lk) lk.onclick = () => linkSessionModal(note, () => renderNote(id));
   confirmClick($('#n-del'), '确认删除', async () => { await DB.del('notes', id); location.hash = 'course-' + note.courseId + '~notes'; });
   $('#n-edit').onclick = () => {
@@ -818,14 +945,15 @@ function linkPageRefs(body, note) {
 async function linkSessionModal(note, after) {
   const sessions = (await DB.byIndex('sessions', 'courseId', note.courseId)).sort((a, b) => b.startedAt - a.startedAt);
   if (!sessions.length) { toast('这门课还没有课堂录音'); return; }
-  modal(`<h2>关联课堂录音</h2><div class="field"><select id="ls-s">${sessions.map(s => `<option value="${s.id}">${esc(s.title)} · ${fmtDate(s.startedAt)} · ${fmtTime(s.duration)}</option>`).join('')}</select><span class="hint">关联后可以点「录音总结 → 笔记」，问 AI 也会参考这节课老师说的话</span></div>
+  modal(`<h2>关联课堂录音</h2><div class="field"><select id="ls-s">${sessions.map(s => `<option value="${s.id}">${esc(s.title)} · ${fmtDate(s.startedAt)} · ${fmtTime(s.duration)}</option>`).join('')}</select><span class="hint">关联后可以点「手写笔记 + 课堂录音优化笔记」，问 AI 也会参考这节课老师说的话</span></div>
     <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="ls-go">关联</button></div>`, (box, close) => {
     $('#ls-go', box).onclick = async () => { note.sessionId = $('#ls-s', box).value; await DB.put('notes', note); close(); after && after(); };
   });
 }
 
 async function runRecap(note, course, after) {
-  const close = modal(`<h2>录音总结 → 笔记</h2><div data-job-slot="recap:${note.id}"><div class="thinking"><span class="spin"></span>准备中…</div></div><div id="rc-st" hidden></div><p class="hint" style="margin:0">会读这节课的录音转写、你标记的重点和画板上的手写（手写用 Gemini 免费识别），整理成笔记下半部分「课堂上老师提到的」。上半部分的课件笔记不会动。</p>`);
+  const ink = Board.hasInk(note);
+  const close = modal(`<h2>手写笔记 + 课堂录音优化笔记</h2><div data-job-slot="recap:${note.id}"><div class="thinking"><span class="spin"></span>准备中…</div></div><div id="rc-st" class="hint rc-st"></div><p class="hint" style="margin:0">会读这节课的录音转写、你标记的重点${ink ? '和画板上的手写（手写用 Gemini 免费识别，一页一页认）' : ''}，整理成笔记下半部分「课堂上老师提到的」。上半部分的课件笔记不会动。</p><div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn small ghost" data-close>先关掉，后台继续</button></div>`);
   try {
     const r = await Recap.run(note, course, { onStatus: t => { const el = $('#rc-st'); if (el) el.textContent = t; } });
     close();
@@ -877,6 +1005,7 @@ async function renderLive(courseId) {
       onStatus: st => liveUI.status(st),
       onError: m => { liveUI.error(m); },
       onLevel: r => liveUI.level(r),
+      onQuiet: mins => liveUI.quiet(mins),
     });
     try {
       await sess.start();
@@ -923,6 +1052,13 @@ const liveUI = {
   },
   error(m) { toast(m, 7000); const el = $('#l-err'); if (el) { el.hidden = false; el.textContent = m; } },
   level(r) { const el = $('#l-level'); if (el) el.style.width = Math.min(100, r * 400) + '%'; },
+  /* 10 分钟没听到声音：不自动停，问一句（学 Otter 的 NO_SPEECH，但决定权留给人） */
+  quiet(mins) {
+    const el = $('#l-quiet'); if (!el) return;
+    const t = $('#l-quiet-t'); if (t) t.textContent = `已经 ${mins} 分钟没识别到声音`;
+    el.hidden = false;
+    try { if (typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification('听课本还在录音', { body: `${mins} 分钟没听到声音，是不是下课了？`, tag: 'tkb-quiet' }); } catch (e) {}
+  },
 };
 function capHTML(g) {
   const zh = g.status === 'done' ? esc(g.zh) : g.status === 'streaming' ? esc(g.zh) + '<span class="caret"></span>' : g.zhDraft && g.status !== 'failed' ? `<span class="draft">${esc(g.zhDraft)}</span>` : g.status === 'failed' ? `<span class="failed">翻译失败 <button class="btn small ghost" data-retry>重试</button></span>` : '<span class="wait">翻译中…</span>';
@@ -943,6 +1079,11 @@ function renderLiveRunning() {
       <div class="row" style="gap:4px"><button class="btn small" id="l-minus" aria-label="字小一点">A−</button><button class="btn small" id="l-plus" aria-label="字大一点">A＋</button></div>
     </div>
     <div class="banner" id="l-err" hidden></div>
+    <div class="banner quiet-banner" id="l-quiet" hidden>
+      <div class="grow"><strong id="l-quiet-t">已经 10 分钟没识别到声音</strong><div class="hint">是不是下课了？也可能麦克风被静音了。录音还在继续。</div></div>
+      <button class="btn small" id="l-quiet-cont">继续录</button>
+      <button class="btn small primary" id="l-quiet-stop">结束录音</button>
+    </div>
     <div class="card" style="display:flex;flex-direction:column">
       <div class="captions" id="captions"></div>
       <div class="interim" id="interim"></div>
@@ -961,6 +1102,8 @@ function renderLiveRunning() {
   $('#l-jump').onclick = () => { liveUI.follow = true; box.scrollTop = box.scrollHeight; $('#l-jump').hidden = true; };
   $('#l-mark').onclick = () => { const t = sess.mark(); toast('已标记 ' + fmtTime(t)); };
   $('#l-confused').onclick = () => { const t = sess.confused(); toast('记下了 ' + fmtTime(t) + '，课后在录音页点「用中文重讲」'); };
+  $('#l-quiet-cont').onclick = () => { $('#l-quiet').hidden = true; sess.quietWarned = false; sess.quietSnoozeUntil = Date.now() + 10 * 60000; };
+  $('#l-quiet-stop').onclick = () => { $('#l-quiet').hidden = true; $('#l-stop').click(); };
   liveUI.update(sess.segments);
   liveUI.status('live');
   const tick = setInterval(() => { const c = $('#l-clock'); if (!c || !State.live) { clearInterval(tick); return; } c.textContent = fmtTime(sess.elapsed()); }, 500);
@@ -985,11 +1128,11 @@ async function renderSession(id) {
   const view_ = Settings.load().captionView;
   view.innerHTML = `
     <div>
-      <a class="crumb" href="${course ? '#course-' + course.id + '~sessions' : '#live'}">← ${esc(course ? course.name : '课堂录音')}</a>
+      <a class="crumb" href="${course ? '#course-' + course.id + '~sessions' : '#home'}">← ${esc(course ? course.name : '课程主页')}</a>
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1 id="s-title">${esc(s.title)}</h1><div class="meta">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句${s.highlights.length ? ' · ' + s.highlights.length + ' 个标记' : ''}</div></div>
         <div class="row">
-          ${course ? `<button class="btn" id="s-merge" title="选一份已有笔记，把这节课老师讲的整理进去">并入已有笔记</button><button class="btn primary" id="s-gen">${ICON.spark}整理成新笔记</button>` : ''}
+          ${course ? `<button class="btn primary" id="s-enhance" title="把这段录音和你画板上的手写一起整理进笔记">${ICON.spark}手写笔记 + 课堂录音优化笔记</button><button class="btn" id="s-merge" title="选一份已有笔记，把这节课老师讲的整理进去">并入已有笔记</button><button class="btn small" id="s-gen">整理成新笔记</button>` : ''}
           <button class="btn small" id="s-rename">改名</button>
           <button class="btn small" id="s-copy">复制全文</button>
           ${s.hasAudio ? '<button class="btn small" id="s-audio">下载录音</button>' : ''}
@@ -1000,6 +1143,10 @@ async function renderSession(id) {
     </div>
     ${!course ? '<div class="banner"><div class="grow">这段录音没有归到课程里。要整理成笔记，先把它放进一门课。</div><select id="s-move" style="width:auto"><option value="">选择课程</option>' + State.courses.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('') + '</select></div>' : ''}
     ${(s.confused || []).length ? `<div class="card pad confused-box"><div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:8px">❓ 没听懂的地方 · ${s.confused.length}</div>${s.confused.map((c, i) => `<div class="cf" data-cf="${i}"><div class="row"><span class="clock" style="font-size:13px">${fmtTime(c.t)}</span><span class="grow hint cf-near">${esc(c.near.slice(-160))}</span><button class="btn small ghost" data-cf-go>跳过去</button><button class="btn small ${c.explain ? '' : 'primary'}" data-cf-ex>${c.explain ? '重新讲' : '用中文重讲'}</button></div>${c.explain ? `<div class="md cf-ex">${md(c.explain)}</div>` : '<div class="cf-ex" hidden></div>'}</div>`).join('')}</div>` : ''}
+    ${(s.highlights || []).length ? `<div class="card pad marks-card">
+      <div class="row" style="justify-content:space-between"><b>${ICON.star}标记重点 · ${s.highlights.length}</b><span class="hint">只回看你按过标记的时间点，不用从头听</span></div>
+      <div class="mark-list">${s.highlights.map((h, i) => `<div class="mark-item"><button class="mark-time" data-hl="${i}" title="跳到这一句">${fmtTime(h.t)}</button><span class="grow mark-near">${esc((h.near || '').slice(0, 90) || '（这里没识别到文字）')}</span><button class="btn small ghost" data-hl-play="${i}">听 30 秒</button></div>`).join('')}</div>
+    </div>` : ''}
     ${Object.keys(s.glossary || {}).length ? `<div class="card pad"><div style="font-size:13px;font-weight:700;color:var(--muted);margin-bottom:8px">本节课术语</div><div class="chips">${Object.entries(s.glossary).map(([en, zh]) => `<button class="chip" data-q="${esc(en)}">${esc(en)} <span>${esc(zh)}</span></button>`).join('')}</div></div>` : ''}
     <div class="row noprint">
       <input type="text" id="s-search" class="grow" placeholder="搜索转写内容（英文或中文）" style="max-width:420px">
@@ -1022,12 +1169,18 @@ async function renderSession(id) {
       <button class="btn small" id="p-rate">1x</button>
     </div>` : ''}`;
   const gen = $('#s-gen'); if (gen) gen.onclick = () => generateModal({ course, sessionId: s.id });
+  const enh = $('#s-enhance'); if (enh) enh.onclick = async () => {
+    const notes = await DB.byIndex('notes', 'courseId', course.id);
+    let n = notes.filter(x => x.sessionId === s.id).sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!n) { n = await newBlankNote(course, {}); n.sessionId = s.id; await DB.put('notes', n); }
+    await enhanceNote(n, course, () => { location.hash = 'note-' + n.id; });
+  };
   const mg = $('#s-merge'); if (mg) mg.onclick = async () => {
     const notes = (await DB.byIndex('notes', 'courseId', course.id)).filter(n => n.markdown).sort((a, b) => b.createdAt - a.createdAt);
     if (!notes.length) { toast('这门课还没有笔记，点「整理成新笔记」'); return; }
     modal(`<h2>并入已有笔记</h2><div class="field"><select id="mg-n">${notes.map(n => `<option value="${n.id}" ${n.sessionId === s.id ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}</select><span class="hint">课件笔记不动，在下面加一部分「课堂上老师提到的」：老师强调的、课件之外的补充、课堂提问和答案、你的手写</span></div>
       <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="mg-go">开始整理</button></div>`, (box, close) => {
-      $('#mg-go', box).onclick = async () => { const n = await DB.get('notes', $('#mg-n', box).value); n.sessionId = s.id; await DB.put('notes', n); close(); runRecap(n, course, () => { location.hash = 'note-' + n.id; }); };
+      $('#mg-go', box).onclick = async () => { const n = await DB.get('notes', $('#mg-n', box).value); n.sessionId = s.id; await DB.put('notes', n); close(); enhanceNote(n, course, () => { location.hash = 'note-' + n.id; }); };
     });
   };
 
@@ -1078,15 +1231,24 @@ async function renderSession(id) {
   };
 
   // 录音回放：点句子跳到那里，播放时高亮当前句（借鉴 Otter）
+  const jumpTo = t => { let k = 0; s.segments.forEach((g, i) => { if (g.t <= t) k = i; }); const el = $(`.cap[data-i="${k}"]`, caps); if (el) { el.scrollIntoView({ block: 'center' }); el.classList.add('flash-hit'); setTimeout(() => el.classList.remove('flash-hit'), 1600); } return el; };
   if (s.hasAudio) {
-    let audio = null, url = null, cur = -1;
+    let audio = null, url = null, cur = -1, spanTimer = 0, savedAt = 0;
+    const POS_KEY = 'tingkeben.play.' + s.id;
     const ensure = async () => {
       if (audio) return audio;
       const w = await sessionWav(s.id); if (!w) { toast('这段没有保存录音'); return null; }
       url = URL.createObjectURL(w); audio = new Audio(url); audio.preload = 'auto';
+      // 断点续听：上次听到哪，下次从哪接着听（借鉴 Otter；只存本机，不参与同步）
+      const resumeAt = Number(localStorage.getItem(POS_KEY) || 0);
+      if (resumeAt > 5 && (!s.duration || resumeAt < s.duration - 10)) {
+        audio.currentTime = resumeAt;
+        toast('从上次的 ' + fmtTime(resumeAt) + ' 接着听');
+      }
       audio.ontimeupdate = () => {
         if (!$('#p-time')) { audio.pause(); URL.revokeObjectURL(url); return; }
         $('#p-time').textContent = fmtTime(audio.currentTime); $('#p-seek').value = Math.floor(audio.currentTime);
+        if (Date.now() - savedAt > 5000) { savedAt = Date.now(); try { localStorage.setItem(POS_KEY, String(Math.floor(audio.currentTime))); } catch (e) {} }
         let i = -1; for (let k = 0; k < s.segments.length; k++) { if (s.segments[k].t - 1.5 <= audio.currentTime) i = k; else break; }
         if (i !== cur) {
           const old = $(`.cap[data-i="${cur}"]`, caps); old && old.classList.remove('playing');
@@ -1098,6 +1260,15 @@ async function renderSession(id) {
       audio.onpause = () => { const b = $('#p-play'); if (b) b.textContent = '▶'; };
       return audio;
     };
+    // 标记回看：听那 30 秒就够，不拖着整段录音走
+    const playSpan = async (t, dur) => {
+      const a = await ensure(); if (!a) { jumpTo(t); return; }
+      a.currentTime = Math.max(0, t - 2); a.play();
+      clearTimeout(spanTimer);
+      spanTimer = setTimeout(() => { try { a.pause(); } catch (e) {} }, dur * 1000);
+    };
+    $$('[data-hl]').forEach(b => b.onclick = () => playSpan(s.highlights[Number(b.dataset.hl)].t, 8));
+    $$('[data-hl-play]').forEach(b => b.onclick = () => playSpan(s.highlights[Number(b.dataset.hlPlay)].t, 30));
     $('#player').hidden = false;
     $('#p-play').onclick = async () => { const a = await ensure(); if (a) a.paused ? a.play() : a.pause(); };
     $('#p-back').onclick = async () => { const a = await ensure(); if (a) a.currentTime = Math.max(0, a.currentTime - 5); };
@@ -1112,6 +1283,9 @@ async function renderSession(id) {
       a.currentTime = Math.max(0, s.segments[el.dataset.i].t - 1.5); a.play();
     });
   }
+  // 这节没存录音时，标记也能跳：只跳文字，不给假播放器
+  $$('[data-hl]').forEach(b => { if (!b.onclick) b.onclick = () => { jumpTo(s.highlights[Number(b.dataset.hl)].t); toast('这节没保存录音，已经跳到对应文字'); }; });
+  $$('[data-hl-play]').forEach(b => { if (!b.onclick) b.onclick = () => { const t = s.highlights[Number(b.dataset.hlPlay)].t; jumpTo(t); toast('这节没保存录音，已经跳到 ' + fmtTime(t)); }; });
   $('#s-rename').onclick = () => modal(`<h2>改名</h2><input id="r-in" type="text" value="${esc(s.title)}"><div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="r-ok">保存</button></div>`, (box, close) => {
     $('#r-ok', box).onclick = async () => { s.title = $('#r-in', box).value.trim() || s.title; await DB.put('sessions', s); close(); renderSession(id); };
   });
@@ -1149,6 +1323,11 @@ function renderSettings(cat = '') {
         <div class="row" style="justify-content:space-between"><h2>这台设备</h2><span class="pill">${{ ipad: 'iPad 版', desktop: 'Mac 版', phone: '手机版' }[Device.kind]}</span></div>
         <p>iPad 版：侧边栏能收起、工作台竖屏上下分屏、默认打开画板、按钮更大。一般自动识别，认错了可以在这里改。</p>
         <div class="seg" role="radiogroup" aria-label="设备">${[['auto', '自动识别'], ['desktop', 'Mac'], ['ipad', 'iPad']].map(([v, l]) => `<button data-dev="${v}" class="${Device.choice() === v ? 'on' : ''}">${l}${v === 'auto' ? `（${{ ipad: 'iPad', desktop: 'Mac', phone: '手机' }[Device.detected]}）` : ''}</button>`).join('')}</div>
+      </section>
+      <section class="card pad">
+        <div class="row" style="justify-content:space-between"><h2>课表与上课提醒</h2><button class="btn small" id="set-sched">管理课表</button></div>
+        <p>填好每周的上课时间，首页会显示下一节课；开课前 10 分钟提醒你开录，录音自动归到那门课。</p>
+        <label class="switch"><input type="checkbox" id="set-remind" ${Schedule.remindOn() ? 'checked' : ''}>开课前 10 分钟提醒（浏览器要允许通知；听课本开着才有效）</label>
       </section>
       <section class="card pad">
         <h2>Gemini（实时转写 + 翻译 + 扫描件识别）</h2>
@@ -1261,6 +1440,12 @@ function renderSettings(cat = '') {
   const bind = (sel, key, fn = v => v) => { const el = $(sel); el.addEventListener('change', () => { Settings.save({ [key]: fn(el.type === 'checkbox' ? el.checked : el.value) }); toast('已保存'); }); };
   bind('#k-gemini', 'geminiKey', v => v.trim()); bind('#k-deepseek', 'deepseekKey', v => v.trim());
   bind('#m-live', 'liveModel', v => v.trim()); bind('#m-smart', 'geminiSmartModel', v => v.trim());
+  const setSched = $('#set-sched'); if (setSched) setSched.onclick = () => scheduleModal();
+  const setRemind = $('#set-remind'); if (setRemind) setRemind.onchange = async e => {
+    if (!e.target.checked) { Schedule.setRemind(false); return; }
+    const p = await Schedule.askNotify(); Schedule.setRemind(true);
+    if (p === 'denied') toast('浏览器通知被拒绝了，只能在页面里提醒', 6000);
+  };
   bind('#m-ds', 'deepseekModel', v => v.trim()); bind('#ds-think', 'deepseekThinking');
   bind('#l-lang', 'liveLanguage'); bind('#l-mode', 'liveMode'); bind('#s-audio', 'saveAudio'); bind('#t-prov', 'translateProvider'); bind('#d-mode', 'draftMode'); bind('#t-pace', 'translatePace'); bind('#s-auto-study', 'autoStudy'); bind('#s-mic', 'micId');
   $('#s-mic-scan').onclick = async () => {
@@ -1465,13 +1650,14 @@ async function importBackup(file) {
 /* 设置分类：首页只放分类卡片，点进去才看到具体设置 */
 const SET_CATS = [
   ['device', '这台设备', 'Mac 版 / iPad 版'],
+  ['schedule', '课表与提醒', '每周上课时间、开课前提醒'],
   ['ai', 'AI 和 API key', 'Gemini、DeepSeek、生成笔记'],
   ['translate', '课堂翻译', '免费模型池、翻译节奏'],
   ['sync', '云同步', 'Mac 和 iPad 之间同步'],
   ['usage', '用量和费用', '这个月花了多少'],
   ['data', '数据和备份', '导出、导入备份'],
 ];
-const SET_ORDER = ['device', 'ai', 'translate', 'ai', 'sync', 'sync', 'usage', 'data']; // 设置页里每个区块属于哪一类（按出现顺序）
+const SET_ORDER = ['device', 'schedule', 'ai', 'translate', 'ai', 'sync', 'sync', 'usage', 'data']; // 设置页里每个区块属于哪一类（按出现顺序）
 function settingsCategories(cat) {
   const wrap = $('.settings'); if (!wrap) return;
   const secs = $$(':scope > section', wrap);
@@ -1482,6 +1668,7 @@ function settingsCategories(cat) {
     const s = Settings.load(), st = Sync.status();
     const status = {
       device: { ipad: '现在是 iPad 版', desktop: '现在是 Mac 版', phone: '现在是手机版' }[Device.kind],
+      schedule: Schedule.load().length ? `${Schedule.load().length} 节课${Schedule.remindOn() ? ' · 会提醒' : ''}` : '还没填',
       ai: s.geminiKey && s.deepseekKey ? '✓ 两个 key 都填了' : `还没填：${[!s.geminiKey && 'Gemini', !s.deepseekKey && 'DeepSeek'].filter(Boolean).join('、')}`,
       translate: { pool: '免费模型池', deepseek: 'DeepSeek', gemini: 'Gemini' }[s.translateProvider] || s.translateProvider || '',
       sync: !st.ready ? '还没登录' : st.counts && (st.counts.up + st.counts.down + st.counts.del) ? `${st.counts.up + st.counts.down + st.counts.del} 个没同步` : '✓ 已登录',
@@ -1515,11 +1702,13 @@ async function renderReview(courseId) {
     </div>
     ${list.length ? `<div class="rv-grid">${list.map(n => {
       const pg = Study.progress(n);
-      return `<a class="rv-card" href="#review-${n.id}">
+      const c = courses.find(x => x.id === n.courseId);
+      const cards = ((n.study && n.study.cards) || []).length, quiz = ((n.study && n.study.quiz) || []).length;
+      return `<a class="rv-card" href="#review-${n.id}" style="--c:${(c && c.color) || 'var(--accent)'}">
         <span class="rv-course">${esc(cname(n.courseId))}</span>
         <b>${esc(n.title)}</b>
         <span class="rv-meta">${fmtDate(n.createdAt)}${n.markdown ? '' : ' · 还没有正文'}</span>
-        ${pg.total ? `<span class="rv-prog"><span class="sb-bar green"><i style="width:${Math.round(pg.done / pg.total * 100)}%"></i></span><small>重点掌握 ${pg.done} / ${pg.total}</small></span>` : '<span class="rv-prog"><small>还没生成重点和卡片</small></span>'}
+        ${pg.total ? `<span class="rv-prog"><span class="sb-bar green"><i style="width:${Math.round(pg.done / pg.total * 100)}%"></i></span><small>重点掌握 ${pg.done} / ${pg.total}${cards ? ` · 卡片 ${cards}` : ''}${quiz ? ` · 测验 ${quiz} 题` : ''}</small></span>` : '<span class="rv-prog"><small>还没生成重点和卡片</small></span>'}
       </a>`; }).join('')}</div>`
     : `<div class="empty"><strong>还没有笔记</strong>先在课程里生成笔记，再来复习。</div>`}`;
 }
@@ -1596,7 +1785,8 @@ const SyncUI = (() => {
         ${x.p != null ? `<span class="sb-bar ${x.green ? 'green' : ''}"><i style="width:${x.p}%"></i></span>` : ''}
         <span class="sb-sub">${esc(x.sub)}</span></button>`;
     const dot = $('#syncdot'), n = unsynced(st.counts);
-    if (dot) { dot.hidden = false; dot.className = 'syncdot s-' + x.k; dot.innerHTML = `<span class="sb-dot"></span>${x.k === 'run' ? (x.p || 0) + '%' : x.k === 'off' ? '未开' : x.k === 'ok' ? '✓ 已同步' : n ? n + ' 个没同步' : '!'}`; }
+    // 没登录云服务时不挂这个浮标：首页已经有提示，手机上也别挡着标题
+    if (dot) { dot.hidden = x.k === 'off'; dot.className = 'syncdot s-' + x.k; dot.innerHTML = `<span class="sb-dot"></span>${x.k === 'run' ? (x.p || 0) + '%' : x.k === 'ok' ? '✓ 已同步' : n ? n + ' 个没同步' : '!'}`; }
     const ob = $('#sb-open'); if (ob) ob.onclick = open;
     const mbox = $('#modal-box'); if (mbox && mbox.dataset.syncui && !$('#modal').hidden) paintDetail(mbox);
   }
@@ -1666,6 +1856,7 @@ window.addEventListener('beforeunload', e => { if (State.live) { e.preventDefaul
   if (!window.indexedDB) { view.innerHTML = '<div class="empty"><strong>这个浏览器不能保存数据</strong>请用 Safari 或 Chrome 打开，不要用无痕模式。</div>'; return; }
   await loadCourses();
   Sync.start(); SyncUI.render();
+  Schedule.start();
   // 接收扩展弹窗（在 Moodle 页面点的）发来的同步任务
   window.addEventListener('message', e => {
     if (e.source !== window || !e.data || e.data.tkbFrom !== 'ext' || !e.data.start) return;

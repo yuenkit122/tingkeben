@@ -202,8 +202,8 @@ const PACE = {
 };
 
 class LiveSession {
-  constructor({ course, onUpdate, onInterim, onStatus, onError, onLevel }) {
-    Object.assign(this, { course, onUpdate, onInterim, onStatus, onError, onLevel });
+  constructor({ course, onUpdate, onInterim, onStatus, onError, onLevel, onQuiet }) {
+    Object.assign(this, { course, onUpdate, onInterim, onStatus, onError, onLevel, onQuiet });
     this.segments = [];
     this.glossary = {};
     this.buffer = ''; this.bufferStart = null; this.flushTimer = null;
@@ -249,15 +249,36 @@ class LiveSession {
     await this.capture.start();
     this.transcriber.start();
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch (e) { /* 不支持就算了 */ }
+    this.watchQuiet();
     await DB.put('sessions', this.record);
   }
   elapsed() { return Math.round((Date.now() - this.t0) / 1000); }
+  /* 静音看门狗（借鉴 Otter 的 NO_SPEECH 计时）：
+     下课了忘了点停止、或者麦克风被系统静音，会一直录下去——两个半小时的空录音很常见。
+     这里不自动停（自动停了万一只是老师在看视频就更糟），只到点提醒一次，人来决定。 */
+  watchQuiet() {
+    this.lastVoiceAt = Date.now();
+    this.quietWarned = false;
+    this.quietSnoozeUntil = 0;
+    clearInterval(this.quietTimer);
+    this.quietTimer = setInterval(() => {
+      if (this.stopped) return;
+      if (Date.now() < this.quietSnoozeUntil) return;
+      const mins = Math.floor((Date.now() - this.lastVoiceAt) / 60000);
+      if (mins >= 10 && !this.quietWarned) {
+        this.quietWarned = true;
+        this.onQuiet && this.onQuiet(mins);
+      }
+    }, 30000);
+  }
+  heard() { this.lastVoiceAt = Date.now(); this.quietWarned = false; }
   /* Gemini 实时转写的规律（实测）：讲者不停顿时，只有一份一直变长的“草稿”(interim)，
      要等讲者停下来才给一次“定稿”(final)，一段可能长达一分钟。
      所以直接从草稿里切句子：一句话后面已经接着说了几个词，这句就不会再变了，马上拿去翻译。 */
   onDraft(t) {
     t = (t || '').trim();
     if (!t) return;
+    this.heard();
     // 草稿从头换了内容 = 新的一段开始了；上一段没切完的先收尾
     if (this.turn && !sameStart(this.turn.text, t)) { this.commitWords(splitWords(this.turn.text).slice(this.turn.committed)); this.turn = null; }
     if (!this.turn) this.turn = { text: '', committed: 0, tail: [], pendingSince: Date.now() };
@@ -322,6 +343,7 @@ class LiveSession {
     t = (t || '').trim();
     clearTimeout(this.stableTimer);
     if (!t) return;
+    this.heard();
     const words = splitWords(t);
     let start = 0;
     if (this.turn && this.turn.committed) {
@@ -482,7 +504,7 @@ class LiveSession {
     await DB.put('audio', { id: this.record.id + '_' + String(this.audioIdx).padStart(4, '0'), sessionId: this.record.id, idx: this.audioIdx++, blob });
   }
   async stop() {
-    this.stopped = true; clearTimeout(this.draftTimer);
+    this.stopped = true; clearTimeout(this.draftTimer); clearInterval(this.quietTimer);
     this.capture && this.capture.stop();
     await (this.transcriber && this.transcriber.stop());
     this.flushBuffer();

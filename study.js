@@ -103,24 +103,77 @@ const Board = (() => {
   const pref = () => { try { return JSON.parse(localStorage.getItem('tingkeben.board') || '{}'); } catch (e) { return {}; } };
   const savePref = p => { try { localStorage.setItem('tingkeben.board', JSON.stringify(Object.assign(pref(), p))); } catch (e) {} };
 
-  function drawStroke(ctx, s, scale, ocr) {
-    const pts = s.pts; if (!pts.length) return;
+  /* ---------- 笔迹渲染 ----------
+     原来的写法是「一段一点，每段单独 stroke」，线宽还跟着压力逐段跳。
+     屏幕上的点只隔 1–3 像素，圆头端点互相叠在一起，边缘就是一串小鼓包 ——
+     拿 Apple Pencil 写字时看到的「毛刺」其实是这个，不是采样率不够。
+
+     现在改成：
+       1. 先对点做一次低通平滑（手按得稳的地方磨平，快速划过的地方跟得紧，不会把大字磨圆）；
+       2. 用「经过各点的二次贝塞尔」串成一条连续曲线，而不是一根根直线；
+       3. 线宽按 12 个点一小段取平均（变化很缓），首尾略收细，看起来像笔锋。
+     连续曲线的边缘是光滑的，这才是字迹清楚的关键。 */
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  function smoothPts(raw) {
+    const n = raw.length;
+    if (n < 3) return raw;
+    const out = new Array(n);
+    out[0] = raw[0];
+    let sx = raw[0][0], sy = raw[0][1], sp = raw[0][2] == null ? .5 : raw[0][2];
+    for (let i = 1; i < n; i++) {
+      const p = raw[i];
+      const d = Math.hypot(p[0] - sx, p[1] - sy);
+      const a = Math.min(.9, .3 + d / 16);
+      sx += (p[0] - sx) * a; sy += (p[1] - sy) * a;
+      sp += ((p[2] == null ? .5 : p[2]) - sp) * .25;
+      out[i] = [sx, sy, sp];
+    }
+    return out;
+  }
+  /* 把 pts[i0..i1] 画成一条平滑的路径：每段以相邻两点的中点为终点，原点是控制点 */
+  function pathRange(ctx, pts, scale, i0, i1) {
+    ctx.beginPath();
+    if (i0 === 0) ctx.moveTo(pts[0][0] * scale, pts[0][1] * scale);
+    else { const m = mid(pts[i0 - 1], pts[i0]); ctx.moveTo(m[0] * scale, m[1] * scale); }
+    for (let i = i0; i < i1; i++) {
+      const m = mid(pts[i], pts[i + 1]);
+      ctx.quadraticCurveTo(pts[i][0] * scale, pts[i][1] * scale, m[0] * scale, m[1] * scale);
+    }
+    if (i1 === pts.length - 1) ctx.lineTo(pts[i1][0] * scale, pts[i1][1] * scale);
+  }
+  function drawStroke(ctx, s, scale, ocr, bold = 1) {
+    const raw = s.pts; if (!raw || !raw.length) return;
+    const pts = smoothPts(raw);
+    const hl = s.tool === 'hl';
+    // bold：交给 AI 识别时把笔迹加粗一点，细笔写完的整页放大后不至于断成虚线
+    const base = hl ? (s.w || 18) : (s.w || 3) * bold;
     ctx.save();
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    if (s.tool === 'hl') {
+    ctx.strokeStyle = s.c; ctx.fillStyle = s.c;
+    if (hl) ctx.globalAlpha = ocr ? .82 : .3;
+
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0][0] * scale, pts[0][1] * scale, Math.max(.55, base * scale * .5), 0, Math.PI * 2);
+      ctx.fill(); ctx.restore(); return;
+    }
+    if (hl) {
       // 交给 AI 识别时荧光笔要画实一点，不然只剩一层几乎看不见的淡黄
-      ctx.globalAlpha = ocr ? .85 : 0.35; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * scale;
-      ctx.beginPath(); ctx.moveTo(pts[0][0] * scale, pts[0][1] * scale);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * scale, pts[i][1] * scale);
+      ctx.lineWidth = Math.max(1, base * scale);
+      pathRange(ctx, pts, scale, 0, pts.length - 1);
+      ctx.stroke(); ctx.restore(); return;
+    }
+
+    const CH = 12, n = pts.length;
+    const widthAt = pr => base * scale * (.6 + Math.min(1, Math.max(0, pr)) * .8);
+    // 首尾各有一点点收细（笔锋），中间保持满宽
+    const taper = i => Math.min(1, .58 + Math.min(i + 1, n - i) / 6);
+    for (let i0 = 0; i0 < n - 1; i0 += CH) {
+      const i1 = Math.min(n - 1, i0 + CH);
+      let acc = 0; for (let k = i0; k <= i1; k++) acc += pts[k][2];
+      ctx.lineWidth = Math.max(.55, widthAt(acc / (i1 - i0 + 1)) * Math.min(taper(i0), taper(i1)));
+      pathRange(ctx, pts, scale, i0, i1);
       ctx.stroke();
-    } else {
-      ctx.strokeStyle = s.c; ctx.fillStyle = s.c;
-      if (pts.length === 1) { ctx.beginPath(); ctx.arc(pts[0][0] * scale, pts[0][1] * scale, s.w * scale * .5, 0, 7); ctx.fill(); }
-      for (let i = 1; i < pts.length; i++) {
-        const [x0, y0, p0] = pts[i - 1], [x1, y1, p1] = pts[i];
-        ctx.lineWidth = s.w * scale * (0.45 + ((p0 + p1) / 2) * 0.9);
-        ctx.beginPath(); ctx.moveTo(x0 * scale, y0 * scale); ctx.lineTo(x1 * scale, y1 * scale); ctx.stroke();
-      }
     }
     ctx.restore();
   }
@@ -173,11 +226,13 @@ const Board = (() => {
 
     const pageViews = [];
     function layoutPage(pv) {
-      const cssW = pv.el.clientWidth || 600, dpr = Math.min(2, window.devicePixelRatio || 1);
+      const cssW = pv.el.clientWidth || 600, dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const cssH = cssW * pv.page.h / W;
+      const bw = Math.round(cssW * dpr), bh = Math.round(cssH * dpr);
+      for (const c of [pv.bgC, pv.ink, pv.live]) { c.width = bw; c.height = bh; c.style.height = cssH + 'px'; }
       pv.scale = cssW / W;
-      for (const c of [pv.bgC, pv.ink]) { c.width = Math.round(cssW * dpr); c.height = Math.round(cssH * dpr); c.style.height = cssH + 'px'; }
-      pv.dpr = dpr;
+      // 用「实际像素宽 / css 宽」当倍率，避免四舍五入带来的整体半像素模糊
+      pv.dpr = bw / cssW;
       paintBg(pv); paintInk(pv);
     }
     async function paintBg(pv) {
@@ -199,6 +254,8 @@ const Board = (() => {
     function paintInk(pv) {
       const ctx = pv.ink.getContext('2d');
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pv.ink.width, pv.ink.height);
+      const lc = pv.live && pv.live.getContext('2d');
+      if (lc) { lc.setTransform(1, 0, 0, 1, 0, 0); lc.clearRect(0, 0, pv.live.width, pv.live.height); }
       const sc = pv.scale * pv.dpr;
       for (const s of pv.page.strokes) drawStroke(ctx, s, sc);
     }
@@ -207,9 +264,9 @@ const Board = (() => {
       pageViews.length = 0;
       note.board.pages.forEach((page, i) => {
         const el = document.createElement('div'); el.className = 'board-page';
-        el.innerHTML = `<canvas class="bg"></canvas><canvas class="ink"></canvas><div class="pno">${i + 1}${page.bg ? ' · 课件第 ' + page.bg.page + ' 页' : ''}<button class="btn small ghost" data-del="${i}" title="删除这一页">删除</button></div>`;
+        el.innerHTML = `<canvas class="bg"></canvas><canvas class="ink"></canvas><canvas class="live"></canvas><div class="pno">${i + 1}${page.bg ? ' · 课件第 ' + page.bg.page + ' 页' : ''}<button class="btn small ghost" data-del="${i}" title="删除这一页">删除</button></div>`;
         pagesEl.appendChild(el);
-        const pv = { el, page, bgC: $('.bg', el), ink: $('.ink', el), scale: 1, dpr: 1 };
+        const pv = { el, page, bgC: $('.bg', el), ink: $('.ink', el), live: $('.live', el), scale: 1, dpr: 1 };
         pageViews.push(pv);
         attach(pv);
         confirmClick($('[data-del]', el), '确认删除这页', () => { note.board.pages.splice(i, 1); if (!note.board.pages.length) note.board.pages.push({ bg: null, h: 1414, strokes: [] }); persist(); build(); });
@@ -220,12 +277,25 @@ const Board = (() => {
 
     function attach(pv) {
       let cur = null, penDown = false;
-      const pos = e => { const r = pv.ink.getBoundingClientRect(); return [Math.round((e.clientX - r.left) / pv.scale * 10) / 10, Math.round((e.clientY - r.top) / pv.scale * 10) / 10, e.pointerType === 'pen' ? (e.pressure || .5) : .5]; };
+      const sc = () => pv.scale * pv.dpr;
+      const pos = e => {
+        const r = pv.ink.getBoundingClientRect();
+        return [
+          (e.clientX - r.left) / (pv.scale || 1),
+          (e.clientY - r.top) / (pv.scale || 1),
+          e.pointerType === 'pen' ? (e.pressure || .5) : .5,
+        ];
+      };
       const allowed = e => {
         if (e.pointerType === 'pen') return true;
         if (e.pointerType === 'touch') return !P.penOnly && !penDown;
         return e.button === 0 || e.buttons === 1; // 鼠标 / 触控板
       };
+      // 正在写的那一笔画在单独一层上，松手才落到纸上。
+      // 好处是每帧只重画这一笔，不用把整页几百笔重画一遍，iPad 上不会掉帧。
+      const liveCtx = pv.live.getContext('2d');
+      const liveClear = () => { liveCtx.setTransform(1, 0, 0, 1, 0, 0); liveCtx.clearRect(0, 0, pv.live.width, pv.live.height); };
+      const liveDraw = () => { liveClear(); if (cur && !cur.er) drawStroke(liveCtx, cur.s, sc()); };
       // 阻止 Apple Pencil 拖动时页面跟着滚
       pv.el.addEventListener('touchstart', e => { if ([...e.touches].some(t => t.touchType === 'stylus') || !P.penOnly) e.preventDefault(); }, { passive: false });
       pv.el.addEventListener('touchmove', e => { if ([...e.touches].some(t => t.touchType === 'stylus') || (!P.penOnly && cur)) e.preventDefault(); }, { passive: false });
@@ -237,27 +307,34 @@ const Board = (() => {
         const p = pos(e);
         if (P.tool === 'er') { cur = { er: true, id: e.pointerId, removed: [] }; eraseAt(pv, p, cur); return; }
         cur = { id: e.pointerId, s: { tool: P.tool, c: P.tool === 'hl' ? '#FFD400' : P.color, w: P.tool === 'hl' ? 18 : P.size, pts: [p] } };
+        liveDraw();
       });
       pv.ink.addEventListener('pointermove', e => {
         if (!cur || e.pointerId !== cur.id) return;
         e.preventDefault();
         const co = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
         const evs = co.length ? co : [e];
+        let added = false;
         for (const ev of evs) {
           const p = pos(ev);
           if (cur.er) { eraseAt(pv, p, cur); continue; }
           const pts = cur.s.pts, last = pts[pts.length - 1];
-          if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 1.2) continue;
-          pts.push(p);
-          const ctx = pv.ink.getContext('2d'); const sc = pv.scale * pv.dpr;
-          if (cur.s.tool === 'hl') { paintInk(pv); drawStroke(ctx, cur.s, sc); } else drawStroke(ctx, { ...cur.s, pts: [last, p] }, sc);
+          if (Math.hypot(p[0] - last[0], p[1] - last[1]) < .7) continue;
+          pts.push(p); added = true;
         }
+        if (added) liveDraw();
       });
       const end = e => {
         if (e.pointerType === 'pen') penDown = false;
         if (!cur || e.pointerId !== cur.id) return;
         if (cur.er) { if (cur.removed.length) { undo.push({ type: 'erase', page: pv.page, strokes: cur.removed }); redo.length = 0; persist(); } }
-        else { pv.page.strokes.push(cur.s); undo.push({ type: 'add', page: pv.page, stroke: cur.s }); redo.length = 0; persist(); }
+        else {
+          pv.page.strokes.push(cur.s);
+          // 松手时把这一笔按最终形态画到纸上（和纸上其它笔迹同一套算法，前后一致）
+          drawStroke(pv.ink.getContext('2d'), cur.s, sc());
+          undo.push({ type: 'add', page: pv.page, stroke: cur.s }); redo.length = 0; persist();
+        }
+        liveClear();
         cur = null;
       };
       pv.ink.addEventListener('pointerup', end);
@@ -366,9 +443,13 @@ const Board = (() => {
     }
     return isFinite(x0) ? { x0, y0, x1, y1 } : null;
   }
-  function inkImage(page, targetW = 1600, maxPx = 4.2e6) {
-    const b = inkBox(page); if (!b) return null;
-    const pad = 40;
+  function inkImage(page, targetW = 1600, maxPx = 4.2e6, bold = 1, region) {
+    const b = region ? {
+      x0: Math.max(0, region.x0), y0: Math.max(0, region.y0),
+      x1: Math.min(W, region.x1), y1: Math.min(page.h || 1414, region.y1),
+    } : inkBox(page);
+    if (!b || b.x1 - b.x0 < 4 || b.y1 - b.y0 < 4) return null;
+    const pad = region ? 14 : 40;
     const x0 = Math.max(0, b.x0 - pad), y0 = Math.max(0, b.y0 - pad);
     const x1 = Math.min(W, b.x1 + pad), y1 = Math.min(page.h || 1414, b.y1 + pad);
     const bw = Math.max(80, x1 - x0), bh = Math.max(80, y1 - y0);
@@ -380,7 +461,7 @@ const Board = (() => {
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     ctx.translate(-x0 * sc, -y0 * sc);
-    for (const s of page.strokes) drawStroke(ctx, s, sc, true);
+    for (const s of page.strokes) drawStroke(ctx, s, sc, true, bold);
     return c;
   }
   /* iOS Safari 对没挂在页面上的 canvas 调 toDataURL 有时会返回全白，先挂上去再截 */
@@ -404,7 +485,7 @@ const Board = (() => {
     w.document.close();
   }
   const hasInk = note => (note.board?.pages || []).some(p => p.strokes.length);
-  return { mount, pageImage, inkImage, shoot, hasInk, drawStroke, INK };
+  return { mount, pageImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK };
 })();
 
 /* ======================================================================
@@ -603,6 +684,13 @@ const MindMap = (() => {
     function draw() {
       const nodes = [], links = [];
       let y = 0; const ROW = 34, PADX = 14;
+      // 文字超过节点宽度就截断加省略号，否则长句子会画到框外、被面板边缘切掉
+      const fitText = (t, maxW, bold) => {
+        if (measure(t, bold) <= maxW) return t;
+        let s = t;
+        while (s.length > 1 && measure(s + '…', bold) > maxW) s = s.slice(0, -1);
+        return s + '…';
+      };
       const colX = [];
       (function walk(n, depth, color, id) {
         n.id = id; n.depth = depth; n.color = color;
@@ -620,7 +708,7 @@ const MindMap = (() => {
       svg.innerHTML = links.map(([a, b]) => { const x1 = X(a) + a.w, y1 = Y(a), x2 = X(b), y2 = Y(b), mx = (x1 + x2) / 2; return `<path d="M${x1} ${y1} C${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" stroke="${b.color}" stroke-opacity=".55" stroke-width="1.6" fill="none"/>`; }).join('') +
         nodes.map(n => `<g class="mm-n ${n.depth === 0 ? 'root' : ''}" data-id="${n.id}">
           <rect x="${X(n)}" y="${Y(n) - 13}" width="${n.w}" height="26" rx="${n.depth === 0 ? 7 : 13}" fill="${n.depth === 0 ? '#1B2233' : n.depth === 1 ? n.color : 'var(--sheet)'}" stroke="${n.color}" stroke-opacity="${n.depth > 1 ? .45 : 1}"/>
-          <text x="${X(n) + PADX}" y="${Y(n) + 5}" font-size="14" font-weight="${n.depth < 2 ? 700 : 500}" fill="${n.depth < 2 ? '#fff' : 'var(--ink)'}">${esc(n.t.length > 40 ? n.t.slice(0, 39) + '…' : n.t)}</text>
+          <text x="${X(n) + PADX}" y="${Y(n) + 5}" font-size="14" font-weight="${n.depth < 2 ? 700 : 500}" fill="${n.depth < 2 ? '#fff' : 'var(--ink)'}">${esc(fitText(n.t, n.w - PADX * 2, n.depth < 2))}</text>
           ${n.kids.length && n.depth > 0 ? `<circle cx="${X(n) + n.w + 7}" cy="${Y(n)}" r="6" fill="var(--sheet)" stroke="${n.color}" class="mm-tg"/>${collapsed.has(n.id) ? `<text x="${X(n) + n.w + 7}" y="${Y(n) + 4}" font-size="11" text-anchor="middle" fill="${n.color}" pointer-events="none">${n.kids.length}</text>` : ''}` : ''}
         </g>`).join('');
       $$('.mm-n', svg).forEach(g => g.onclick = () => { const id = g.dataset.id; if (id === 'r') return; collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); draw(); });
@@ -793,7 +881,7 @@ function chatDrawer(opts) {
 window.addEventListener('hashchange', () => { const d = $('#drawer'); if (d) { d.classList.remove('open'); d.hidden = true; } });
 
 /* ======================================================================
-   录音总结：把老师讲的 + 我的手写，整理进笔记下半部分
+   手写笔记 + 课堂录音：把老师讲的 + 我的手写，整理进笔记下半部分
    ====================================================================== */
 const Recap = (() => {
   const START = '<!-- 课堂总结 开始 -->', END = '<!-- 课堂总结 结束 -->';
@@ -811,64 +899,134 @@ const Recap = (() => {
 ### 这节课讲了课件的哪些部分
 每条后面标时间，例如（12:30）。拿不准的标「（不确定）」。简洁，用要点。`;
 
-  const HW_PROMPT = '上面每张图（图前的「[第N页]」是对应页码）是学生上课时在 iPad 上用 Apple Pencil 手写的笔记，一份一张图。只转写学生手写的内容（笔迹、字、公式、圈画、箭头、下划线），图里印刷的课件文字不用抄。手写是在圈/划某个印刷词时，写成「圈出：某词」。荧光笔只标了重点没有写字时，写「（高亮）」。中英文按原样保留，公式写成普通文字（例如 x^2、a/b）。看不清的字写（看不清），不要猜。每页用「[第N页]」开头。';
+  /* ---------- 手写识别 ----------
+     旧做法：把最多 10 页塞进同一次请求 —— 图被挤小、模型在几张图之间来回对齐，
+     越往后的页认得越差，而且一页失败全军覆没。
+     现在改成一次一页，每页带自检：认得不干净就自动换模型 / 画得更大 /
+     把一页切成上下两半分开认，几份结果里留最好的那份。 */
+  const HW_MAX_PAGES = 14;
+  /* 词组级的「没认出来」：只有这些字样时继续往下试 */
+  const HW_EMPTY = /^(?:[（(\[【]?\s*(?:看不清|高亮|空白)\s*[）)\]】]?|[\s\-—–·.,，。、→*#])+$/;
+  const hwPrompt = which => `这是一张 iPad 上 Apple Pencil 手写笔记的截图（${which}，已裁好，只剩笔迹）。请只转写手写的内容。
+规则：
+1. 按书写顺序逐行输出，保留原本的分行和缩进；两栏并排的字先左栏后右栏。
+2. 圈、划、箭头、大括号用文字说清楚：「圈出：elasticity」「下划线：demand curve」「→ 考点」。
+3. 公式写成普通文字：x^2、a/b、ΔQ/ΔP、MC=MR。
+4. 中英文照抄，不要翻译、不要补全、不要总结，不要加标题或序号。
+5. 认不出的单个字用「□」，整行认不出写「（看不清）」。宁可留空也不要编，图里没有的字一个都不许出现。
+6. 只有荧光笔、没有写字的地方写「（高亮）」；图里没有任何笔迹就只输出「（空白）」。
+只输出转写结果，不要任何前言和解释。`;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const isRateErr = e => !!e && (e.status === 429 || /429|resource_exhausted|rate limit/i.test(String(e.message || '')));
+  /* 这页认得干不干净：「看不清/□」太多，或者写了厚厚一页却只认出几个字，都算不行 */
+  function hwPoor(text, page) {
+    if (!text || HW_EMPTY.test(text)) return true;
+    const body = text.replace(/\s/g, '');
+    const bad = (text.match(/看不清|□/g) || []).length;
+    if (bad >= 4 || bad * 6 > body.length) return true;
+    const strokes = (page.strokes || []).length;
+    if (strokes >= 18 && body.length < strokes * 2) return true;
+    return false;
+  }
+  /* 几次尝试里留最好的一份：字越多越好，「看不清/□」越多越扣分 */
+  const hwScore = t => !t ? -1 : t.replace(/\s/g, '').length - (t.match(/看不清|□/g) || []).length * 6;
 
-  async function handwriting(note) {
+  async function handwriting(note, onProgress) {
     const s = Settings.load();
     if (!s.geminiKey) throw new Error('识别手写要用 Gemini（免费），先到「设置 → AI 和 API key」填 Gemini key');
     const pages = (note.board?.pages || []).map((p, i) => ({ p, n: i + 1 })).filter(x => x.p.strokes && x.p.strokes.length);
     if (!pages.length) return '';
+    const use = pages.slice(0, HW_MAX_PAGES);
 
     // 手写识别比翻译难，用「聪明」那档模型，不是 fastest 那档
     const strong = s.geminiSmartModel || 'gemini-3.8-flash';
     const fast = s.geminiFastModel || 'gemini-3.1-flash-lite';
-    const imgs = [];
-    let budget = 8.5 * 1024 * 1024; // base64 总量控制，别把请求撑爆
-    for (const { p, n } of pages.slice(0, 10)) {
-      const c = Board.inkImage(p, 1600);
-      if (!c) continue;
-      const data = Board.shoot(c, 'image/png').split(',')[1];
-      if (!data || data.length > budget) continue;
-      budget -= data.length;
-      imgs.push({ n, data });
-    }
-    if (!imgs.length) return '';
 
-    async function once(model) {
-      const parts = [];
-      for (const it of imgs) {
-        parts.push({ text: `[第${it.n}页]` });
-        parts.push({ inlineData: { mimeType: 'image/png', data: it.data } });
+    /* 一页 → 一张 PNG：裁到笔迹范围再放大，字才够清楚 */
+    function shot(page, w, bold, region) {
+      const c = Board.inkImage(page, w, 4.2e6, bold, region);
+      if (!c) return null;
+      const data = Board.shoot(c, 'image/png').split(',')[1] || '';
+      return data.length > 64 ? data : null;
+    }
+    async function one(data, which, model) {
+      if (!data) throw new Error('这一页没有笔迹');
+      const txt = await AI.gemini({
+        model, temperature: .05, maxTokens: 2800,
+        parts: [{ inlineData: { mimeType: 'image/png', data } }, { text: hwPrompt(which) }],
+      });
+      return String(txt || '').trim();
+    }
+    /* 整页写得密密麻麻认不干净时：切成上下两半（中间留一点重叠）分开认 */
+    async function halves(page, model) {
+      const b = Board.inkBox(page); if (!b) return '';
+      const midY = (b.y0 + b.y1) / 2, ov = Math.max(30, (b.y1 - b.y0) * .06);
+      const out = [];
+      const parts = [
+        [{ x0: b.x0, y0: b.y0, x1: b.x1, y1: midY + ov }, '上半部分'],
+        [{ x0: b.x0, y0: midY - ov, x1: b.x1, y1: b.y1 }, '下半部分'],
+      ];
+      for (const [r, which] of parts) {
+        const d = shot(page, 2000, 1.12, r); if (!d) continue;
+        const t = await one(d, '同一页手写笔记的' + which, model);
+        if (t && !HW_EMPTY.test(t)) out.push(t);
       }
-      parts.push({ text: HW_PROMPT });
-      return (await AI.gemini({ model, parts, temperature: 0.05, maxTokens: 4096 })) || '';
+      return out.join('\n\n');
     }
 
-    let out = '';
-    try { out = await once(strong); }
-    catch (e) {
-      // 强模型不可用（模型名改了 / 额度用完）就退回快模型，而不是直接失败
-      try { out = await once(fast); } catch (e2) { throw new Error('手写识别失败：' + (e2.message || e.message)); }
+    const chunks = [], failed = [];
+    let missRow = 0;
+    for (let i = 0; i < use.length; i++) {
+      const { p, n } = use[i];
+      onProgress && onProgress(`正在识别手写 ${i + 1}/${use.length} 页…`);
+      // 一页最多四次机会：强模型 → 换个模型再看一遍 → 画大一点、笔迹加粗 → 切成上下两半
+      const tries = [
+        () => one(shot(p, 2000, 1), '整页', strong),
+        () => one(shot(p, 2000, 1), '整页', fast),
+        () => one(shot(p, 2800, 1.18), '整页', strong),
+        () => halves(p, strong),
+      ];
+      let best = '', bestScore = -1;
+      for (const fn of tries) {
+        let t = '';
+        try { t = await fn(); }
+        catch (e) {
+          if (!isRateErr(e)) continue;
+          await sleep(12000); // 撞到每分钟限额：等一下，把这次试完
+          try { t = await fn(); } catch (e2) { continue; }
+        }
+        const sc = hwScore(t);
+        if (sc > bestScore) { best = t; bestScore = sc; }
+        if (!hwPoor(t, p)) break; // 这一页已经认干净，后面的机会留给别的页
+      }
+      if (best && !HW_EMPTY.test(best)) { chunks.push(`[第${n}页]\n${best}`); missRow = 0; }
+      else if (!/^[（(\[【]?\s*空白\s*[）)\]】]?$/.test(best || '')) {
+        failed.push(n);
+        // 连着几页全认不出，多半是笔迹/拍照问题，别把免费次数烧完
+        if (++missRow >= 3 && i < use.length - 1) { onProgress && onProgress('连着几页都没认出来，先停了'); break; }
+      }
     }
-    if (out.trim().length < 3) {
-      try { out = await once(fast); } catch (e) { /* 还是空的就报下面那句 */ }
-    }
-    if (out.trim().length < 3) throw new Error('手写识别失败：模型没有返回内容，换个清楚的页再试一次');
-    return out;
+
+    if (!chunks.length) throw new Error('手写没认出来（笔迹太淡或太乱），换清楚一点的一页再试');
+    if (failed.length) toast(`第 ${failed.join('、')} 页没认出来，已经跳过`, 6000);
+    return chunks.join('\n\n');
   }
 
   async function run(note, course, { onStatus } = {}) {
     const session = note.sessionId ? await DB.get('sessions', note.sessionId) : null;
     if (!session || !session.segments.length) throw new Error('这份笔记还没有关联课堂录音');
     if (!Settings.load().deepseekKey) throw new Error('先去设置里填 DeepSeek key');
-    const job = Jobs.start('recap:' + note.id, '录音总结：' + note.title);
+    const job = Jobs.start('recap:' + note.id, '整理这节课：' + note.title);
     try { return await runInner(note, course, session, job, onStatus); } finally { job.done(); }
   }
   async function runInner(note, course, session, job, onStatus) {
-    if (Board.hasInk(note)) job.phase('正在识别画板上的手写', 0, .3, { expectSec: 10 });
+    const inkPages = (note.board?.pages || []).filter(p => p.strokes && p.strokes.length).length;
+    if (inkPages) job.phase('正在识别画板上的手写', 0, .3, { expectSec: Math.min(90, 6 + inkPages * 4) });
     onStatus && onStatus('正在识别手写…');
     let hw = '';
-    try { hw = await handwriting(note); }
+    try {
+      hw = await handwriting(note, t => { job.sub(t); onStatus && onStatus(t); });
+    }
     catch (e) { toast('手写识别没成功（' + String(e.message).slice(0, 70) + '），这次先用录音整理', 6000); }
     const body = (note.markdown || '').split(START)[0].trim();
     // 笔记还是空的：直接走完整的笔记生成（课件 + 录音 + 手写一起）
@@ -888,15 +1046,18 @@ const Recap = (() => {
   async function handwritingMerge(note, course, onStatus) {
     if (!Board.hasInk(note)) throw new Error('画板上还没有手写');
     if (!Settings.load().geminiKey) throw new Error('识别手写要用 Gemini（免费），先去设置里填 Gemini key');
-    const job = Jobs.start('hw:' + note.id, '识别手写：' + note.title).phase('正在识别手写', 0, .5, { expectSec: 10 });
+    const job = Jobs.start('hw:' + note.id, '识别手写：' + note.title);
     try {
+    const inkPages = (note.board?.pages || []).filter(p => p.strokes && p.strokes.length).length;
+    const total = Math.min(HW_MAX_PAGES, inkPages);
+    job.phase('正在识别手写', 0, .55, { expectSec: Math.min(90, 6 + total * 4) });
     onStatus && onStatus('正在识别手写…');
-    const hw = await handwriting(note);
+    const hw = await handwriting(note, t => { job.sub(t); onStatus && onStatus(t); });
     if (!hw.trim()) throw new Error('没有识别出手写内容');
     let out = hw;
     if (Settings.load().deepseekKey) {
       onStatus && onStatus('正在整理…');
-      job.phase('正在整理手写笔记', .5, .97, { expectLen: 1500 });
+      job.phase('正在整理手写笔记', .55, .97, { expectLen: 1500 });
       out = await AI.deepseekStream({ onText: t => job.len(t.length), system: '你在帮英语不好的中国留学生整理他自己上课时的手写笔记。保留他写的内容和意思，只把顺序理清、错字改正、补上缺的英文术语。中文解释，术语写成 中文（English）。不要编他没写的东西。输出 Markdown 要点，不要标题。', user: `课程：${course ? course.name : ''}\n笔记：${note.title}\n\n<课件笔记（参考，用来对上术语）>\n${(note.markdown || '').split(HS)[0].slice(0, 20000)}\n</课件笔记>\n\n<手写识别结果>\n${hw}\n</手写识别结果>`, thinking: false, maxTokens: 4000, purpose: 'recap' });
     }
     const base = (note.markdown || '').replace(new RegExp(HS + '[\\s\\S]*?' + HE + '\\n?'), '').trimEnd();
@@ -1370,11 +1531,11 @@ async function renderDesk(noteId) {
           <div class="dbody" id="dk-mid"></div>
         </section>
         <section class="dcol" data-col="right">
-          <button class="dk-rail" id="dk-rrail" title="展开 AI 问答栏" aria-label="展开 AI 问答栏"><span>‹</span><b>AI 问答</b></button>
-          <div class="dhead tabs" id="dk-rtabs"><button data-r="chat">问 AI</button><button data-r="live">实时翻译</button><span class="grow"></span><button class="dk-min" id="dk-rmin" title="最小化（收到右边）" aria-label="最小化 AI 栏">—</button></div>
+          <div class="dhead tabs" id="dk-rtabs"><button data-r="chat">问 AI</button><button data-r="live">实时翻译</button><span class="grow"></span><button class="dk-min" id="dk-rmin" title="收成一个圆按钮" aria-label="把 AI 栏收起来">—</button></div>
           <div class="dbody" id="dk-right"></div>
         </section>
       </div>
+      <button class="dk-fab" id="dk-fab" aria-label="展开 AI 问答" aria-hidden="true" tabindex="-1" title="展开 AI 问答">AI</button>
     </div>`;
 
   // 栏的显示 / 隐藏
@@ -1384,15 +1545,16 @@ async function renderDesk(noteId) {
   const narrow = () => !Device.ipad && window.innerWidth < 900;
   const stacked = () => ipadPortrait() && DeskPref.get().split;
   const single = () => narrow() || (ipadPortrait() && !DeskPref.get().split);
+  // AI 栏收起来时变成一个圆形按钮（不占栏位），点一下再弹回来
+  const fabOn = () => { const p = DeskPref.get(); return !!p.rmin && !stacked() && !single() && p.right; };
   // 只按当前偏好重算各栏宽度（拖动时用，不重建分隔条）
   const layoutTpl = () => {
     const p = DeskPref.get();
     const vis = $$('.dcol', cols).filter(c => !c.hidden).map(c => c.dataset.col);
-    const rmin = p.rmin && vis.includes('right') && vis.length > 1;
     const tpl = [];
     vis.forEach((k, i) => {
-      if (i) tpl.push(k === 'right' && rmin ? '6px' : '12px');
-      tpl.push(k === 'right' && rmin ? '46px' : `minmax(${k === 'right' ? 260 : 200}px,${(p.w && p.w[k]) || 1}fr)`);
+      if (i) tpl.push('12px');
+      tpl.push(`minmax(${k === 'right' ? 260 : 200}px,${(p.w && p.w[k]) || 1}fr)`);
     });
     cols.style.gridTemplateColumns = tpl.join(' ') || '1fr';
   };
@@ -1400,6 +1562,7 @@ async function renderDesk(noteId) {
     const p = DeskPref.get();
     $$('.dk-gut', cols).forEach(g => g.remove());
     cols.classList.toggle('stacked', stacked());
+    const rcol = $('.dcol[data-col=right]', cols);
     if (stacked()) {
       $$('.dcol', cols).forEach(c => { c.hidden = c.dataset.col === 'right' ? true : false; });
       cols.style.gridTemplateColumns = '1fr';
@@ -1407,19 +1570,36 @@ async function renderDesk(noteId) {
     } else {
       cols.style.gridTemplateRows = '';
       $$('.dcol', cols).forEach(c => { const k = c.dataset.col; c.hidden = single() ? p.one !== k : !p[k]; });
+      rcol.classList.remove('mini');
+      // 收成圆按钮：右栏整个从排版里拿掉，把宽度让给课件和笔记
+      if (fabOn()) rcol.hidden = true;
       const vis = $$('.dcol', cols).filter(c => !c.hidden).map(c => c.dataset.col);
-      // 栏与栏之间放可拖动的分隔条；AI 栏最小化时只剩一条细边
       $$('.dk-gut', cols).forEach(g => g.remove());
-      const rmin = p.rmin && vis.includes('right') && vis.length > 1;
-      $('.dcol[data-col=right]', cols).classList.toggle('mini', rmin);
       vis.forEach((k, i) => { if (i) { const g = document.createElement('div'); g.className = 'dk-gut'; g.dataset.a = vis[i - 1]; g.dataset.b = k; g.setAttribute('role', 'separator'); g.title = '拖动调整宽度（双击恢复默认）'; $(`.dcol[data-col=${k}]`, cols).before(g); } });
       layoutTpl();
-      $$('.dk-gut', cols).forEach(g => { if (g.dataset.b === 'right' && rmin) { g.classList.add('off'); return; } bindGut(g); });
+      $$('.dk-gut', cols).forEach(g => bindGut(g));
     }
     $$('.dk-toggles button[data-col]').forEach(b => b.classList.toggle('on', stacked() ? b.dataset.col !== 'right' : single() ? p.one === b.dataset.col : p[b.dataset.col]));
     const sp = $('#dk-split'); if (sp) { sp.hidden = !ipadPortrait(); sp.classList.toggle('on', !!p.split); }
     const dv = $('#dk-divider'); if (dv) dv.hidden = !stacked();
+    const fab = $('#dk-fab');
+    if (fab) {
+      const on = fabOn();
+      fab.classList.toggle('on', on);
+      fab.setAttribute('aria-hidden', on ? 'false' : 'true');
+      fab.tabIndex = on ? 0 : -1;
+    }
+    // 刚出现的栏轻轻滑进来（收起 AI 栏再展开、切分屏时都能看到）
+    const nowVis = $$('.dcol', cols).filter(c => !c.hidden).map(c => c.dataset.col).join(',');
+    if (prevVis) for (const c of $$('.dcol', cols)) {
+      if (!c.hidden && !prevVis.split(',').includes(c.dataset.col)) {
+        c.classList.remove('dk-enter'); void c.offsetWidth; c.classList.add('dk-enter');
+        setTimeout(() => c.classList.remove('dk-enter'), 340);
+      }
+    }
+    prevVis = nowVis;
   };
+  let prevVis = '';
   // 拖动分隔条：左右两栏按比例分宽度，记在本机（Mac 和 iPad 各记各的）
   function bindGut(g) {
     g.onpointerdown = e => {
@@ -1439,10 +1619,10 @@ async function renderDesk(noteId) {
     };
     g.ondblclick = () => { const p = DeskPref.get(); DeskPref.set({ w: Object.assign({}, p.w, DeskPref.defaults().w) }); applyCols(); };
   }
-  // AI 栏最小化 / 展开
+  // AI 栏收成一个圆按钮 / 再弹回来
   const setRmin = v => { DeskPref.set({ rmin: v }); applyCols(); };
   $('#dk-rmin').onclick = () => setRmin(true);
-  $('#dk-rrail').onclick = () => setRmin(false);
+  const fabBtn = $('#dk-fab'); if (fabBtn) fabBtn.onclick = () => setRmin(false);
   $$('.dk-toggles button[data-col]').forEach(b => b.onclick = () => {
     const k = b.dataset.col, p = DeskPref.get();
     if (stacked()) DeskPref.set({ split: false, one: k });
@@ -1527,13 +1707,13 @@ function deskNote(note, course, el, again) {
   }
   el.innerHTML = `
     <div class="row noprint" style="justify-content:flex-end;gap:6px;margin-bottom:8px">
-      ${note.sessionId ? `<button class="btn small primary" id="dn-recap">${ICON.spark}录音总结 → 笔记</button>` : ''}
+      ${note.sessionId || Board.hasInk(note) ? `<button class="btn small primary" id="dn-recap">${ICON.spark}手写笔记 + 课堂录音优化笔记</button>` : ''}
       <button class="btn small" id="dn-gen">${note.markdown ? '重新生成' : ICON.spark + '用课件生成'}</button>
       <button class="btn small" id="dn-edit">编辑</button>
     </div>
-    <div class="md" id="dn-body">${note.markdown ? md(note.markdown) : '<div class="empty"><strong>空白笔记</strong>上课时可以：点「编辑」打字记，切到「画板」用 Apple Pencil 写；下课后点「录音总结 → 笔记」，AI 把老师讲的和你手写的整理进来。</div>'}</div>`;
+    <div class="md" id="dn-body">${note.markdown ? md(note.markdown) : '<div class="empty"><strong>空白笔记</strong>上课时可以：点「编辑」打字记，切到「画板」用 Apple Pencil 写；下课后点「手写笔记 + 课堂录音优化笔记」，AI 把老师讲的和你手写的整理进来。</div>'}</div>`;
   linkPageRefs($('#dn-body', el), note);
-  const rc = $('#dn-recap', el); if (rc) rc.onclick = () => runRecap(note, course, async () => { Object.assign(note, await DB.get('notes', note.id)); again(); });
+  const rc = $('#dn-recap', el); if (rc) rc.onclick = () => enhanceNote(note, course, async () => { Object.assign(note, await DB.get('notes', note.id)); again(); });
   $('#dn-gen', el).onclick = () => {
     if (!course) return;
     if (!(note.sourceFileIds || []).length && !note.sessionId) { toast('先在左边选课件'); return; }
@@ -1599,8 +1779,8 @@ function deskLive(note, course, el) {
     State.live = null; clearInterval(tick); renderSide();
     const fresh = await DB.get('notes', note.id) || note;
     fresh.sessionId = rec.id; await DB.put('notes', fresh); Object.assign(note, fresh);
-    el.innerHTML = `<div class="empty"><strong>录好了 · ${fmtTime(rec.duration)} · ${rec.segments.length} 句</strong>下一步：把老师讲的和你的手写整理进笔记。<div class="row" style="justify-content:center;margin-top:12px"><a class="btn" href="#session-${rec.id}">看转写回放</a><button class="btn primary" id="dk-recap">${ICON.spark}录音总结 → 笔记</button></div></div>`;
-    $('#dk-recap', el).onclick = () => runRecap(note, course, () => renderDesk(note.id));
+    el.innerHTML = `<div class="empty"><strong>录好了 · ${fmtTime(rec.duration)} · ${rec.segments.length} 句</strong>下一步：把老师讲的和你的手写一起整理进笔记。<div class="row" style="justify-content:center;margin-top:12px"><a class="btn" href="#session-${rec.id}">看转写回放</a><button class="btn primary" id="dk-recap">${ICON.spark}手写笔记 + 课堂录音优化笔记</button></div></div>`;
+    $('#dk-recap', el).onclick = () => enhanceNote(note, course, () => renderDesk(note.id));
   };
 }
 
@@ -1614,9 +1794,11 @@ async function renderAsk(courseId) {
   try { localStorage.setItem('tingkeben.askCourse', course.id); } catch (e) {}
   view.innerHTML = `
     <div class="head"><div><h1>问 AI</h1><div class="meta">AI 会参考这门课所有笔记的重点、截止日期和学习进度</div></div>
-      <select id="ak-c" style="width:auto">${courses.map(c => `<option value="${c.id}" ${c.id === course.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="row"><button class="btn" id="ak-study">${ICON.mic}手写笔记 + 课堂录音优化笔记</button>
+        <select id="ak-c" style="width:auto">${courses.map(c => `<option value="${c.id}" ${c.id === course.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div></div>
     <div class="card ask-card" id="ak-chat"></div>`;
   $('#ak-c').onchange = e => { location.hash = 'ask-' + e.target.value; };
+  $('#ak-study').onclick = () => studyFlow({ courseId: course.id });
   const notes = (await DB.byIndex('notes', 'courseId', course.id)).sort((a, b) => a.createdAt - b.createdAt);
   Chat.mount($('#ak-chat'), {
     course,
