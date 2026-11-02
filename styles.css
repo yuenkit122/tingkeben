@@ -120,7 +120,7 @@ main {
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: 13px; font-weight: 600; color: var(--muted); }
 .field .hint { font-size: 12px; color: var(--faint); }
-input[type=text], input[type=password], input[type=date], input[type=number], select, textarea {
+input[type=text], input[type=search], input[type=password], input[type=date], input[type=number], select, textarea {
   width: 100%; min-height: 42px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--paper);
 }
 textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
@@ -1816,3 +1816,50 @@ html.is-touch .del-x { width: 40px; height: 40px; }
 html.is-touch .ic-stage.mode-text .ic-grip, html.is-touch .ic-stage.mode-text .ic-tx-del { display: grid; width: 30px; height: 30px; top: -16px; }
 html.is-touch .ic-stage.mode-text .ic-grip { left: -16px; } html.is-touch .ic-stage.mode-text .ic-tx-del { right: -16px; }
 .ic-stage.mode-ink .ic-text, .ic-stage.mode-hand .ic-text { pointer-events: none; }
+
+/* ---------- iPad 书写：防手掌、防误选 ---------- */
+/* 画布和工具栏上长按不弹放大镜 / 拷贝菜单，手掌压着也不会把旁边的字选中 */
+html.is-touch .ic-stage, html.is-touch .board-tools, html.is-touch .desk-top, html.is-touch .dhead, html.is-touch .tabbar, html.is-touch .side {
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+}
+html.is-touch .ic-stage .md.editing, html.is-touch .ic-text.editing .ic-tx-body { -webkit-user-select: text; user-select: text; }
+/* 上课工作台 / 笔记页：手掌在屏幕边上蹭，整页不会被拖得弹来弹去 */
+html.is-touch body.desk-mode, html.is-touch body.desk-mode main { overscroll-behavior: none; }
+html.is-touch .ic-stage { overscroll-behavior: none; }
+/* 笔记页：没有关联课件时，左栏和「显示课件」按钮都不要，画布占满整行（以前空着一个提示框把画布挤到 67%） */
+.nb-split.no-doc { grid-template-columns: 1fr !important; }
+.nb-split.no-doc .nb-left, .nb-split.no-doc .nb-doc-tog { display: none !important; }
+/* iPad 竖屏（12.9 寸也是）：跟窄屏一样，课件收成画布上方的按钮，画布用整个宽度 */
+html.dev-ipad.portrait .nb-split { grid-template-columns: 1fr; gap: 10px; }
+html.dev-ipad.portrait .nb-doc-tog { display: inline-flex; justify-self: start; }
+html.dev-ipad.portrait .nb-split .nb-left { display: none; position: static; }
+html.dev-ipad.portrait .nb-split.doc-on .nb-left { display: block; }
+html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
+/* 笔记的课件：勾选 / 上传 */
+.nf-list { margin-top: 10px; max-height: 46vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 2px; }
+.nf-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: var(--sheet); }
+.nf-item.on { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 6%, var(--sheet)); }
+.nf-item .grow { display: flex; flex-direction: column; min-width: 0; }
+.nf-item b { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nf-item input { width: 18px; height: 18px; flex: none; }
+#nf-mode label.radio { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin-top: 6px; line-height: 1.45; }
+/* 上课工作台「对照」：一页课件 → 这一页的解析 → 下一页课件，竖着往下滑 */
+.pair.pair-v { display: block; padding-bottom: 18px; margin-bottom: 18px; }
+.pair-ex { margin-top: 10px; padding: 12px 14px; border-radius: 10px; background: var(--accent-soft, rgba(44,71,165,.07)); border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); font-size: 14.5px; line-height: 1.7; }
+.pair-ex:empty { display: none; }
+.pair-ex-h { font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 4px; letter-spacing: .02em; }
+.pair-ex .md p { margin: 4px 0; }
+.pair-ex .pair-note { margin-top: 8px; background: transparent; padding: 0; }
+.pair-ex .pair-note summary { cursor: pointer; }
+.recap-bar { align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+/* 复盘：左边重新整理过的讲义，右边思维导图；窄的时候思维导图放上面 */
+.recap-host { container-type: inline-size; }
+.recap-wrap { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.recap-text { margin: 0; min-width: 0; }
+.recap-map { position: sticky; top: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--sheet); padding: 10px; max-height: calc(100vh - 120px); overflow: auto; }
+.recap-map-h { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
+@container (max-width: 820px) {
+  .recap-wrap { grid-template-columns: 1fr; }
+  .recap-map { position: static; order: -1; max-height: 52vh; }
+}
+@media print { .recap-wrap { display: block; } }

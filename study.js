@@ -341,6 +341,26 @@ const Board = (() => {
     try { return world(note).strokes.length > 0; } catch (e) { return false; }
   };
   const blockOf = (wd, y) => { let best = wd.blocks[0]; for (const b of wd.blocks) if (y >= b.y - 40) best = b; return best; };
+  /* 在笔记最后接一段新内容：只新增板块，原来板块的编号（手写跟着编号走）一个都不改 */
+  function appendMd(note, add) {
+    const wd = world(note);
+    const old = String(note.markdown || '').trim();
+    note.markdown = old ? old + '\n\n' + add : add;
+    const taken = new Set(wd.blocks.map(b => b.p));
+    let next = Math.max(0, ...taken);
+    const nb = blocksFromMd(add).map(b => { if (!b.p || taken.has(b.p)) b.p = ++next; else next = Math.max(next, b.p); taken.add(b.p); return { p: b.p, text: b.text }; });
+    const last = wd.blocks[wd.blocks.length - 1];
+    // 原来只有一块空白（还没写过正文）：直接换掉
+    if (wd.blocks.length === 1 && !String(last.text || '').trim()) wd.blocks = [];
+    if (wd.blocks.every(b => typeof b.y === 'number')) {
+      const lb = wd.blocks[wd.blocks.length - 1];
+      let y = Math.max(wd.h || 0, lb ? lb.y + blockH(lb.text) + GAP : 0);
+      nb.forEach(b => { b.y = y; y += blockH(b.text) + GAP; wd.blocks.push(b); });
+      wd.h = y;
+    } else nb.forEach(b => wd.blocks.push(b));   // 位置还没排过：打开画布时会自动排（已有板块的位置不动）
+    wd.mdSig = mdSig(note.markdown);
+    return wd;
+  }
 
   /* 把一块区域画成图（导出 / 交给 Gemini 认手写） */
   function inkImage(src, targetW = 1600, maxPx = 4.2e6, bold = 1, region) {
@@ -394,7 +414,7 @@ const Board = (() => {
     const P = Object.assign({ tool: 'select', color: INK[0], size: 3, penOnly: true }, pref());
     // 顺手把老页面里「第几页」的板书信息记下来，供左边课件联动
     // 每份笔记各记各的位置和缩放（以前是全局一个，换一份笔记会停在奇怪的地方）
-    const savedView = (pref().views || {})[note.id];
+    const savedView = null;   // 每次打开笔记都从最上面、100% 开始（不回到上次看到的位置）
     let view = Object.assign({ x: 0, y: -24, z: 1 }, savedView || {});
     const NS = { size: Math.min(24, Math.max(11, Number(P.noteSize) || 15)), bold: !!P.noteBold, ink: P.noteInk || '#1A2030' };
 
@@ -437,7 +457,7 @@ const Board = (() => {
           </div>
         </details>
       </div>
-      ${Device.touch && !pref().hintSeen ? `<div class="board-hint noprint">小技巧：一指拖动、两指捏合缩放 · 两指轻点 = 撤销，三指轻点 = 重做 · 双击文字就能改 <button class="btn small ghost" data-act="hint-x">知道了</button></div>` : ''}
+      ${Device.touch && !pref().hintSeen ? `<div class="board-hint noprint">小技巧：Apple Pencil 在任何工具下都能直接写，写字时手掌压着屏幕也没关系 · 一指拖动、两指捏合缩放 · 两指轻点撤销、三指轻点重做 · 双击文字（或用笔点两下）就能改 <button class="btn small ghost" data-act="hint-x">知道了</button></div>` : ''}
       <div class="ic-stage" id="ic-stage">
         <div class="ic-world" id="ic-world"></div>
         <canvas class="ic-ink" id="ic-ink"></canvas>
@@ -451,10 +471,7 @@ const Board = (() => {
     let dpr = 1;
     let save = null;
     const saveView = () => {
-      const vs = Object.assign({}, pref().views || {});
-      vs[note.id] = { x: Math.round(view.x), y: Math.round(view.y), z: Math.round(view.z * 1000) / 1000 };
-      const keys = Object.keys(vs); if (keys.length > 60) delete vs[keys[0]];
-      savePref({ views: vs });
+      if (pref().views) savePref({ views: null });   // 以前存的「上次看到哪」清掉，不再记
     };
     let viewT = null;
     const persistView = () => { clearTimeout(viewT); viewT = setTimeout(saveView, 400); };
@@ -749,15 +766,29 @@ const Board = (() => {
 
     const startPan = e => {
       try { stage.setPointerCapture(e.pointerId); } catch (err) {}
-      pan = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
+      pan = { id: e.pointerId, touch: e.pointerType === 'touch', t: Date.now(), x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
       stage.classList.add('panning');
     };
     // 触屏：记下每根手指，用来做捏合和多指轻点
     const touches = new Map();
     let pinch = null, tap = null, touchLock = false, lastTap = null;
     const mid2 = () => { const [a, b] = [...touches.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; };
+    // 手掌 / 卡住的触点：
+    //  · 新的「第一根手指」落下时，之前记着的触点一定都已经抬起了（抬起事件可能落在画布外没收到），先清空，
+    //    不然 touchLock 会一直开着，画布就再也拖不动了；
+    //  · 笔一落下（PenGuard 发 tk:pendown），正在按着的手指全部当手掌作废，手掌刚才拖动 / 缩放画布的那一下也撤回。
+    const dropTouches = restore => {
+      if (restore && pan && pan.touch && Date.now() - pan.t < 900) { view.x = pan.vx; view.y = pan.vy; applyView(); }
+      if (restore && pinch && pinch.v0 && Date.now() - pinch.t < 900) { view.x = pinch.v0.x; view.y = pinch.v0.y; view.z = pinch.v0.z; applyView(); }
+      touches.clear(); pinch = null; tap = null; touchLock = false;
+      if (pan && pan.touch) { pan = null; stage.classList.remove('panning'); }
+      if (cur && cur.touch) { cur = null; liveClear(); }
+    };
+    const onPenDown = () => { if (!host.isConnected) { window.removeEventListener('tk:pendown', onPenDown); return; } if (touches.size || (pan && pan.touch) || (cur && cur.touch)) dropTouches(true); };
+    window.addEventListener('tk:pendown', onPenDown);
     stage.addEventListener('pointerdown', e => {
       if (e.pointerType !== 'touch') return;
+      if (e.isPrimary && touches.size) dropTouches(false);
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY });
       if (touches.size === 1) tap = { n: 1, t: Date.now(), moved: false };
       else if (tap) tap.n = Math.max(tap.n, touches.size);
@@ -766,7 +797,7 @@ const Board = (() => {
         pan = null; touchLock = true;
         if (cur && !cur.er && cur.touch) { cur = null; liveClear(); }
         const m = mid2(), r = stage.getBoundingClientRect();
-        pinch = { d: m.d, z: view.z, wx: view.x + (m.x - r.left) / view.z, wy: view.y + (m.y - r.top) / view.z };
+        pinch = { t: Date.now(), v0: { x: (pan && pan.touch ? pan.vx : view.x), y: (pan && pan.touch ? pan.vy : view.y), z: view.z }, d: m.d, z: view.z, wx: view.x + (m.x - r.left) / view.z, wy: view.y + (m.y - r.top) / view.z };
       }
     }, true);
     stage.addEventListener('pointermove', e => {
@@ -788,13 +819,18 @@ const Board = (() => {
       if (touches.size < 2 && pinch) { pinch = null; persistView(); notify(); }
       if (touches.size === 0) {
         if (tap && !tap.moved && e.type === 'pointerup' && Date.now() - tap.t < 320) {
-          if (tap.n === 2) doUndo(true); else if (tap.n >= 3) doRedo(true);
+          // 刚用笔写过（1.5 秒内）的多指轻点多半是手掌抬起，不当成撤销 / 重做
+          if (!(typeof PenGuard !== 'undefined' && PenGuard.recent(1500))) { if (tap.n === 2) doUndo(true); else if (tap.n >= 3) doRedo(true); }
         }
         tap = null; touchLock = false;
       }
     };
     stage.addEventListener('pointerup', touchUp, true);
     stage.addEventListener('pointercancel', touchUp, true);
+    // 手指拖到画布外面才抬起：画布收不到 pointerup，在 window 上补收
+    const winUp = e => { if (!host.isConnected) { window.removeEventListener('pointerup', winUp); window.removeEventListener('pointercancel', winUp); return; } if (!stage.contains(e.target)) touchUp(e); };
+    window.addEventListener('pointerup', winUp);
+    window.addEventListener('pointercancel', winUp);
 
     // 移动画布：在整块舞台上接（选择模式下笔画层不接事件，拖空白处也要能挪）
     stage.addEventListener('pointerdown', e => {
@@ -842,20 +878,38 @@ const Board = (() => {
     stage.addEventListener('pointerup', panEnd);
     stage.addEventListener('pointercancel', panEnd);
 
+    const inkDown = (e, el, tool, extra) => {
+      e.preventDefault(); e.stopPropagation();
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+      const p = pos(e);
+      const blk = blockOf(wd, p[1]);
+      curBlock = wd.blocks.indexOf(blk);
+      if (tool === 'er') { cur = Object.assign({ er: true, id: e.pointerId, removed: [] }, extra); eraseAt(p, cur); return; }
+      cur = Object.assign({ id: e.pointerId, t0: Date.now(), touch: e.pointerType === 'touch', s: { tool, c: tool === 'hl' ? '#FFD400' : P.color, w: tool === 'hl' ? 18 : P.size, pts: [p], p: blk ? blk.p : null } }, extra);
+      liveDraw();
+    };
     ink.addEventListener('pointerdown', e => {
       if (P.tool === 'hand' || P.tool === 'select' || P.tool === 'text' || spaceTmp || e.button === 1) return; // 交给上面的「移动画布」
       if (!allowed(e)) return;
       if (e.pointerType === 'touch' && (touchLock || touches.size > 1)) return;
-      e.preventDefault(); e.stopPropagation();
-      try { ink.setPointerCapture(e.pointerId); } catch (err) {}
-      const p = pos(e);
-      const blk = blockOf(wd, p[1]);
-      curBlock = wd.blocks.indexOf(blk);
-      if (P.tool === 'er') { cur = { er: true, id: e.pointerId, removed: [] }; eraseAt(p, cur); return; }
-      cur = { id: e.pointerId, touch: e.pointerType === 'touch', s: { tool: P.tool, c: P.tool === 'hl' ? '#FFD400' : P.color, w: P.tool === 'hl' ? 18 : P.size, pts: [p], p: blk ? blk.p : null } };
-      liveDraw();
+      inkDown(e, ink, P.tool);
     });
-    ink.addEventListener('pointermove', e => {
+    // Apple Pencil 在「选择」「手」模式下也直接写字（跟 GoodNotes 一样，笔永远是笔），
+    // 不会因为手掌不小心点到了别的工具，笔就写不出来了。
+    // 选择模式下用笔在文字上快速点两下 = 改字（双击）。
+    let penTap = null;
+    stage.addEventListener('pointerdown', e => {
+      if (e.pointerType !== 'pen' || cur) return;
+      if (!(P.tool === 'select' || P.tool === 'hand') || spaceTmp) return;
+      const t = e.target;
+      if (t.closest && (t.closest('.ic-text') || t.closest('.md.editing'))) return;
+      const blockEl = t.closest && t.closest('.ic-block');
+      inkDown(e, stage, ['pen', 'hl'].includes(prevTool) ? prevTool : 'pen', { viaStage: true, sel: P.tool === 'select', blockEl, x: e.clientX, y: e.clientY });
+    }, true);
+    stage.addEventListener('pointermove', e => { if (cur && cur.viaStage && e.pointerId === cur.id) inkMove(e); });
+    stage.addEventListener('pointerup', e => { if (cur && cur.viaStage && e.pointerId === cur.id) end(e); });
+    stage.addEventListener('pointercancel', e => { if (cur && cur.viaStage && e.pointerId === cur.id) end(e); });
+    const inkMove = e => {
       if (!cur || e.pointerId !== cur.id) return;
       e.preventDefault();
       const co = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
@@ -869,7 +923,8 @@ const Board = (() => {
         pts.push(p); added = true;
       }
       if (added && !liveRaf) liveRaf = requestAnimationFrame(() => { liveRaf = 0; liveDraw(); });
-    });
+    };
+    ink.addEventListener('pointermove', e => { if (cur && !cur.viaStage) inkMove(e); });
     let liveRaf = 0;
     const end = e => {
       if (!cur || (e && e.pointerId !== cur.id)) return;
@@ -878,12 +933,25 @@ const Board = (() => {
         wd.strokes.push(cur.s);
         undo.push({ type: 'add', stroke: cur.s }); redo.length = 0;
         paint(); persist();
+        // 选择模式下用笔在文字块上快速点两下：撤回这两个小点，进入改字
+        if (cur.sel && cur.blockEl) {
+          const ps = cur.s.pts, xs = ps.map(q => q[0]), ys = ps.map(q => q[1]);
+          const tiny = Math.max(...xs) - Math.min(...xs) < 4 && Math.max(...ys) - Math.min(...ys) < 4 && Date.now() - cur.t0 < 300;
+          if (tiny && penTap && Date.now() - penTap.t < 380 && Math.hypot(cur.x - penTap.x, cur.y - penTap.y) < 24 && penTap.el === cur.blockEl) {
+            wd.strokes = wd.strokes.filter(s => s !== cur.s && s !== penTap.s);
+            undo.splice(-2, 2); paint(); persist();
+            const i = Number(cur.blockEl.dataset.i), ev = { clientX: cur.x, clientY: cur.y };
+            penTap = null; liveClear(); cur = null;
+            startEdit(i, ev); return;
+          }
+          penTap = tiny ? { t: Date.now(), x: cur.x, y: cur.y, el: cur.blockEl, s: cur.s } : null;
+        }
       }
       cancelAnimationFrame(liveRaf); liveRaf = 0;
       liveClear(); cur = null;
     };
-    ink.addEventListener('pointerup', end);
-    ink.addEventListener('pointercancel', end);
+    ink.addEventListener('pointerup', e => { if (cur && !cur.viaStage) end(e); });
+    ink.addEventListener('pointercancel', e => { if (cur && !cur.viaStage) end(e); });
     function eraseAt(p, c) {
       const r = 14 / view.z;
       const keep = [];
@@ -1154,7 +1222,7 @@ const Board = (() => {
     return { gotoPage: p => current && current.gotoPage(p) };
   }
 
-  return { mount, pageImage: inkImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK, world, sections, layout, blockOf, get current() { return current; } };
+  return { mount, pageImage: inkImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK, world, sections, layout, blockOf, appendMd, get current() { return current; } };
 })();
 
 /* ======================================================================
@@ -1286,7 +1354,7 @@ const Study = (() => {
   }
   function refreshTabs(noteId, done) {
     const h = location.hash.slice(1);
-    if (h.startsWith('note-' + noteId)) { const tab = h.split('~')[1] || 'note'; if (done && tab !== 'note') renderNote(noteId, tab); else DB.get('notes', noteId).then(n => { const t = $('#n-tabs'); if (t && n) { t.innerHTML = noteTabsHTML(tab, n); $$('[data-ntab]', t).forEach(b => b.onclick = () => { history.replaceState(null, '', '#note-' + noteId + (b.dataset.ntab === 'note' ? '' : '~' + b.dataset.ntab)); renderNote(noteId, b.dataset.ntab); }); } }); }
+    if (h.startsWith('note-' + noteId)) { const tab = h.split('~')[1] || 'note'; if (done && tab !== 'note') renderNote(noteId, tab); else DB.get('notes', noteId).then(n => { const t = $('#n-tabs'); if (t && n) { t.innerHTML = noteTabsHTML(tab, n); $$('[data-ntab]', t).forEach(b => b.onclick = () => noteTabGo(noteId, b.dataset.ntab)); } }); }
   }
   const progress = note => { const pts = (note.study && note.study.points) || []; return { done: pts.filter(p => (note.mastered || {})[p.id]).length, total: pts.length }; };
   return { points, quiz, progress, generate, background };
@@ -1530,7 +1598,7 @@ const Chat = (() => {
 
   function segText(segs) { return segs.map(g => `[${fmtTime(g.t)}] ${g.en}${g.zh ? '\n　' + g.zh : ''}`).join('\n'); }
 
-  async function buildContext({ note, course, fileIds, session, pageHint }) {
+  async function buildContext({ note, course, fileIds, session, sessions, pageHint }) {
     const parts = [];
     if (note && note.markdown) parts.push(`## 笔记：${note.title}\n${note.markdown.slice(0, 50000)}`);
     const ids = [...new Set([...(fileIds || []), ...((note && note.sourceFileIds) || [])])];
@@ -1538,8 +1606,19 @@ const Chat = (() => {
     let budget = note && note.markdown ? 50000 : 120000;
     for (const f of files) { const t = f.text.slice(0, Math.max(4000, Math.floor(budget / files.length))); parts.push(`## 课件：${f.name}\n${t}`); }
     if (pageHint) parts.push(`## 学生正在看的课件页：${pageHint.name} 第${pageHint.page}页\n${pageHint.text || ''}`);
-    const segs = session ? session.segments : [];
-    if (segs.length) { const t = segText(segs); parts.push(`## 课堂录音转写（${session.title || ''}）\n${t.length > 40000 ? '……（前面省略）\n' + t.slice(-40000) : t}`); }
+    // 一份笔记可以录好几段（每节课一段）：按时间顺序全部带上，总长超了就从最早那段开始省略，最近那段保证完整
+    const list = (sessions && sessions.length ? sessions : session ? [session] : []).filter(x => x && (x.segments || []).length);
+    if (list.length) {
+      let budget = 40000;
+      const blocks = [];
+      for (let i = list.length - 1; i >= 0 && budget > 0; i--) {
+        let t = segText(list[i].segments);
+        if (t.length > budget) t = '……（前面省略）\n' + t.slice(-budget);
+        budget -= t.length;
+        blocks.unshift(`### 第 ${i + 1} 段${list.length > 1 && i === list.length - 1 ? '（最近一段）' : ''}${list[i].title ? '：' + list[i].title : ''}\n${t}`);
+      }
+      parts.push(`## 课堂录音转写（共 ${list.length} 段${blocks.length < list.length ? '，最早的几段太长省略了' : ''}）\n${blocks.join('\n\n')}`);
+    }
     return parts.join('\n\n') || '（还没有材料）';
   }
 
@@ -1601,8 +1680,13 @@ const Chat = (() => {
       const w = win != null ? win : opt.win; // 秒；0 = 全部材料
       scope = scope || (w ? 'recent' : 'all');
       const live = getLive && getLive();
-      const sessionId = note && note.sessionId;
-      const session = live ? { segments: live.segments, title: '正在录的这节课' } : sessionId ? await DB.get('sessions', sessionId) : null;
+      // 这份笔记的所有录音段：「老师讲的 N 秒/分钟」只看正在录的、或者最近那一段；「全部」把每一段都带上
+      const sids = note ? [...new Set([].concat(note.sessionIds || [], note.sessionId || []).filter(Boolean))] : [];
+      const saved = (await Promise.all(sids.map(id => DB.get('sessions', id)))).filter(Boolean).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+      const liveId = live && live.record ? live.record.id : null;
+      const liveSeg = live ? { id: liveId, segments: live.segments, title: '正在录的这节课' } : null;
+      const session = liveSeg || saved.find(x => x.id === (note && note.sessionId)) || saved[saved.length - 1] || null;
+      const allSessions = liveSeg ? saved.filter(x => x.id !== liveId).concat(liveSeg) : saved;
       let context, noteLine = '';
       const pure = opt.src === 'none' && scope !== 'recent';
       if (pure) {
@@ -1617,9 +1701,10 @@ const Chat = (() => {
         const interim = live && live.turn ? `\n[正在说] ${live.turn.text || ''}` : '';
         if (!recent.length && !interim.trim()) { toast(live ? `最近 ${human}还没有转写内容` : '现在没有在听课本里录音，用不了「老师讲的」时间范围。选「全部」就会看笔记和课件来回答。', 6000); return; }
         context = `## 老师最近 ${human}说的话（语音识别，可能有错字）\n${segText(recent)}${interim}` + (note && note.markdown ? `\n\n## 这节课的笔记（参考）\n${note.markdown.slice(0, 12000)}` : '');
-        noteLine = `用了老师最近 ${human}讲的（${recent.length} 句）`;
+        noteLine = `用了老师最近 ${human}讲的（${recent.length} 句${live ? '，正在录的这段' : allSessions.length > 1 ? '，最近一段录音' : ''}）`;
       } else {
-        context = await buildContext({ note, course, fileIds: getFileIds && getFileIds(), session, pageHint: getPage && await getPage() });
+        context = await buildContext({ note, course, fileIds: getFileIds && getFileIds(), session, sessions: allSessions, pageHint: getPage && await getPage() });
+        noteLine = '读了笔记和课件' + (allSessions.length ? `，${allSessions.length} 段录音` : '');
         if (getExtra) context += '\n\n' + await getExtra();
       }
       const q = quote ? `关于这段：「${quote}」\n${text}` : text;
@@ -1901,6 +1986,38 @@ const DocTr = (() => {
   return { translate, estimate, running };
 })();
 
+/* 课件逐页解析（上课工作台「对照」）：一段段生成，生成一段就存一段，中途关掉下次接着来 */
+const DocEx = (() => {
+  const running = new Map();
+  async function explain(f, course, onProgress) {
+    if (running.has(f.id)) return running.get(f.id);
+    const job = Jobs.start('ex:' + f.id, '解析课件：' + f.name);
+    const p = (async () => {
+      const pages = splitPages(f.text);
+      const have = trByPage(f.explain || '');
+      const todo = pages.filter(pg => !have[pg.n]);
+      const chunks = []; let cur = '';
+      for (const pg of todo) { const block = `[第${pg.n}页]\n${pg.text}\n\n`; if (cur && cur.length + block.length > 6000) { chunks.push(cur); cur = ''; } cur += block; }
+      if (cur) chunks.push(cur);
+      let done = String(f.explain || '').trim();
+      for (let i = 0; i < chunks.length; i++) {
+        job.phase(`正在解析 第 ${i + 1} / ${chunks.length} 段`, i / chunks.length, (i + 1) / chunks.length, { expectLen: chunks[i].length * .9 });
+        const piece = await AI.deepseekStream({ system: AI.DOC_EX_SYSTEM, user: AI.docExplainPrompt(chunks[i], course && course.name), thinking: false, maxTokens: 8000, purpose: 'docex',
+          onText: t => { job.len(t.length); onProgress && onProgress((done ? done + '\n\n' : '') + t); } });
+        done = (done ? done + '\n\n' : '') + piece.trim();
+        const full = await DB.get('files', f.id) || f; full.explain = done; await DB.put('files', full); f.explain = done;
+      }
+      const full = await DB.get('files', f.id) || f; full.explain = done; full.explainDone = true; await DB.put('files', full);
+      f.explain = done; f.explainDone = true;
+      return done;
+    })().finally(() => job.done());
+    running.set(f.id, p);
+    try { return await p; } finally { running.delete(f.id); }
+  }
+  const estimate = f => { const chars = (f.text || '').length; return Math.max(0.01, (chars / 3.5 * 2 + chars * 1.2 * 8) / 1e6); };
+  return { explain, estimate, running };
+})();
+
 /* PDF 一页：画布 + 透明文字层（可以选中文字复制 / 翻译） */
 async function renderPdfPageInto(el, fileId, pageNum) {
   const d = await Pdf.doc(fileId); const page = await d.getPage(pageNum);
@@ -2077,11 +2194,15 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
       ? `<div class="pdfpage" data-p="${p}"><div class="ph">第 ${p} 页</div><span class="pnum">P${p}</span></div>`
       : `<div class="docpage" data-p="${p}"><div class="hint">第 ${p} 页</div><div class="doc-text">${esc((textPages.find(x => x.n === p) || {}).text || '')}</div><span class="pnum">P${p}</span></div>`;
     if (mode === 'pair') {
-      if (!f.translation && !DocTr.running.has(f.id) && !Object.keys(refs).length) return trNeeded();
-      body.innerHTML = (DocTr.running.has(f.id) ? Jobs.slot('tr:' + f.id) : '') + (f.translation || DocTr.running.has(f.id) ? '' : `<div class="banner"><div class="grow">还没翻译，右边只显示笔记里引用这一页的内容。</div><button class="btn small primary" id="dv-tr2">翻译整份课件</button></div>`) +
-        Array.from({ length: n }, (_, i) => i + 1).map(p => `<div class="pair" data-p="${p}">${pageBox(p)}<div class="pair-zh">${tr[p] ? `<div class="md">${md(tr[p])}</div>` : DocTr.running.has(f.id) ? '<div class="hint">翻译中…</div>' : ''}${refs[p] ? `<div class="pair-note"><div class="hint">笔记里讲到这一页</div>${refs[p].map(t => `<div class="md">${md(t)}</div>`).join('')}</div>` : ''}${!tr[p] && !refs[p] && !DocTr.running.has(f.id) ? '<div class="hint">（这页没有内容）</div>' : ''}</div></div>`).join('');
-      const t2 = $('#dv-tr2', body); if (t2) t2.onclick = () => run();
-      if (DocTr.running.has(f.id)) DocTr.running.get(f.id).then(() => { if (host.isConnected && mode === 'pair') paint(); });
+      // 对照：一页课件 → 这一页的中文解析 → 下一页课件 …（竖着往下滑，不再左右分栏）
+      const ex = trByPage(f.explain), busy = DocEx.running.has(f.id);
+      const exHas = Object.keys(ex).length;
+      const head = busy ? Jobs.slot('ex:' + f.id)
+        : !String(f.text || '').trim() ? `<div class="banner"><div class="grow">这份课件读不出文字（可能是扫描件），先在课程页用 Gemini 识别文字，才能逐页解析。</div></div>`
+        : !f.explainDone ? `<div class="banner"><div class="grow">${exHas ? `已经解析了 ${exHas} 页，还有没解析完的。` : '每页课件下面会跟一段中文讲解，像老师边翻 PPT 边讲。'}<span class="hint"> 约 ¥${(DocEx.estimate(f) * 7.2).toFixed(2)}（不确定）</span></div><button class="btn small primary" id="dv-ex">${exHas ? '接着解析' : '逐页解析这份课件'}</button></div>` : '';
+      body.innerHTML = head + Array.from({ length: n }, (_, i) => i + 1).map(p => `<div class="pair pair-v" data-p="${p}">${pageBox(p)}<div class="pair-ex">${ex[p] ? `<div class="pair-ex-h">第 ${p} 页 · 解析</div><div class="md">${md(ex[p])}</div>` : busy ? '<div class="hint">解析中…</div>' : f.explainDone ? '<div class="hint">（这页没有内容）</div>' : ''}${refs[p] ? `<details class="pair-note"><summary class="hint">笔记里讲到这一页（${refs[p].length}）</summary>${refs[p].map(t => `<div class="md">${md(t)}</div>`).join('')}</details>` : ''}</div></div>`).join('');
+      const eb = $('#dv-ex', body); if (eb) eb.onclick = () => runEx();
+      if (busy) DocEx.running.get(f.id).then(() => { if (host.isConnected && mode === 'pair') paint(); }, () => { if (host.isConnected && mode === 'pair') paint(); });
     } else body.innerHTML = Array.from({ length: n }, (_, i) => i + 1).map(pageBox).join('') || '<div class="empty">没有文字</div>';
     if (pdf) {
       const io = new IntersectionObserver(ents => ents.forEach(async en => {
@@ -2114,6 +2235,13 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
       ink.setOn(ink.on); syncBar();
       let rz; const ro = new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(() => { if (!body.isConnected) { ro.disconnect(); return; } ink.resize(); }, 150); }); ro.observe(body);
     }
+  };
+  const runEx = async () => {
+    if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
+    const pr = DocEx.explain(f, course);
+    paint();
+    try { await pr; toast('解析完成：' + f.name); } catch (e) { toast(e.message, 6000); }
+    if (host.isConnected && mode === 'pair') paint();
   };
   const run = async () => {
     if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
@@ -2182,7 +2310,7 @@ const Prep = (() => {
           ${v.hard.length ? `<div class="prep-k">上课可能听不懂的地方</div><ul class="prep-h">${v.hard.map(h => `<li>${esc(h)}</li>`).join('')}</ul>` : ''}
           ${v.listen.length ? `<div class="prep-k">注意听老师说这些</div><div class="prep-l">${v.listen.map(t => `<button class="chip" data-say="${esc(t)}">🔊 ${esc(t)}</button>`).join('')}</div>` : ''}
         </div>
-        <div class="row" style="justify-content:space-between;margin:14px 0 6px"><b>术语表 · ${pk.terms.length} 个</b><a class="hint" href="#vocab~${f.courseId}" title="术语会自动进生词本，按遗忘曲线推">已进生词本 · 去背 ›</a></div>
+        <div class="row" style="justify-content:space-between;margin:14px 0 6px"><b>术语表 · ${pk.terms.length} 个</b><a class="hint" href="#vocab~${f.courseId}" title="整理出来的术语先筛一遍：不会的才进生词本">去筛词 ›</a></div>
         <div class="row" style="justify-content:flex-end;margin:-6px 0 6px"><div class="row" style="gap:4px"><button class="btn small ghost" id="pp-copy">复制</button><button class="btn small ghost" id="pp-re">重新生成</button></div></div>
         <div class="terms">${pk.terms.map(t => `<div class="term"><div class="term-h"><button class="say" data-say="${esc(t.en)}" aria-label="朗读">🔊</button><b>${esc(t.en)}</b><span class="term-zh">${esc(t.zh)}</span></div>${t.explain ? `<div class="term-x">${esc(t.explain)}</div>` : ''}${t.example ? `<div class="term-e"><button class="say small" data-say="${esc(t.example)}" aria-label="朗读例句">🔊</button><span>${esc(t.example)}</span></div><div class="term-ez">${esc(t.example_zh)}</div>` : ''}</div>`).join('')}</div>
       </div>`;
@@ -2203,7 +2331,7 @@ const SelPop = (() => {
   const ensure = () => {
     if (pop) return pop;
     pop = document.createElement('div'); pop.className = 'selpop'; pop.hidden = true;
-    pop.innerHTML = `<div class="row" style="gap:2px"><button data-a="copy">复制</button><button data-a="tr">翻译</button><button data-a="ask">问 AI</button><button data-a="say">🔊</button></div><div class="selpop-out" hidden></div>`;
+    pop.innerHTML = `<div class="row" style="gap:2px"><button data-a="copy">复制</button><button data-a="tr">翻译</button><button data-a="ask">问 AI</button><button data-a="vocab">＋生词本</button><button data-a="say">🔊</button></div><div class="selpop-out" hidden></div>`;
     document.body.appendChild(pop);
     pop.addEventListener('pointerdown', e => e.preventDefault()); // 点按钮时不丢失选区
     $$('button', pop).forEach(b => b.onclick = () => act(b.dataset.a));
@@ -2214,6 +2342,7 @@ const SelPop = (() => {
     if (a === 'copy') { try { await navigator.clipboard.writeText(text); toast('已复制'); } catch (e) { document.execCommand('copy'); toast('已复制'); } hide(); return; }
     if (a === 'say') { Prep.speak(text); return; }
     if (a === 'ask') { hide(); document.dispatchEvent(new CustomEvent('tkb-ask', { detail: { text } })); return; }
+    if (a === 'vocab') { addToVocab(text, out); return; }
     if (a === 'tr') {
       out.hidden = false; out.innerHTML = '<span class="spin"></span>';
       try {
@@ -2221,6 +2350,37 @@ const SelPop = (() => {
         out.innerHTML = `<div>${esc(zh)}</div>`;
       } catch (e) { out.textContent = '翻译失败：' + e.message; }
     }
+  }
+  /* 选中的词 / 短语 → 生词本。课程按你现在所在的页面判断（课程页、笔记、工作台、复习都行） */
+  async function courseHere() {
+    const h = location.hash.slice(1);
+    if (h.startsWith('course-')) return h.slice(7).split('~')[0];
+    if (h.startsWith('vocab~')) return h.split('~')[1];
+    const m = h.match(/^(?:note|desk|review)-([^~]+)/);
+    if (m) { const n = await DB.get('notes', m[1]); return n && n.courseId; }
+    return null;
+  }
+  async function addToVocab(t, out) {
+    const en = String(t || '').replace(/\s+/g, ' ').trim().replace(/^[^A-Za-z]+|[^A-Za-z)]+$/g, '');
+    if (!en || en.length > 60 || en.split(' ').length > 6) { toast('选一个词或者短语（6 个词以内）再加'); return; }
+    if (!/[A-Za-z]/.test(en)) { toast('生词本只收英文词'); return; }
+    const cid = await courseHere();
+    if (!cid) { toast('先进入一门课的笔记或课件页面，再加生词'); return; }
+    out.hidden = false; out.innerHTML = '<span class="spin"></span> 正在查意思…';
+    let w = { en, from: '自己加的' };
+    try {
+      if (Settings.load().deepseekKey) {
+        const ctx = (() => { try { const r = window.getSelection().getRangeAt(0); return (r.startContainer.parentElement || {}).textContent || ''; } catch (e) { return ''; } })().slice(0, 400);
+        const raw = await AI.deepseekStream({ thinking: false, json: true, maxTokens: 400, purpose: 'chat',
+          system: '你是英汉词典，给英语不好的中国商科留学生解释单词。只输出 JSON。',
+          user: `词：${en}\n上下文：${ctx}\n输出 JSON：{"zh":"简短中文意思（按上下文）","explain":"一句中文解释","example":"一个简单英文例句","example_zh":"例句中文"}` });
+        const j = AI.parseJSON(raw);
+        w = Object.assign(w, { zh: String(j.zh || ''), explain: String(j.explain || ''), example: String(j.example || ''), example_zh: String(j.example_zh || '') });
+      } else w.zh = await quickTranslate(en).catch(() => '');
+    } catch (e) { try { w.zh = await quickTranslate(en); } catch (x) {} }
+    await Learn.addWord(cid, w);
+    out.innerHTML = `<div><b>${esc(en)}</b> ${esc(w.zh || '')}</div><div class="hint">已加入生词本</div>`;
+    toast('已加入生词本：' + en, 1600);
   }
   async function quickTranslate(t) {
     // 短句先试免费模型池；不行再用 Chrome 内置翻译
@@ -2350,14 +2510,16 @@ const Deadlines = (() => {
 const DeskPref = {
   key: () => 'tingkeben.desk' + (Device.ipad ? '.ipad' : ''),
   defaults: () => Device.ipad ? { left: true, mid: true, right: false, rtab: 'chat', one: 'left', split: true, mtab: 'note', w: { left: 1, mid: 1, right: .8 }, rmin: false } : { left: true, mid: true, right: true, rtab: 'chat', one: 'mid', split: false, mtab: 'note', w: { left: 1, mid: 1.15, right: .85 }, rmin: false },
-  get() { try { return Object.assign(this.defaults(), JSON.parse(localStorage.getItem(this.key()) || '{}')); } catch (e) { return this.defaults(); } },
-  set(p) { try { localStorage.setItem(this.key(), JSON.stringify(Object.assign(this.get(), p))); } catch (e) {} },
+  // 只记在这次打开的内存里：退出听课本再打开，工作台回到默认的样子（不记上次停在哪）
+  mem: null,
+  get() { if (!this.mem) { this.mem = this.defaults(); try { localStorage.removeItem(this.key()); } catch (e) {} } return Object.assign(this.defaults(), this.mem); },
+  set(p) { this.mem = Object.assign(this.get(), p); },
 };
 
 async function renderDesk(noteId) {
   if (location.hash.slice(1) !== 'desk-' + noteId) return; // 已经离开这页了
   const note = await DB.get('notes', noteId);
-  if (!note) { location.hash = 'home'; return; }
+  if (!note) { Nav.replace('home'); return; }
   const course = await DB.get('courses', note.courseId);
   const files = sortFiles((await DB.byIndex('files', 'courseId', note.courseId)).filter(f => f.status === 'ready' || isPdf(f)));
   const notes = (await DB.byIndex('notes', 'courseId', note.courseId)).sort((a, b) => b.createdAt - a.createdAt);
@@ -2367,7 +2529,7 @@ async function renderDesk(noteId) {
   view.innerHTML = `
     <div class="desk">
       <div class="desk-top noprint">
-        <a class="btn small ghost" href="#note-${note.id}" title="退出工作台">←</a>
+        ${Nav.crumb('note-' + note.id, '笔记', 'btn small ghost', '←')}
         <select id="dk-note" class="dk-sel" title="切换笔记">${notes.map(n => `<option value="${n.id}" ${n.id === note.id ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}<option value="__new">＋ 新建空白笔记</option></select>
         <span class="grow"></span>
         <div class="seg dk-toggles" role="group" aria-label="显示哪几栏">
@@ -2377,7 +2539,7 @@ async function renderDesk(noteId) {
       </div>
       <div class="desk-cols" id="dk-cols">
         <section class="dcol" data-col="left">
-          <div class="dhead"><select id="dk-file" class="dk-sel">${files.length ? files.map(f => `<option value="${f.id}" ${f.id === fileId ? 'selected' : ''}>${esc(weekOf(f).label)}${phaseOf(f) ? '·' + phaseOf(f) : ''} · ${esc(f.name)}</option>`).join('') : '<option value="">这门课还没有课件</option>'}</select></div>
+          <div class="dhead"><select id="dk-file" class="dk-sel">${files.length ? files.map(f => `<option value="${f.id}" ${f.id === fileId ? 'selected' : ''}>${esc(weekOf(f).label)}${phaseOf(f) ? '·' + phaseOf(f) : ''} · ${esc(f.name)}</option>`).join('') : '<option value="">这门课还没有课件</option>'}<option value="__add">＋ 上传 / 管理课件…</option></select></div>
           <div class="dbody" id="dk-doc"></div>
         </section>
         <div class="dk-divider" id="dk-divider" hidden role="separator" aria-label="拖动调整上下高度"><span></span></div>
@@ -2503,8 +2665,8 @@ async function renderDesk(noteId) {
   $('#dk-note').onchange = async e => {
     if (e.target.value === '__new') {
       const n = { id: DB.uid('n_'), courseId: note.courseId, createdAt: Date.now(), title: `${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} 课堂笔记`, markdown: '', status: 'done', sourceFileIds: fileId ? [fileId] : [], model: '' };
-      await DB.put('notes', n); location.hash = 'desk-' + n.id;
-    } else location.hash = 'desk-' + e.target.value;
+      await DB.put('notes', n); Nav.replace('desk-' + n.id);
+    } else Nav.replace('desk-' + e.target.value);
   };
 
   // 左栏：课件
@@ -2535,7 +2697,7 @@ async function renderDesk(noteId) {
     viewer = mountDocViewer(left, full, { note, course });   // 不自动联动，页码自己看
     deskLock = ms => { lockBoard = Date.now() + ms; };
   };
-  $('#dk-file').onchange = async e => { fileId = e.target.value; note.deskFile = fileId; if (!(note.sourceFileIds || []).includes(fileId)) note.sourceFileIds = [...(note.sourceFileIds || []), fileId]; await DB.put('notes', note); showDoc(); };
+  $('#dk-file').onchange = async e => { if (e.target.value === '__add') { e.target.value = fileId || ''; noteFilesModal(note, course, () => renderDesk(note.id)); return; } fileId = e.target.value; note.deskFile = fileId; if (!(note.sourceFileIds || []).includes(fileId)) note.sourceFileIds = [...(note.sourceFileIds || []), fileId]; await DB.put('notes', note); showDoc(); };
   showDoc();
 
   // 中栏：笔记和学习工具
@@ -2553,7 +2715,7 @@ async function renderDesk(noteId) {
     }
     mountNoteTool(tab, note, course, mid, { focus: opt.focus, toPoint: pid => showMid('points', { focus: pid }) });
   };
-  showMid(['note', 'doc', 'vocab', 'points', 'quiz', 'map', 'text'].includes(P.mtab) ? P.mtab : 'note');
+  showMid(['note', 'vocab', 'points', 'quiz', 'text'].includes(P.mtab) ? P.mtab : 'note');
 
   // 右栏：实时翻译 / 问 AI
   const right = $('#dk-right');
@@ -2561,7 +2723,7 @@ async function renderDesk(noteId) {
     DeskPref.set({ rtab: tab });
     $$('#dk-rtabs [data-r]').forEach(b => b.classList.toggle('on', b.dataset.r === tab));
     if (tab === 'chat') {
-      Chat.mount(right, { note, course, compact: true, getLive: () => State.live, getFileIds: () => fileId ? [fileId] : [],
+      Chat.mount(right, { note, course, compact: true, getLive: () => (State.live && (!State.live.noteId || State.live.noteId === note.id) ? State.live : null), getFileIds: () => fileId ? [fileId] : [],
         getPage: async () => { const f = files.find(x => x.id === fileId); if (!f || !viewer) return null; const p = viewer.page(); const full = await DB.get('files', f.id); return { fileId, name: f.name, page: p, text: (splitPages(full.text).find(x => x.n === p) || {}).text || '' }; } });
     } else deskLive(note, course, right);
   };
@@ -2624,13 +2786,16 @@ function deskLive(note, course, el) {
     (async () => {
       const list = await noteSessions(note);
       const host = $('#dk-prev', el); if (!host) return;
-      host.innerHTML = list.length ? `<div class="hint" style="margin:14px 0 6px">这份笔记已经录过 ${list.length} 段，都还在：</div>${list.slice().reverse().map((x, i) => `<a class="dk-prev-item" href="#session-${x.id}"><span class="grow">第 ${list.length - i} 段 · ${fmtTime(x.duration)} · ${(x.segments || []).length} 句</span><span class="hint">${fmtDate(x.startedAt)}</span></a>`).join('')}` : '';
+      host.innerHTML = list.length ? `<div class="hint" style="margin:14px 0 6px">${list.length > 1 ? `这份笔记以前录过 ${list.length} 段（都还在）。` : '这份笔记录过音。'}再点开始会<b>接着最近那一段继续录</b>，不会再分新的一段：</div>${list.slice().reverse().map((x, i) => `<a class="dk-prev-item" href="#session-${x.id}"><span class="grow">第 ${list.length - i} 段 · ${fmtTime(x.duration)} · ${(x.segments || []).length} 句</span><span class="hint">${fmtDate(x.startedAt)}</span></a>`).join('')}` : '';
     })();
     $('#dk-start', el).onclick = async () => {
       if (await micState() === 'denied') { micHelp(() => $('#dk-start', el).click()); return; }
       if ((Settings.load().liveEnglishOnly !== false) === false && (Settings.load().draftMode || 'free') === 'free') AI.prepareLocalTranslator();
       const btn = $('#dk-start', el); btn.disabled = true;
-      const live = new LiveSession({ course, onUpdate: segs => liveUI.update(segs), onInterim: t => liveUI.interim(t), onStatus: st => liveUI.status(st), onError: m => liveUI.error(m), onLevel: r => liveUI.level(r) });
+      // 这份笔记录过音：接着最近那一段继续录，不分新的一段
+      const prevList = await noteSessions(note);
+      const resume = prevList.length ? prevList[prevList.length - 1] : null;
+      const live = new LiveSession({ course, resume, onUpdate: segs => liveUI.update(segs), onInterim: t => liveUI.interim(t), onStatus: st => liveUI.status(st), onError: m => liveUI.error(m), onLevel: r => liveUI.level(r) });
       live.focusFileId = note.deskFile || (note.sourceFileIds || [])[0];
       try { await live.start(); live.noteId = note.id; State.live = live; renderSide(); deskLive(note, course, el); }
       catch (e) {
@@ -2687,7 +2852,7 @@ async function renderAsk(courseId) {
       <div class="row"><button class="btn" id="ak-study">${ICON.mic}手写笔记 + 课堂录音优化笔记</button>
         <select id="ak-c" style="width:auto">${courses.map(c => `<option value="${c.id}" ${c.id === course.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div></div>
     <div class="card ask-card" id="ak-chat"></div>`;
-  $('#ak-c').onchange = e => { location.hash = 'ask-' + e.target.value; };
+  $('#ak-c').onchange = e => { Nav.replace('ask-' + e.target.value); };
   $('#ak-study').onclick = () => studyFlow({ courseId: course.id });
   const notes = (await DB.byIndex('notes', 'courseId', course.id)).sort((a, b) => a.createdAt - b.createdAt);
   Chat.mount($('#ak-chat'), {
@@ -2824,22 +2989,62 @@ const Learn = (() => {
       if (!k || map.has(k)) continue;
       map.set(k, { key: k, en: String(t.en), zh: t.zh || '', explain: t.explain || '', example: t.example || '', example_zh: t.example_zh || '', from: f.name });
     }
+    // 自己选中加进来的词（课件 / 笔记里选中 → 加入生词本）
+    for (const x of Object.values((course && course.vocabExtra) || {})) {
+      const k = String(x.en || '').toLowerCase().trim();
+      if (!k) continue;
+      const base = map.get(k) || { key: k, en: String(x.en), zh: '', explain: '', example: '', example_zh: '', from: '' };
+      map.set(k, Object.assign(base, { zh: x.zh || base.zh, explain: x.explain || base.explain, example: x.example || base.example, example_zh: x.example_zh || base.example_zh, from: x.from || base.from }));
+    }
     const st = (course && course.vocab) || {};
+    // status：in = 在生词本里要背；known = 筛词时说「会」；没有 = 还没筛过的新词
+    // （老数据：背过的词都算在生词本里）
     const items = [...map.values()].map(v => {
       const s = st[v.key];
-      return Object.assign(v, { box: s ? s.box : -1, due: s ? s.due : 0, ok: (s && s.ok) || 0, seen: (s && s.seen) || 0 });
+      const status = s ? (s.status || (s.seen ? 'in' : '')) : '';
+      return Object.assign(v, { status, box: s && s.box != null ? s.box : -1, due: s && s.due ? s.due : 0, ok: (s && s.ok) || 0, seen: (s && s.seen) || 0 });
     });
     const out = { course, items };
     vocCache.set(courseId, out);
     return out;
   }
-  const dueItems = v => v.items.filter(i => i.due <= Date.now()).sort((a, b) => a.due - b.due);
+  const inBook = v => v.items.filter(i => i.status === 'in');
+  const pending = v => v.items.filter(i => !i.status);
+  const dueItems = v => inBook(v).filter(i => i.due <= Date.now()).sort((a, b) => a.due - b.due);
   const vstats = v => ({
-    total: v.items.length,
+    total: inBook(v).length,
     due: dueItems(v).length,
-    learned: v.items.filter(i => i.box >= 0).length,
-    solid: v.items.filter(i => i.box >= 3).length,
+    learned: inBook(v).filter(i => i.box >= 0).length,
+    solid: inBook(v).filter(i => i.box >= 3).length,
+    pending: pending(v).length,
+    known: v.items.filter(i => i.status === 'known').length,
   });
+  /* 筛词：整理出来的术语先一个个问你「会不会」，不会的才进生词本 */
+  async function screenWord(courseId, item, known) {
+    const v = await vocab(courseId); if (!v.course) return;
+    const c = v.course; c.vocab = c.vocab || {};
+    const cur = c.vocab[item.key] || { box: -1, ok: 0, seen: 0 };
+    cur.status = known ? 'known' : 'in'; cur.at = Date.now();
+    if (!known) { cur.box = -1; cur.due = Date.now(); }
+    c.vocab[item.key] = cur;
+    item.status = cur.status; item.box = cur.box; item.due = cur.due || 0;
+    flushLater(c);
+  }
+  /* 选中文字 → 加入生词本：直接进生词本（你自己挑的就是不会的） */
+  async function addWord(courseId, w) {
+    const en = String(w.en || '').trim(); if (!en) return null;
+    const key = en.toLowerCase();
+    const c = await DB.get('courses', courseId); if (!c) return null;
+    c.vocabExtra = c.vocabExtra || {};
+    c.vocabExtra[key] = Object.assign({}, c.vocabExtra[key] || {}, { en, zh: w.zh || '', explain: w.explain || '', example: w.example || '', example_zh: w.example_zh || '', from: w.from || '', at: Date.now() });
+    c.vocab = c.vocab || {};
+    const cur = c.vocab[key] || { box: -1, ok: 0, seen: 0 };
+    if (cur.status !== 'in') { cur.status = 'in'; cur.box = -1; cur.due = Date.now(); }
+    c.vocab[key] = cur;
+    await DB.put('courses', c);
+    vocCache.delete(courseId);
+    return key;
+  }
   async function gradeWord(courseId, item, good) {
     const v = await vocab(courseId);
     if (!v.course) return;
@@ -2850,21 +3055,29 @@ const Learn = (() => {
     else { cur.box = 0; cur.ok = 0; } // 忘了就从头开始，10 分钟后再考一次
     cur.seen = (cur.seen || 0) + 1;
     cur.due = Date.now() + (good ? BOX[cur.box] * DAY : 10 * 60e3);
-    cur.at = Date.now();
+    cur.at = Date.now(); cur.status = 'in';
     c.vocab[item.key] = cur;
-    item.box = cur.box; item.due = cur.due; item.seen = cur.seen; item.ok = cur.ok;
+    item.box = cur.box; item.due = cur.due; item.seen = cur.seen; item.ok = cur.ok; item.status = 'in';
     flushLater(c);
   }
   /* 走一遍今天该背的词：先英→中，再点「认识 / 不认识」 */
   function vocabPage(el, courses, courseId) {
     const cid = courseId || (courses[0] && courses[0].id);
+    if (cid) vocCache.delete(cid);   // 课前包刚生成过 / 别的设备同步过来新词：进来时重新读一次
     if (!cid) { el.innerHTML = '<div class="empty"><strong>还没有课程</strong>先建一门课、生成课前包，术语会自动进生词本。</div>'; return; }
-    let idx = 0, show = false, order = [];
+    let idx = 0, show = false, order = [], screening = false, sOrder = [], sIdx = 0, sShow = false;
     const paint = async () => {
       const v = await vocab(cid);
       const st = vstats(v);
+      if (screening) return paintScreen(v);
       if (!v.items.length) {
         el.innerHTML = `<div class="empty"><strong>这门课还没有生词</strong>课前包里的术语表会自动收进生词本 —— 到「课件 → 课前包」生成一份，回来这里就有词可背了。</div>`;
+        return;
+      }
+      const screenBar = st.pending ? `<div class="card pad vocab-screen-bar"><div class="row"><div class="grow"><b>${st.pending} 个新整理出来的词还没筛</b><div class="hint">一个个看：会的直接跳过，不会的才放进生词本</div></div><button class="btn primary" id="vs-go">开始筛词</button></div></div>` : '';
+      if (!st.total) {
+        el.innerHTML = screenBar + `<div class="empty"><strong>生词本还是空的</strong>${st.pending ? '先筛一遍上面的新词，不会的会放进来。' : '在课件或笔记里选中一个词，点「加入生词本」；生成课前包后整理出来的术语也会让你先筛。'}</div>`;
+        const g = $('#vs-go', el); if (g) g.onclick = startScreen;
         return;
       }
       if (!order.length) order = dueItems(v).slice(0, 20).map(i => i.key);
@@ -2874,7 +3087,7 @@ const Learn = (() => {
         <div class="sb-bar green" style="margin-top:8px"><i style="width:${st.total ? Math.round(st.solid / st.total * 100) : 0}%"></i></div></div>
         <div class="row"><button class="btn small ${show ? '' : 'on'}" data-mode="all">看全部 ${st.total}</button></div></div></div>`;
       if (!now.length) {
-        el.innerHTML = head + `<div class="empty"><strong>今天的词都背完了 👍</strong>明天这个时候再来。想多背可以点上面的「看全部」。</div>`;
+        el.innerHTML = screenBar + head + `<div class="empty"><strong>今天的词都背完了 👍</strong>明天这个时候再来。想多背可以点上面的「看全部」。</div>`;
         const all = $('[data-mode=all]', el); if (all) all.onclick = async () => {
           const v2 = await vocab(cid); order = v2.items.slice().sort((a, b) => a.box - b.box).map(i => i.key); paint();
         };
@@ -2882,7 +3095,7 @@ const Learn = (() => {
       }
       idx = Math.max(0, Math.min(idx, now.length - 1));
       const w = now[idx];
-      el.innerHTML = head + `
+      el.innerHTML = screenBar + head + `
         <div class="vword" id="vw">
           <div class="vw-en"><button class="say" data-say="${esc(w.en)}" aria-label="朗读">🔊</button>${esc(w.en)}</div>
           ${show ? `<div class="vw-zh">${esc(w.zh)}</div>${w.explain ? `<div class="vw-ex">${esc(w.explain)}</div>` : ''}${w.example ? `<div class="vw-sent"><button class="say small" data-say="${esc(w.example)}" aria-label="朗读例句">🔊</button><span>${esc(w.example)}</span><em>${esc(w.example_zh)}</em></div>` : ''}` : `<div class="hint">先自己想想它是什么意思，再翻面</div>`}
@@ -2898,6 +3111,34 @@ const Learn = (() => {
       $('#vw-skip', el).onclick = () => { idx++; show = false; paint(); };
       const yes = $('#vw-yes', el); if (yes) yes.onclick = async () => { await gradeWord(cid, w, true); idx++; show = false; paint(); };
       const no = $('#vw-no', el); if (no) no.onclick = async () => { await gradeWord(cid, w, false); idx++; show = false; paint(); };
+      const g = $('#vs-go', el); if (g) g.onclick = startScreen;
+    };
+    const startScreen = async () => { const v = await vocab(cid); sOrder = pending(v).map(i => i.key); sIdx = 0; sShow = false; screening = true; paint(); };
+    const paintScreen = v => {
+      const list = sOrder.map(k => v.items.find(i => i.key === k)).filter(i => i && !i.status);
+      if (!list.length) {
+        screening = false; order = [];
+        const st = vstats(v);
+        el.innerHTML = `<div class="empty"><strong>筛完了</strong>生词本里现在有 ${st.total} 个词，会的 ${st.known} 个已经跳过。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="vs-done">开始背</button></div></div>`;
+        $('#vs-done', el).onclick = () => paint();
+        return;
+      }
+      const w = list[0], total = sOrder.length, doneN = total - list.length;
+      el.innerHTML = `<div class="card pad vocab-top"><div class="row"><div class="grow"><b>筛词 ${doneN + 1} / ${total}</b><div class="hint">这个词你会吗？会的跳过，不会的放进生词本</div><div class="sb-bar" style="margin-top:8px"><i style="width:${Math.round(doneN / total * 100)}%"></i></div></div><button class="btn small ghost" id="vs-stop">先停一下</button></div></div>
+        <div class="vword" id="vs-w">
+          <div class="vw-en"><button class="say" data-say="${esc(w.en)}" aria-label="朗读">🔊</button>${esc(w.en)}</div>
+          ${sShow ? `<div class="vw-zh">${esc(w.zh)}</div>${w.explain ? `<div class="vw-ex">${esc(w.explain)}</div>` : ''}${w.example ? `<div class="vw-sent">${esc(w.example)}${w.example_zh ? `<em>${esc(w.example_zh)}</em>` : ''}</div>` : ''}` : `<div class="hint" style="margin-top:10px">先自己想一下是什么意思，不确定就点「看意思」</div>`}
+          <div class="hint vw-src">出自：${esc(w.from || '')}</div>
+        </div>
+        <div class="row" style="justify-content:flex-end;margin-top:12px;gap:8px">
+          ${sShow ? '' : '<button class="btn" id="vs-show">看意思</button>'}
+          <button class="btn danger" id="vs-no">不会，放进生词本</button><button class="btn primary" id="vs-yes">会，跳过</button>
+        </div>`;
+      $$('[data-say]', el).forEach(b => b.onclick = e => { e.stopPropagation(); Prep.speak(b.dataset.say); });
+      const sh = $('#vs-show', el); if (sh) sh.onclick = () => { sShow = true; paint(); };
+      $('#vs-yes', el).onclick = async () => { await screenWord(cid, w, true); sShow = false; paint(); };
+      $('#vs-no', el).onclick = async () => { await screenWord(cid, w, false); sShow = false; paint(); };
+      $('#vs-stop', el).onclick = () => { screening = false; order = []; paint(); };
     };
     paint();
   }
@@ -3167,7 +3408,7 @@ const Learn = (() => {
         byNote.set(k, b);
         if (q.noteId && q.qi != null) (ans[i] === q.answer ? onRight : onWrong)(q);
       });
-      view.innerHTML = `<div class="head"><div><h1>成绩：${score} / ${qs.length}</h1><div class="meta">${Math.round(score / qs.length * 100)} 分 · 错题下面有解析${opts.back ? '' : ''}</div></div><div class="row"><a class="btn" href="#review">回复习</a></div></div>
+      view.innerHTML = `<div class="head"><div><h1>成绩：${score} / ${qs.length}</h1><div class="meta">${Math.round(score / qs.length * 100)} 分 · 错题下面有解析${opts.back ? '' : ''}</div></div><div class="row">${Nav.crumb('review', '复习', 'btn')}</div></div>
         ${byNote.size > 1 ? `<div class="card pad"><b>按 topic 看</b><div class="mk-rows">${[...byNote.entries()].map(([k, b]) => `<div class="mk-row"><span class="grow">${esc(k)}</span><span class="sb-bar green mk-bar"><i style="width:${Math.round(b.ok / b.n * 100)}%"></i></span><span class="hint">${b.ok}/${b.n}</span></div>`).join('')}</div></div>` : ''}
         <div class="exam">${qs.map((q, i) => `<div class="card pad quiz"><div class="qq">${i + 1}. ${esc(q.q)}</div><div class="opts">${q.options.map((o, k) => `<div class="opt ${k === q.answer ? 'right' : k === ans[i] ? 'wrong' : ''}"><b>${L[k]}</b><span>${esc(o)}</span></div>`).join('')}</div>
           <div class="explain ${ans[i] === q.answer ? 'ok' : 'bad'}"><b>${ans[i] === q.answer ? '对' : ans[i] === null ? '没答' : '错'}</b> · ${esc(q.explain || '')} ${q.noteId ? `<a href="#note-${q.noteId}~points">（${esc(q.noteTitle)}）</a>` : ''}</div></div>`).join('')}</div>`;
@@ -3178,7 +3419,7 @@ const Learn = (() => {
   }
 
   return {
-    vocab, vocabPage, gradeWord, dueItems, vstats,
+    vocab, vocabPage, gradeWord, dueItems, vstats, addWord, screenWord,
     diffFile, diffAuto,
     confusedList, todoToggle, TODO,
     gatherMarks, buildMarks,

@@ -76,13 +76,91 @@ function renderSide() {
   $('#nav').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}" title="${label}">${ic}<span class="lbl">${label}</span>${id === 'home' && State.live ? ' <span class="pill bad">REC</span>' : ''}</a>`).join('');
   $('#tabbar').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}">${ic}${label}</a>`).join('');
   const short = c => (c.code || courseCode(c.name)).replace(/^[A-Z]+/, '') || c.name.slice(0, 2);
-  $('#side-courses').innerHTML = State.courses.map(c => `<a class="course-link ${r === 'course-' + c.id ? 'on' : ''}" href="#course-${c.id}" title="${esc(c.name)}"><span class="cshort">${esc(short(c))}</span><span class="lbl">${esc(c.name)}</span></a>`).join('') ||
+  // 当前在哪门课里（课程页、它的笔记、工作台、复习、录音、生词本、问 AI）：左边那门课一直高亮
+  const direct = (r.match(/^course-([^~]+)/) || r.match(/^(?:vocab|marks|review)~([^~]+)/) || r.match(/^(?:ask|live)-([^~]+)/) || [])[1] || '';
+  $('#side-courses').innerHTML = State.courses.map(c => `<a class="course-link ${direct === c.id ? 'on' : ''}" data-cid="${c.id}" href="#course-${c.id}" title="${esc(c.name)}"><span class="cshort">${esc(short(c))}</span><span class="lbl">${esc(c.name)}</span></a>`).join('') ||
     '<div class="course-link" style="color:var(--faint)">还没有课程</div>';
+  if (!direct) {
+    const m = r.match(/^(note|desk|review|session)-([^~]+)/);
+    if (m) DB.get(m[1] === 'session' ? 'sessions' : 'notes', m[2]).then(x => {
+      if (!x || (location.hash.slice(1) || 'home') !== r) return;
+      const el = document.querySelector(`#side-courses [data-cid="${x.courseId}"]`); if (el) el.classList.add('on');
+    }).catch(() => {});
+  }
   const tog = $('#side-tog'); if (tog) tog.onclick = () => Device.toggleSide();
 }
 
+
+/* ---------- 返回：回到你真正来的那一页 ----------
+   每条历史记录都编号（history.state.i），并在 sessionStorage 里记下每个编号对应的页面。
+   页面里的「←」按钮：有上一页就等于浏览器后退（iPad 侧滑、Mac 的 ⌘[ 也一样）；
+   直接打开链接、没有上一页时，才去这一页的「上级」，而且用 replace，不会多出一条历史。
+   跳转（旧链接、找不到的笔记、删除后）一律 replace，后退时不会被弹回来。 */
+const Nav = (() => {
+  const KEY = 'tingkeben.navstack';
+  let stack = [];
+  try { stack = JSON.parse(sessionStorage.getItem(KEY) || '[]'); } catch (e) {}
+  const save = () => { try { sessionStorage.setItem(KEY, JSON.stringify(stack.slice(-80))); } catch (e) {} };
+  const idx = () => (history.state && typeof history.state.i === 'number') ? history.state.i : -1;
+  function track(r) {
+    let i = idx();
+    if (i < 0) {
+      // 新的一条记录：接在上一条后面（上一条的编号存在 lastIdx 里）
+      i = Nav.lastIdx + 1;
+      try { history.replaceState({ i }, '', location.href); } catch (e) {}
+      stack.length = Math.min(stack.length, i);
+    }
+    stack[i] = r; Nav.lastIdx = i; save();
+  }
+  const prev = () => { const i = idx(); return i > 0 ? stack[i - 1] || null : null; };
+  function go(hash) { location.hash = hash; }
+  // 换掉当前这条记录（不新增历史）：replaceState 不会触发 hashchange，所以手动 route 一次
+  function replace(hash) { const i = idx(); try { history.replaceState(i >= 0 ? { i } : null, '', '#' + hash); } catch (e) { location.replace('#' + hash); return; } route(); }
+  function back(fallback) { if (prev()) history.back(); else replace(fallback || 'home'); }
+  // 页面里切标签（课件 / 笔记 / 重点 / 测验…）也算一步：返回键先回到上一个标签，再回上一页
+  function setTab(hash) {
+    if (location.hash.slice(1) === hash) return;
+    const i = idx() + 1;
+    try { history.pushState({ i }, '', '#' + hash); } catch (e) { return; }
+    stack.length = i; stack[i] = hash; Nav.lastIdx = i; save();
+  }
+  // 「←」上显示的名字：按上一页是什么页来叫
+  function label(h) {
+    if (!h || h === 'home') return '课程主页';
+    const id = h.replace(/^[a-z]+-/, '').split('~')[0];
+    if (h.startsWith('course-')) { const c = State.courses.find(x => x.id === id); return c ? c.name : '课程'; }
+    if (h.startsWith('note-')) return '笔记';
+    if (h.startsWith('desk-')) return '上课工作台';
+    if (h.startsWith('review-')) return '复习笔记';
+    if (h.startsWith('review')) return '复习';
+    if (h.startsWith('session-')) return '录音';
+    if (h.startsWith('live')) return '录音';
+    if (h.startsWith('settings')) return '设置';
+    if (h.startsWith('ask')) return '问 AI';
+    if (h.startsWith('vocab')) return '生词本';
+    if (h.startsWith('wrong')) return '错题本';
+    if (h.startsWith('marks')) return '考前重点';
+    return '上一页';
+  }
+  // 所有返回按钮都一样：「← 返回」= 回到上一步（和浏览器后退、iPad 侧滑、Mac ⌘[ 完全相同）。
+  // 只有一打开就是这一页、前面什么都没有的时候，才去 fallback（这一页的上级）。
+  function crumb(fallback, fallbackLabel, cls = 'crumb', inner) {
+    const p = prev();
+    const text = inner != null ? inner : '← 返回';
+    return `<a class="${cls}" data-back="${esc(fallback)}" href="#${esc(p || fallback)}" title="${esc('返回' + (p ? '：' + label(p) : ''))}">${text}</a>`;
+  }
+  function reset() { stack = []; Nav.lastIdx = -1; }
+  return { track, prev, back, replace, go, setTab, crumb, label, reset, lastIdx: -1 };
+})();
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a[data-back]');
+  if (!a || e.metaKey || e.ctrlKey || e.button) return;
+  e.preventDefault(); Nav.back(a.dataset.back);
+});
+
 async function route() {
   const r = location.hash.slice(1) || 'home';
+  Nav.track(r);
   document.body.classList.toggle('desk-mode', r.startsWith('desk-'));
   document.body.classList.toggle('review-mode', r.startsWith('review-'));
   renderSide();
@@ -345,11 +423,11 @@ function courseModal(course) {
 /* ---------- 课程页 ---------- */
 async function renderCourse(id, tab) {
   const course = await DB.get('courses', id);
-  if (!course) { location.hash = 'home'; return; }
+  if (!course) { Nav.replace('home'); return; }
   const [files, notes, sessions] = await Promise.all([DB.byIndex('files', 'courseId', id), DB.byIndex('notes', 'courseId', id), DB.byIndex('sessions', 'courseId', id)]);
   view.innerHTML = `
     <div>
-      <a class="crumb" href="#home">← 课程主页</a>
+      ${Nav.crumb('home', '课程主页')}
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1>${esc(course.name)}</h1><div class="meta">${course.examDate ? `考试 ${esc(course.examDate)} · ${examCountdown(course.examDate)}` : '还没设考试日期'}</div></div>
         <div class="row"><button class="btn small" id="c-edit">课程设置</button><button class="btn small ghost danger-text" data-del-course="${id}" title="删除这门课">删除课程</button><button class="btn small" id="c-sync">${ICON.up}同步 Moodle</button><button class="btn small" id="c-points">知识点总结</button><button class="btn small" id="c-mock">模拟考试</button><a class="btn small" href="#ask-${id}">${ICON.chat}问 AI</a><button class="btn" id="c-desk">${ICON.mic}上课</button><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
@@ -361,7 +439,7 @@ async function renderCourse(id, tab) {
       <button data-tab="sessions" class="${tab === 'sessions' ? 'on' : ''}">课堂录音 ${sessions.length}</button>
     </div>
     <div id="tab-body"></div>`;
-  $$('.tabs button').forEach(b => b.onclick = () => { history.replaceState(null, '', '#course-' + id + '~' + b.dataset.tab); renderCourse(id, b.dataset.tab); });
+  $$('.tabs button').forEach(b => b.onclick = () => { Nav.setTab('course-' + id + '~' + b.dataset.tab); renderCourse(id, b.dataset.tab); });
   $('#c-edit').onclick = () => courseModal(course);
   $('#c-sync').onclick = () => syncModal(course.id);
   $('#c-gen').onclick = () => generateModal({ course, preselect: State.selected || [] });
@@ -573,6 +651,7 @@ async function importFiles(course, list) {
   // 顺手扫一遍难度：先标出这份课件最难的 3 页（一次最多 8 份）
   const n = Learn.diffAuto(recs, course.name);
   if (n) toast(`正在标出这 ${n} 份课件最难的 3 页（后台跑，不影响你用）`, 5000);
+  return recs;
 }
 
 /* 存文件并提取文字；items: [{file, folder, meta}] */
@@ -966,6 +1045,109 @@ function sessionTranscript(s) {
   return s.segments.map(g => `[${fmtTime(g.t)}]${g.important ? '【重点】' : ''}${g.starred ? '【学生标记】' : ''} ${g.en}\n　　${g.zh || ''}`).join('\n');
 }
 
+/* ---------- 笔记的课件：建好以后也能随时加新课件 / 去掉课件 ----------
+   · 勾选这门课已有的课件，或者直接从电脑上传新的（上传完自动勾上）
+   · 新加的课件可以只「加进来」（左边能看、能在课件上写），也可以让 AI 把它的内容整理好接在笔记后面
+     —— 原来的笔记文字、手写、文本框都不动，只在最后多出新的几块 */
+async function noteFilesModal(note, course, after) {
+  if (!course) course = await DB.get('courses', note.courseId);
+  const before = new Set(note.sourceFileIds || []);
+  let chosen = new Set(before);
+  let q = '';
+  const usable = f => f.status !== 'link' && f.status !== 'error';
+  const load = async () => sortFiles((await DB.byIndex('files', 'courseId', course.id)).filter(usable));
+  let files = await load();
+  modal(`<h2>这份笔记的课件</h2>
+    <p class="hint" style="margin:0">勾上的课件会出现在笔记左边，也能拿来生成笔记。随时可以再来加新的。</p>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <input type="search" id="nf-q" placeholder="搜课件名字 / 第几周" style="flex:1;min-width:0">
+      <label class="btn small" style="cursor:pointer">＋ 从电脑上传<input type="file" id="nf-up" multiple accept=".pdf,.ppt,.pptx,.doc,.docx,.txt,.md,.zip,.png,.jpg,.jpeg" hidden></label>
+    </div>
+    <div class="nf-list" id="nf-list"></div>
+    <div id="nf-mode"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" data-close>取消</button><button class="btn primary" id="nf-ok">保存</button></div>`, (box, close) => {
+    const list = $('#nf-list', box), modeEl = $('#nf-mode', box);
+    const paint = () => {
+      const shown = files.filter(f => !q || (f.name + ' ' + weekOf(f).label + ' ' + (f.folder || '')).toLowerCase().includes(q));
+      list.innerHTML = shown.length ? shown.map(f => `<label class="nf-item${chosen.has(f.id) ? ' on' : ''}"><input type="checkbox" data-f="${f.id}" ${chosen.has(f.id) ? 'checked' : ''}>
+        <span class="grow"><b>${esc(f.name)}</b><span class="hint">${esc(weekOf(f).label)}${f.status === 'extracting' ? ' · 正在读取文字…' : f.status === 'scanned' ? ' · 扫描件' : ''}</span></span></label>`).join('')
+        : `<div class="empty" style="padding:18px">${files.length ? '没有找到' : '这门课还没有课件，点「从电脑上传」，或者先从 Moodle 同步'}</div>`;
+      $$('[data-f]', list).forEach(cb => cb.onchange = () => { cb.checked ? chosen.add(cb.dataset.f) : chosen.delete(cb.dataset.f); cb.closest('.nf-item').classList.toggle('on', cb.checked); paintMode(); });
+      paintMode();
+    };
+    const paintMode = () => {
+      const added = [...chosen].filter(x => !before.has(x));
+      if (!added.length || !String(note.markdown || '').trim()) { modeEl.innerHTML = ''; return; }
+      const keep = modeEl.querySelector('input[name=nf-m]:checked');
+      const v = keep ? keep.value : 'link';
+      modeEl.innerHTML = `<div class="field" style="margin-top:12px"><label>新加的 ${added.length} 份课件</label>
+        <label class="radio"><input type="radio" name="nf-m" value="link" ${v === 'link' ? 'checked' : ''}> 只加进来：左边能看、能在课件上写，笔记文字不变</label>
+        <label class="radio"><input type="radio" name="nf-m" value="append" ${v === 'append' ? 'checked' : ''}> 把新课件的内容整理好，接在笔记后面（DeepSeek，原来的笔记和手写都不动）</label></div>`;
+    };
+    $('#nf-q', box).oninput = e => { q = e.target.value.trim().toLowerCase(); paint(); };
+    $('#nf-up', box).onchange = async e => {
+      const picked = [...e.target.files]; e.target.value = '';
+      if (!picked.length) return;
+      const recs = (await importFiles(course, picked)) || [];
+      recs.forEach(r => chosen.add(r.id));
+      files = await load(); paint();
+    };
+    $('#nf-ok', box).onclick = async () => {
+      const ids = files.map(f => f.id).filter(id => chosen.has(id));
+      // 不在这门课列表里的老 id（比如被删的课件）顺手清掉
+      const added = ids.filter(x => !before.has(x));
+      const mode = (modeEl.querySelector('input[name=nf-m]:checked') || {}).value || 'link';
+      const fresh = await DB.get('notes', note.id) || note;
+      fresh.sourceFileIds = ids;
+      if (!ids.includes(fresh.deskFile)) fresh.deskFile = added[0] || ids[0] || '';
+      else if (added.length) fresh.deskFile = added[0];   // 刚加的课件直接显示在左边
+      await DB.put('notes', fresh);
+      Object.assign(note, { sourceFileIds: fresh.sourceFileIds, deskFile: fresh.deskFile });
+      close();
+      const removed = [...before].filter(x => !ids.includes(x)).length;
+      toast(added.length || removed ? `课件已更新：加了 ${added.length} 份${removed ? `，去掉 ${removed} 份` : ''}` : '课件没有变化', 2000);
+      if (added.length && mode === 'append') appendFromFiles(fresh, course, added, after);
+      after && after();
+    };
+    paint();
+  });
+}
+
+/* 把新课件整理成笔记，接在原来的笔记后面。只新增板块，原来板块的编号不变，手写就不会跑位。 */
+async function appendFromFiles(note, course, fileIds, after) {
+  if (!keysReady().notes) { toast('先在设置里填 DeepSeek 的 key 才能整理笔记', 4000); return; }
+  const job = Jobs.start('note-add:' + note.id, '补进笔记：' + note.title);
+  try {
+    // 刚上传的课件可能还在读文字，等一下（最多 90 秒）
+    let files = [];
+    for (let t = 0; t < 90; t++) {
+      files = (await Promise.all(fileIds.map(id => DB.get('files', id)))).filter(Boolean);
+      if (!files.some(f => f.status === 'extracting')) break;
+      job.phase('等课件读完文字', 0, .05, { expectSec: 20 });
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    const src = files.filter(f => (f.text || '').trim());
+    if (!src.length) { job.done(); toast('新课件还读不出文字（扫描件要先在课件页用 Gemini 识别），这次只加进来了', 5000); return; }
+    job.phase('正在读课件、理清思路', .05, .35, { expectLen: 4000 });
+    const extra = [note.extra || '', '这是同一份笔记的续写：学生已经有前面的笔记，现在只需要把下面这几份新课件整理成笔记，接在后面。不要重复写课程介绍，第一行用二级标题写这份课件讲的主题（标题里带上课件名），其余格式和前面保持一致。'].filter(Boolean).join('\n');
+    const user = AI.notesPrompt({ courseName: course.name, title: note.title, sources: src.map(f => ({ name: f.name, text: (f.text || '').slice(0, 600000) })), transcript: '', highlights: [], style: note.style || 'detailed', extra });
+    let writing = false;
+    const text = await AI.deepseekStream({
+      system: AI.NOTES_SYSTEM, user, purpose: 'notes',
+      onThinking: t => { job.len(t.length).sub(`已思考 ${t.length} 字`); },
+      onText: t => { if (!writing) { writing = true; job.phase('正在写笔记', .35, .98, { expectLen: 8000 }); } job.len(t.length).sub(`已写 ${t.length} 字`); },
+    });
+    const add = String(text || '').trim().replace(/^#\s[^\n]*\n+/, '');   // 去掉续写里多出来的一级大标题
+    if (!add) throw new Error('DeepSeek 没有返回内容');
+    const n = await DB.get('notes', note.id) || note;
+    Board.appendMd(n, add);
+    await DB.put('notes', n);
+    job.done();
+    toast(`新课件的笔记已经接在后面了（${src.length} 份）`, 3000);
+    if (location.hash.slice(1).startsWith('note-' + note.id) || location.hash.slice(1) === 'desk-' + note.id) { after ? after() : route(); }
+  } catch (e) { job.done(); toast('补进笔记失败：' + e.message, 6000); }
+}
+
 async function startGeneration({ course, fileIds, sessionId, title, style, extra, noteId, thenParts = [] }) {
   const files = await Promise.all(fileIds.map(id => DB.get('files', id)));
   const session = sessionId ? await DB.get('sessions', sessionId) : null;
@@ -1139,8 +1321,16 @@ async function startClassModal(course) {
 }
 
 /* ---------- 笔记页 ---------- */
-// 笔记页的功能标签：笔记（画布）/ 课件 / 重点 / 测验 / 思维导图 / 生词本 / 纯文本（这一版之前被精简掉了，补回来）
-const NOTE_TABS = [['note', '笔记'], ['doc', '课件'], ['points', '重点'], ['quiz', '测验'], ['map', '思维导图'], ['vocab', '生词本'], ['text', '纯文本']];
+// 笔记页的功能标签：笔记（画布）/ 重点 / 测验 / 思维导图 / 生词本 / 复盘
+/* 笔记页的标签：重点 / 测验 / 思维导图 / 生词本 是单独的复习页面，点进去算「进了一页」，
+   返回键才能回到这份笔记（以前是原地替换，返回就跳过笔记直接回到更早的页面 / 复习主页）。
+   笔记 / 复盘 在笔记页里切换。 */
+function noteTabGo(id, tab) {
+  if (['points', 'quiz'].includes(tab)) { DB.get('notes', id).then(() => Nav.go('review-' + id + '~' + tab)); return; }
+  if (tab === 'vocab') { DB.get('notes', id).then(n => { if (n) Nav.go('vocab~' + n.courseId); }); return; }
+  Nav.setTab('note-' + id + (tab === 'note' ? '' : '~' + tab)); renderNote(id, tab);
+}
+const NOTE_TABS = [['note', '笔记'], ['points', '重点'], ['quiz', '测验'], ['text', '复盘'], ['vocab', '生词本']];
 function noteTabsHTML(tab, note) {
   const pg = Study.progress(note);
   return NOTE_TABS.map(([k, l]) => `<button data-ntab="${k}" class="${tab === k ? 'on' : ''}">${l}${k === 'points' && pg.total ? ` <span class="pill mute">${pg.done}/${pg.total}</span>` : ''}${k !== 'note' && k !== 'board' && k !== 'map' && State.studyGens.has(note.id) ? ' <span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>' : ''}</button>`).join('');
@@ -1150,24 +1340,26 @@ function mountNoteTool(tab, note, course, pane, go) {
 
   if (tab === 'points') return Study.points(note, pane, { focus: go && go.focus });
   if (tab === 'quiz') return Study.quiz(note, pane, { gotoPoint: id => go && go.toPoint(id) });
-  if (tab === 'map') return MindMap.mount(pane, note);
+  if (tab === 'map') tab = 'text';
   if (tab === 'doc') return docTab(note, course, pane);
+  if (tab === 'text') return renderRecap(note, course, pane, note.id, () => mountNoteTool('text', note, course, pane, go));
   if (tab === 'vocab') { pane.innerHTML = `<div class="empty"><strong>生词本</strong>这门课的生词按艾宾浩斯节奏复习。<div class="row" style="justify-content:center;margin-top:12px"><a class="btn primary" href="#vocab~${esc(note.courseId)}">打开生词本</a></div></div>`; return; }
 
 }
 async function renderNote(id, tab = 'note', opt = {}) {
   if (!location.hash.slice(1).startsWith('note-' + id)) return; // 已经离开这页了（异步回调晚到），不要把别的页面盖掉
   if (tab === 'board') tab = 'note'; // 画板已经并进笔记，老链接直接落到笔记
-  if (tab === 'vocab') { location.hash = 'vocab~' + note.courseId; return; }
-  if (['points', 'quiz', 'map'].includes(tab)) { location.hash = 'review-' + id + '~' + tab; return; }
+  if (tab === 'map') tab = 'text';   // 思维导图并进了「复盘」
+  if (['points', 'quiz'].includes(tab)) { Nav.replace('review-' + id + '~' + tab); return; }
   const note = await DB.get('notes', id);
-  if (!note) { location.hash = 'home'; return; }
+  if (!note) { Nav.replace('home'); return; }
+  if (tab === 'vocab') { Nav.replace('vocab~' + note.courseId); return; }
   const course = await DB.get('courses', note.courseId);
   const files = (await Promise.all((note.sourceFileIds || []).map(f => DB.get('files', f)))).filter(Boolean);
   const gen = State.gens.get(id);
   view.innerHTML = `
     <div class="noprint">
-      <a class="crumb" href="#course-${note.courseId}~notes">← ${esc(course ? course.name : '课程')}</a>
+      ${Nav.crumb('course-' + note.courseId + '~notes', course ? course.name : '课程')}
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1>${esc(note.title)}</h1>
           <div class="meta">${[fmtDate(note.createdAt), esc(note.model || ''), files.length ? '来源：' + files.map(f => esc(f.name)).join('、') : '', note.sessionId ? '含课堂录音' : ''].filter(Boolean).join(' · ')}</div></div>
@@ -1176,7 +1368,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
       <div class="tabs" id="n-tabs">${noteTabsHTML(tab, note)}</div>
     </div>
     <div id="n-pane"></div>`;
-  $$('[data-ntab]').forEach(b => b.onclick = () => { history.replaceState(null, '', '#note-' + id + (b.dataset.ntab === 'note' ? '' : '~' + b.dataset.ntab)); renderNote(id, b.dataset.ntab); });
+  $$('[data-ntab]').forEach(b => b.onclick = () => noteTabGo(id, b.dataset.ntab));
   $('#n-ask').onclick = () => chatDrawer({ note, course });
   const pane = $('#n-pane');
   // 「笔记」= 课件顺序的笔记文字 + 手写画板（合在一页）；「纯文本」还是老式的文章视图
@@ -1186,9 +1378,9 @@ async function renderNote(id, tab = 'note', opt = {}) {
       <div class="nb-split" id="nb-split"><button class="btn small nb-doc-tog noprint" id="nb-doc-tog" aria-expanded="false">📄 显示课件</button><aside class="nb-left" id="nb-left"></aside><section class="nb-right" id="nb-right"></section></div>`;
     // 窄屏（iPad 竖屏 / 手机）：课件默认收起，点一下在画布上方展开，不用滚到最底下找
     const tog = $('#nb-doc-tog');
-    const setDoc = on => { $('#nb-split').classList.toggle('doc-on', on); tog.textContent = on ? '收起课件' : '📄 显示课件'; tog.setAttribute('aria-expanded', on ? 'true' : 'false'); try { localStorage.setItem('tingkeben.nbDoc', on ? '1' : '0'); } catch (e) {} };
+    const setDoc = on => { $('#nb-split').classList.toggle('doc-on', on); tog.textContent = on ? '收起课件' : '📄 显示课件'; tog.setAttribute('aria-expanded', on ? 'true' : 'false');  };
     tog.onclick = () => setDoc(!$('#nb-split').classList.contains('doc-on'));
-    try { if (localStorage.getItem('tingkeben.nbDoc') === '1') setDoc(true); } catch (e) {}
+    try { localStorage.removeItem('tingkeben.nbDoc'); } catch (e) {}   // 每次打开都是默认（课件收起），不记上次
     renderTodo($('#note-todo'), note, course, () => renderTodo($('#note-todo'), note, course));
     $('#note-acts').innerHTML = noteActsHTML(note, 'board');
     bindNoteActs(note, course, id, 'board');
@@ -1200,7 +1392,7 @@ async function renderNote(id, tab = 'note', opt = {}) {
   }
   if (tab !== 'text') {
     pane.className = 'card pad tool-pane';
-    mountNoteTool(tab, note, course, pane, { focus: opt.focus, toPoint: pid => { history.replaceState(null, '', '#note-' + id + '~points'); renderNote(id, 'points', { focus: pid }); } });
+    mountNoteTool(tab, note, course, pane, { focus: opt.focus, toPoint: pid => { Nav.setTab('note-' + id + '~points'); renderNote(id, 'points', { focus: pid }); } });
     return;
   }
   pane.innerHTML = `<div id="note-todo"></div><div class="row noprint note-acts" id="note-acts"></div><article class="sheet"><div id="note-body" class="md"></div></article>`;
@@ -1223,23 +1415,106 @@ async function renderNote(id, tab = 'note', opt = {}) {
     return;
   }
 
+  // 复盘：课后把这份笔记（含课堂上老师提到的、你的手写整理、没听懂的、错题）重新理一遍逻辑、重新排版，专门给复习用。
+  // 原来的笔记和画布不动，复盘单独存在 note.recap；想看 / 改原文，点「原始笔记」。
+  if (!opt.raw) { renderRecap(note, course, pane, id); return; }
   if (note.status === 'error') body.innerHTML = `<div class="empty"><strong>生成失败</strong>${esc(note.error)}</div>`;
   else if (!note.markdown) body.innerHTML = `<div class="empty"><strong>这是一份空白笔记</strong>可以直接点「编辑」写，或者直接在笔记上写；有课件的话点「生成」让 AI 先写一稿。</div>`;
   else body.innerHTML = md(note.markdown) + (note.error ? `<p class="noprint" style="color:var(--warn)">（${esc(note.error)}，内容可能不完整）</p>` : '');
   linkPageRefs(body, note);
-  acts.innerHTML = noteActsHTML(note, 'text');
+  acts.innerHTML = `<button class="btn small" id="n-back-recap">← 回到复盘</button>` + noteActsHTML(note, 'text');
+  $('#n-back-recap').onclick = () => renderNote(id, 'text');
   bindNoteActs(note, course, id, 'text');
   $('#n-edit').onclick = () => {
     body.innerHTML = `<textarea id="n-text" style="min-height:60vh;font-family:var(--mono);font-size:14px">${esc(note.markdown)}</textarea>
       <div class="row noprint" style="justify-content:flex-end;margin-top:10px"><button class="btn" id="n-cancel">取消</button><button class="btn primary" id="n-save">保存</button></div>`;
-    $('#n-cancel').onclick = () => renderNote(id);
-    $('#n-save').onclick = async () => { note.markdown = $('#n-text').value; await DB.put('notes', note); toast('已保存'); renderNote(id); };
+    $('#n-cancel').onclick = () => renderNote(id, 'text', { raw: true });
+    $('#n-save').onclick = async () => { note.markdown = $('#n-text').value; await DB.put('notes', note); toast('已保存'); renderNote(id, 'text', { raw: true }); };
   };
 }
+
+/* ---------- 复盘 ---------- */
+const RECAP_SYSTEM = `你是耐心的商科助教，帮一个英语不好的中国留学生（Monash Diploma of Business 一年级）做课后复盘。
+你会拿到他这节课的笔记（可能包含「课堂上老师提到的」、他的手写整理），以及他没听懂的地方和做错的题。
+任务：把这些内容重新理一遍逻辑、重新排版，写成一份适合复习的复盘讲义。要求：
+- 用中文写，专业术语写成「中文（English）」。
+- 不照搬原笔记的顺序：先讲清楚这节课要解决什么问题，再按「概念之间的逻辑关系」重新排（先基础后进阶、因果、对比）。
+- 结构：
+  ## 一句话总结
+  ## 知识框架（用缩进列表画出概念之间的关系）
+  ## 逐个讲清楚（每个概念：是什么 → 为什么重要 → 一个简单例子；容易混的放在一起对比，可以用表格）
+  ## 老师强调的 / 可能考的
+  ## 我还没搞懂的（针对他没听懂的地方和错题，用更简单的话重讲；没有就省略这一节）
+  ## 自测 5 题（问答题，每题答案直接写在题目下面）
+- 只用材料里有的内容，不要编造课上没讲的东西；材料没说清的地方写「（课件没说清，建议问老师）」。
+- 直接从第一个标题开始，不要开场白。`;
+function recapInput(note, course, session) {
+  const todo = (note.todo || []).filter(x => !x.done).map(x => `- ${x.t}${x.detail ? '：' + x.detail : ''}`).join('\n');
+  const quiz = (note.study && note.study.quiz) || [];
+  const wrong = (note.wrong || []).map(w => quiz[w.qi]).filter(Boolean).map(q => `- ${q.q}${q.explain ? '（解析：' + String(q.explain).slice(0, 200) + '）' : ''}`).join('\n');
+  const tr = session ? sessionTranscript(session).slice(0, 40000) : '';
+  return `课程：${course ? course.name : ''}\n这节课：${note.title}\n\n【笔记】\n${String(note.markdown || '').slice(0, 120000)}\n\n` +
+    (todo ? `【没听懂 / 待搞懂】\n${todo}\n\n` : '') + (wrong ? `【做错的题】\n${wrong}\n\n` : '') +
+    (tr && !/课堂上老师提到/.test(note.markdown || '') ? `【课堂录音转写（语音识别可能有错，只用来补充）】\n${tr}\n\n` : '') +
+    '请写复盘讲义。';
+}
+const recapRunning = new Map();
+async function renderRecap(note, course, pane, id, rerender) {
+  const busy = recapRunning.get(id);
+  const again = () => { if (!pane.isConnected) return; if (rerender) rerender(); else if (location.hash.slice(1) === 'note-' + id + '~text') renderNote(id, 'text'); };
+  pane.className = 'card pad tool-pane';
+  pane.innerHTML = `<div class="row noprint recap-bar">
+      <div class="grow"><b>复盘</b> <span class="hint">${note.recap ? '整理于 ' + fmtDate(note.recapAt || Date.now()) + (note.recapSig && note.recapSig !== recapSig(note) ? ' · 笔记后来改过，可以重新整理' : '') : '课后把这节课重新理一遍逻辑、重新排版，专门用来复习'}</span></div>
+      ${note.recap && !busy ? `<button class="btn small" id="rc-copy">复制</button><button class="btn small" id="rc-pdf">导出 PDF</button><button class="btn small" id="rc-redo">重新整理</button>` : ''}
+      ${rerender ? '' : '<button class="btn small ghost" id="rc-raw" title="看 / 改原来的笔记文字">原始笔记</button>'}
+    </div>
+    <div class="recap-host"><div class="recap-wrap">
+      <article class="sheet recap-text"><div class="md" id="rc-body"></div></article>
+      <aside class="recap-map noprint"><div class="recap-map-h"><b>思维导图</b><span class="hint" id="rc-map-src"></span></div><div id="rc-map"></div></aside>
+    </div></div>`;
+  const body = $('#rc-body', pane);
+  // 右边思维导图：有复盘就按复盘的结构画，没有就先按原笔记的标题画（本地画，不花钱）
+  const mapSrc = note.recap && !busy ? note.recap : note.markdown;
+  $('#rc-map-src', pane).textContent = note.recap && !busy ? '按复盘画的' : '按笔记标题画的，复盘后会按复盘重画';
+  MindMap.mount($('#rc-map', pane), { id: note.id, title: note.title, markdown: mapSrc || '' });
+  const rawBtn = $('#rc-raw', pane); if (rawBtn) rawBtn.onclick = () => renderNote(id, 'text', { raw: true });
+  const start = () => {
+    if (!String(note.markdown || '').trim()) { toast('这份笔记还没有文字：先生成笔记，或者用「手写笔记 + 课堂录音优化笔记」把手写整理进来'); return; }
+    if (!keysReady().notes) { toast('先在设置里填 DeepSeek 的 key'); return; }
+    const job = Jobs.start('recap:' + id, '复盘：' + note.title);
+    const run = (async () => {
+      const session = note.sessionId ? await DB.get('sessions', note.sessionId) : null;
+      let txt = '';
+      job.phase('正在理清这节课的逻辑', .02, .3, { expectLen: 3000 });
+      const out = await AI.deepseekStream({
+        system: RECAP_SYSTEM, user: recapInput(note, course, session), purpose: 'notes',
+        onThinking: t => job.len(t.length).sub(`已思考 ${t.length} 字`),
+        onText: t => { if (!txt) job.phase('正在写复盘', .3, .98, { expectLen: 7000 }); txt = t; job.len(t.length).sub(`已写 ${t.length} 字`); const el = pane.isConnected && $('#rc-body', pane); if (el) el.innerHTML = md(t); },
+      });
+      const n = await DB.get('notes', id) || note;
+      n.recap = String(out || '').trim(); n.recapAt = Date.now(); n.recapSig = recapSig(n);
+      await DB.put('notes', n); Object.assign(note, { recap: n.recap, recapAt: n.recapAt, recapSig: n.recapSig });
+      toast('复盘整理好了：' + note.title);
+    })().catch(e => toast('复盘失败：' + e.message, 6000)).finally(() => { job.done(); recapRunning.delete(id); again(); });
+    recapRunning.set(id, run);
+    renderRecap(note, course, pane, id, rerender);
+  };
+  if (busy) { body.innerHTML = `<div class="noprint">${Jobs.slot('recap:' + id)}</div>`; return; }
+  if (!note.recap) {
+    body.innerHTML = `<div class="empty"><strong>还没有复盘</strong>把这节课的笔记、课堂上老师提到的、你的手写整理、没听懂的地方和错题放在一起，重新理顺逻辑、重新排版，最后附 5 道自测题。原来的笔记不会被改。<div class="row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="rc-go">开始复盘</button></div></div>`;
+    $('#rc-go', pane).onclick = start; return;
+  }
+  body.innerHTML = md(note.recap);
+  $('#rc-redo', pane).onclick = start;
+  $('#rc-copy', pane).onclick = async () => { try { await navigator.clipboard.writeText(note.recap); toast('已复制'); } catch (e) { toast('复制失败'); } };
+  $('#rc-pdf', pane).onclick = () => { toast('在打印窗口选「存储为 PDF」'); setTimeout(() => window.print(), 300); };
+}
+const recapSig = n => { const s = String(n.markdown || '') + '|' + (n.todo || []).length + '|' + (n.wrong || []).length; let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return s.length + ':' + h; };
 
 function noteActsHTML(note, view) {
   return `
     ${(note.sessionIds || []).length || note.sessionId || Board.hasInk(note) ? `<button class="btn small primary" id="n-recap" title="把老师讲的和你手写的整理进笔记下半部分">${ICON.spark}手写笔记 + 课堂录音优化笔记</button>` : `<button class="btn small" id="n-link">关联课堂录音</button>`}
+    <button class="btn small" id="n-files" title="给这份笔记加课件 / 去掉课件，可以随时加新的">＋ 课件${(note.sourceFileIds || []).length ? ' · ' + note.sourceFileIds.length : ''}</button>
     <button class="btn small" id="n-ai" title="把笔记 + 错题 + 没搞懂的打包成一段 prompt">复制给 AI</button>
     <button class="btn small ghost danger-text" data-del-note="${note.id}" title="删除这份笔记">删除笔记</button>
     <details class="more">
@@ -1247,7 +1522,7 @@ function noteActsHTML(note, view) {
       <div class="more-menu">
         <button id="n-edit">编辑正文</button>
         <button id="n-copy">复制 Markdown</button>
-        ${view === 'board' ? `<a href="#note-${note.id}~text">纯文本视图</a>` : `<a href="#note-${note.id}">笔记 + 手写</a>`}
+        ${view === 'board' ? `<a href="#note-${note.id}~text">复盘</a>` : `<a href="#note-${note.id}">笔记 + 手写</a>`}
         <button id="n-pdf">导出 PDF</button>
         <button id="n-regen">${note.markdown ? '重新生成' : '生成'}</button>
       </div>
@@ -1264,8 +1539,9 @@ function bindNoteActs(note, course, id, view) {
     renderNote(id);
   };
   const rc = $('#n-recap'); if (rc) rc.onclick = () => enhanceNote(note, course, () => renderNote(id));
+  const nf = $('#n-files'); if (nf) nf.onclick = () => noteFilesModal(note, course, () => renderNote(id, view === 'board' ? 'note' : 'text'));
   const lk = $('#n-link'); if (lk) lk.onclick = () => linkSessionModal(note, () => renderNote(id));
-  const del = $('#n-del'); if (del) confirmClick(del, '确认删除', async () => { await DB.del('notes', id); location.hash = 'course-' + note.courseId + '~notes'; });
+  const del = $('#n-del'); if (del) confirmClick(del, '确认删除', async () => { await DB.del('notes', id); toast('笔记已删除'); Nav.back('course-' + note.courseId + '~notes'); });
   const ed = $('#n-edit'); if (ed) ed.onclick = () => editMarkdown(note, () => renderNote(id, view === 'board' ? 'note' : 'text'));
 }
 
@@ -1354,6 +1630,7 @@ async function noteDocPane(host, note, course, onPage) {
   const pdfs = files.filter(f => f.pages || isPdf(f));
   if (!pdfs.length) {
     host.innerHTML = '<div class="empty"><strong>还没关联课件</strong>把 Moodle 的 PDF 导进来，这里就会一页一页显示，右边笔记跟着走。</div>';
+    const sp = host.closest('.nb-split'); if (sp) { sp.classList.add('no-doc'); window.dispatchEvent(new Event('resize')); }
     return;
   }
   let cur = note.deskFile && pdfs.some(f => f.id === note.deskFile) ? note.deskFile : pdfs[0].id;
@@ -1439,7 +1716,7 @@ async function renderLive(courseId) {
   if (State.live) return renderLiveRunning();
   const courses = State.courses;
   view.innerHTML = `
-    <div class="head"><div><h1>课堂录音</h1><div class="meta">${Settings.load().liveEnglishOnly !== false ? '只转写英文，不翻中文 —— 录音用来课后整理笔记；换回中文可在设置里关掉「只录英文」' : '实时转写老师的英文，并翻成中文字幕；结束后可以一键整理成笔记'}</div></div></div>
+    <div class="head"><div>${Nav.prev() ? Nav.crumb('home', '课程主页') : ''}<h1>课堂录音</h1><div class="meta">${Settings.load().liveEnglishOnly !== false ? '只转写英文，不翻中文 —— 录音用来课后整理笔记；换回中文可在设置里关掉「只录英文」' : '实时转写老师的英文，并翻成中文字幕；结束后可以一键整理成笔记'}</div></div></div>
     ${!s.geminiKey ? '<div class="banner"><div class="grow"><strong>还没填 Gemini API key</strong></div><a class="btn primary small" href="#settings~ai">去设置</a></div>' : ''}
     <div class="card pad" style="display:flex;flex-direction:column;gap:16px">
       <div class="field"><label for="l-course">这是哪门课</label>
@@ -1619,13 +1896,13 @@ function renderLiveRunning() {
 async function renderSession(id) {
   if (location.hash.slice(1) !== 'session-' + id) return; // 已经离开这页了
   const s = await DB.get('sessions', id);
-  if (!s) { location.hash = 'home'; return; }
+  if (!s) { Nav.replace('home'); return; }
   const course = s.courseId ? await DB.get('courses', s.courseId) : null;
   const failed = s.segments.filter(g => g.status !== 'done').length;
   const view_ = Settings.load().captionView;
   view.innerHTML = `
     <div>
-      <a class="crumb" href="${course ? '#course-' + course.id + '~sessions' : '#home'}">← ${esc(course ? course.name : '课程主页')}</a>
+      ${Nav.crumb(course ? 'course-' + course.id + '~sessions' : 'home', course ? course.name : '课程主页')}
       <div class="head" style="margin-top:6px">
         <div class="grow"><h1 id="s-title">${esc(s.title)}</h1><div class="meta">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句${s.highlights.length ? ' · ' + s.highlights.length + ' 个标记' : ''}</div></div>
         <div class="row">
@@ -1826,7 +2103,7 @@ async function renderSession(id) {
     }
     await DB.put('sessions', s); renderSession(id);
   };
-  confirmClick($('#s-del'), '确认删除', async () => { await DB.delByIndex('audio', 'sessionId', s.id); await DB.del('sessions', s.id); location.hash = course ? 'course-' + course.id + '~sessions' : 'live'; });
+  confirmClick($('#s-del'), '确认删除', async () => { await DB.delByIndex('audio', 'sessionId', s.id); await DB.del('sessions', s.id); Nav.back(course ? 'course-' + course.id + '~sessions' : 'home'); });
   const mv = $('#s-move'); if (mv) mv.onchange = async () => { if (!mv.value) return; s.courseId = mv.value; await DB.put('sessions', s); toast('已放进课程'); renderSession(id); };
 }
 
@@ -2214,11 +2491,11 @@ function settingsCategories(cat) {
   }
   secs.forEach(sec => { sec.hidden = sec.dataset.cat !== cat; });
   const title = SET_CATS.find(c => c[0] === cat)[1];
-  if (head) head.innerHTML = `<div><a class="crumb" href="#settings">← 设置</a><h1 style="margin-top:6px">${title}</h1></div>`;
+  if (head) head.innerHTML = `<div>${Nav.crumb('settings', '设置')}<h1 style="margin-top:6px">${title}</h1></div>`;
 }
 
 /* ---------- 复习模式：大字、少按钮，适合 iPad 拿在手上看 ---------- */
-const REVIEW_TABS = [['note', '文本'], ['map', '思维导图'], ['points', '重点'], ['quiz', '测验']];
+const REVIEW_TABS = [['note', '笔记'], ['text', '复盘'], ['points', '重点'], ['quiz', '测验']];
 const ReviewPref = {
   get() { try { return Object.assign({ size: Device.ipad ? 19 : 17 }, JSON.parse(localStorage.getItem('tingkeben.review') || '{}')); } catch (e) { return { size: 18 }; } },
   set(p) { try { localStorage.setItem('tingkeben.review', JSON.stringify(Object.assign(this.get(), p))); } catch (e) {} },
@@ -2311,11 +2588,11 @@ async function renderReview(courseId) {
 async function renderVocab(courseId, mode = 'card') {
   const courses = State.courses;
   const cid = courseId || (courses[0] && courses[0].id);
-  view.innerHTML = `<div class="head"><div><h1>重点词汇</h1><div class="meta">课件和录音里的术语都在这里：按遗忘曲线背，或者当词典查</div></div><a class="btn small ghost" href="#review">← 回复习</a></div>
+  view.innerHTML = `<div class="head"><div><h1>重点词汇</h1><div class="meta">整理出来的术语先筛一遍，不会的进生词本按遗忘曲线背；课件或笔记里选中一个词也能直接加</div></div>${Nav.crumb('review', '复习', 'btn small ghost')}</div>
     <div class="chips">${courses.map(c => `<a class="chip ${cid === c.id ? 'on' : ''}" href="#vocab~${c.id}~${mode}">${esc(c.name)}</a>`).join('')}</div>
-    <div class="seg" id="vb-mode" style="margin-bottom:12px"><button data-vm="card" class="${mode === 'card' ? 'on' : ''}">🃏 今天要背</button><button data-vm="list" class="${mode === 'list' ? 'on' : ''}">📖 全部词汇</button></div>
+    <div class="seg" id="vb-mode" style="margin-bottom:12px"><button data-vm="card" class="${mode === 'card' ? 'on' : ''}">🃏 生词本</button><button data-vm="list" class="${mode === 'list' ? 'on' : ''}">📖 全部词汇</button></div>
     <div id="vocab-body"></div>`;
-  $$('#vb-mode [data-vm]').forEach(b => b.onclick = () => { history.replaceState(null, '', '#vocab~' + cid + '~' + b.dataset.vm); renderVocab(cid, b.dataset.vm); });
+  $$('#vb-mode [data-vm]').forEach(b => b.onclick = () => { Nav.setTab('vocab~' + cid + '~' + b.dataset.vm); renderVocab(cid, b.dataset.vm); });
   if (mode === 'list') await vocabList(cid, $('#vocab-body'));
   else Learn.vocabPage($('#vocab-body'), courses, cid);
 }
@@ -2339,7 +2616,7 @@ function vocabListHTML(el, terms, files) {
   const missing = terms.filter(t => !t.ipa).length;
   el.innerHTML = `
     <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-      <div class="grow"><b>${terms.length} 个术语</b><div class="hint">来自这门课的课件和课堂录音 · 已经在「今天要背」里按遗忘曲线排好了</div></div>
+      <div class="grow"><b>${terms.length} 个术语</b><div class="hint">来自这门课的课件和课堂录音 · 先在「生词本」里筛一遍，不会的才会进生词本按遗忘曲线背</div></div>
       ${missing ? `<button class="btn small" id="vb-ipa">补音标（${missing}）</button>` : ''}
     </div>
     <div class="row" style="margin-bottom:10px"><input id="vb-q" type="search" class="grow" placeholder="搜英文或中文…" style="max-width:320px"></div>
@@ -2379,7 +2656,7 @@ async function renderWrong() {
   const notes = (await DB.all('notes')).filter(n => (n.wrong || []).length);
   const courses = State.courses;
   const items = Learn.wrongList(notes, courses);
-  view.innerHTML = `<div class="head"><div><h1>错题本</h1><div class="meta">测验做错的题自动进来；同一道连对两次就出本</div></div><a class="btn small ghost" href="#review">← 回复习</a></div>
+  view.innerHTML = `<div class="head"><div><h1>错题本</h1><div class="meta">测验做错的题自动进来；同一道连对两次就出本</div></div>${Nav.crumb('review', '复习', 'btn small ghost')}</div>
     ${items.length ? `<div class="row" style="margin-bottom:12px"><button class="btn primary" id="wb-go">开始刷错题（${items.length}）</button><span class="hint">做对了会从本子里淡出，别重做整套测验</span></div>
     <div class="wb-list">${items.map(it => `<div class="card pad wb-item">
       <div class="row" style="justify-content:space-between"><span class="pill mute">${esc(it.courseName)}</span><span class="hint">${esc(it.noteTitle)}</span></div>
@@ -2409,7 +2686,7 @@ async function renderMarks(courseId) {
   const sessions = cid ? await DB.byIndex('sessions', 'courseId', cid) : [];
   const raw = Learn.gatherMarks(sessions);
   const m = course && course.marks;
-  view.innerHTML = `<div class="head"><div><h1>老师亲口划的重点</h1><div class="meta">课上按的标记 + 系统识别的 exam / due / important，合成考前只看这一页</div></div><a class="btn small ghost" href="#review">← 回复习</a></div>
+  view.innerHTML = `<div class="head"><div><h1>老师亲口划的重点</h1><div class="meta">课上按的标记 + 系统识别的 exam / due / important，合成考前只看这一页</div></div>${Nav.crumb('review', '复习', 'btn small ghost')}</div>
     <div class="chips">${courses.map(c => `<a class="chip ${cid === c.id ? 'on' : ''}" href="#marks~${c.id}">${esc(c.name)}</a>`).join('')}</div>
     ${!course ? '<div class="empty"><strong>还没有课程</strong></div>' : !raw.length ? `<div class="empty"><strong>这门课还没有可整理的内容</strong>上课时按「标记重点」，或者让实时翻译跑起来 —— 说到考试、作业、重点的句子会自动高亮，这里就能收进来。</div>`
     : `<div class="card pad"><div class="row" style="justify-content:space-between"><div class="grow"><b>${raw.length} 条原始标记</b><div class="hint">来自 ${new Set(raw.map(x => x.sid)).size} 节课；按「必考 / 可能考 / 了解」整理成一张纸</div></div><button class="btn primary" id="mk-go">${m ? '重新整理' : '整理成一张纸'}</button></div>
@@ -2431,9 +2708,10 @@ async function renderMarks(courseId) {
   };
 }
 async function renderReviewNote(id, tab) {
+  if (tab === 'map') tab = 'text';   // 思维导图并进了「复盘」
   if (!location.hash.slice(1).startsWith('review-' + id)) return;
   const note = await DB.get('notes', id);
-  if (!note) { location.hash = 'review'; return; }
+  if (!note) { Nav.replace('review'); return; }
   const course = await DB.get('courses', note.courseId);
   const siblings = (await DB.byIndex('notes', 'courseId', note.courseId)).filter(n => n.status !== 'generating').sort((a, b) => a.createdAt - b.createdAt);
   const i = siblings.findIndex(n => n.id === id), prev = siblings[i - 1], next = siblings[i + 1];
@@ -2441,7 +2719,7 @@ async function renderReviewNote(id, tab) {
   view.innerHTML = `
     <div class="rv">
       <div class="rv-top noprint">
-        <a class="btn small ghost" href="#review~${note.courseId}" title="返回列表">← 返回</a>
+        ${Nav.crumb('review~' + note.courseId, '复习', 'btn small ghost')}
         <div class="rv-title"><small>${esc(course ? course.name : '')}</small><b>${esc(note.title)}</b></div>
         <div class="seg rv-tabs" role="tablist">${REVIEW_TABS.map(([k, l]) => `<button data-rt="${k}" class="${tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
         <div class="seg" role="group" aria-label="字号"><button data-fs="-1" title="字小一点">A−</button><button data-fs="1" title="字大一点">A+</button></div>
@@ -2453,7 +2731,7 @@ async function renderReviewNote(id, tab) {
         ${next ? `<a class="btn" href="#review-${next.id}~${tab}">${esc(next.title)} ›</a>` : '<span></span>'}
       </div>
     </div>`;
-  $$('[data-rt]').forEach(b => b.onclick = () => { history.replaceState(null, '', '#review-' + id + (b.dataset.rt === 'note' ? '' : '~' + b.dataset.rt)); renderReviewNote(id, b.dataset.rt); });
+  $$('[data-rt]').forEach(b => b.onclick = () => { Nav.setTab('review-' + id + (b.dataset.rt === 'note' ? '' : '~' + b.dataset.rt)); renderReviewNote(id, b.dataset.rt); });
   $$('[data-fs]').forEach(b => b.onclick = () => { const size = Math.min(26, Math.max(14, ReviewPref.get().size + Number(b.dataset.fs))); ReviewPref.set({ size }); $('#rv-body').style.setProperty('--rv-size', size + 'px'); });
   const body = $('#rv-body');
   if (tab === 'note') {
@@ -2462,7 +2740,7 @@ async function renderReviewNote(id, tab) {
     return;
   }
   body.classList.add('rv-tool');
-  mountNoteTool(tab, note, course, body, { toPoint: pid => { history.replaceState(null, '', '#review-' + id + '~points'); renderReviewNote(id, 'points'); } });
+  mountNoteTool(tab, note, course, body, { toPoint: pid => { Nav.setTab('review-' + id + '~points'); renderReviewNote(id, 'points'); } });
 }
 
 /* ---------- 同步状态条（侧边栏底部 + 手机右上角） ---------- */
@@ -2586,6 +2864,9 @@ window.addEventListener('beforeunload', e => { if (State.live) { e.preventDefaul
   window.postMessage({ tkbAppReady: true }, location.origin);
   // 把上次没生成完的笔记标记为中断
   for (const n of await DB.all('notes')) if (n.status === 'generating') { n.status = n.markdown ? 'done' : 'error'; n.error = '上次生成被中断，点「重新生成」'; await DB.put('notes', n); }
+  // 每次打开听课本都从课程主页开始（不回到上次退出时停在的页面）
+  try { sessionStorage.removeItem('tingkeben.navstack'); history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+  Nav.reset();
   const t0 = Date.now();
   await route().catch(() => {});
   await splashChecks();                       // 开屏上跑一遍自检
@@ -2692,13 +2973,13 @@ async function deleteCourse(id) {
   await DB.del('courses', id);
   await loadCourses();
   toast('课程已删除');
-  if (location.hash.slice(1).includes(id) || location.hash.slice(1) === 'home' || !location.hash) { location.hash = 'home'; route(); } else route();
+  if (location.hash.slice(1).includes(id) || location.hash.slice(1) === 'home' || !location.hash) { Nav.replace('home'); } else route();
 }
 async function deleteNote(id) {
   const n = await DB.get('notes', id);
   await DB.del('notes', id);
   toast('笔记已删除');
-  if (location.hash.slice(1).startsWith('note-' + id) || location.hash.slice(1).startsWith('desk-' + id)) location.hash = n ? 'course-' + n.courseId + '~notes' : 'home';
+  if (location.hash.slice(1).startsWith('note-' + id) || location.hash.slice(1).startsWith('desk-' + id)) Nav.back(n ? 'course-' + n.courseId + '~notes' : 'home');
   else route();
 }
 document.addEventListener('click', async e => {

@@ -643,6 +643,16 @@ ${context}
 - 页面里只是页码、版权声明、"Monash University" 之类的无意义文字，直接省略。
 - 不要加任何解释或总结，只翻译。`;
   function docTranslatePrompt(text) { return `翻译下面这些页：\n\n${text}`; }
+  /* 课件逐页解析：上课工作台「对照」里，每页课件下面跟一段讲解 */
+  const DOC_EX_SYSTEM = `你是商科助教，给英语不好的中国留学生（Monash Diploma of Business 一年级）逐页讲解英文课件。
+规则：
+- 保持原来的分页标记，每页以「## 第N页」开头，一页都不要漏、不要合并。
+- 每页写一段自然的中文讲解，像老师边翻 PPT 边讲：这一页在说什么、关键概念是什么意思、为什么重要，必要时举一个简单的生活或商业例子。
+- 用连贯的段落，不要列「要点 1、2、3」，也不要逐句翻译。一般 2–5 句，内容多的页可以多写一点。
+- 专业术语写成「中文（English）」。
+- 只有标题、目录、页码、版权、"Monash University" 之类的页，写一句「这页是××，没有新内容」就行。
+- 不要开场白和总结，直接从第一页开始。`;
+  function docExplainPrompt(text, courseName) { return `${courseName ? '课程：' + courseName + '\n\n' : ''}逐页讲解下面这些课件页：\n\n${text}`; }
 
   /* ---------- 测试连接 ---------- */
   async function testGemini() {
@@ -683,5 +693,5 @@ ${context}
     }));
   }
 
-  return { Costs, prepPack, confusedPrompt, studyPack, ipaFor, pagePoints, chatSystem, DOC_TR_SYSTEM, docTranslatePrompt, parseJSON, deepseekStream, gemini, ocr, translateBatch, translateDraft, translateProvider, POOL, poolStatus, translateWith, prepareLocalTranslator, localReady, localAvailability, localState: () => localState, notesPrompt, NOTES_SYSTEM, testGemini, testDeepseek, notesProvider, AIError, GEMINI };
+  return { Costs, prepPack, confusedPrompt, studyPack, ipaFor, pagePoints, chatSystem, DOC_TR_SYSTEM, docTranslatePrompt, DOC_EX_SYSTEM, docExplainPrompt, parseJSON, deepseekStream, gemini, ocr, translateBatch, translateDraft, translateProvider, POOL, poolStatus, translateWith, prepareLocalTranslator, localReady, localAvailability, localState: () => localState, notesPrompt, NOTES_SYSTEM, testGemini, testDeepseek, notesProvider, AIError, GEMINI };
 })();

@@ -205,8 +205,8 @@ const PACE = {
 };
 
 class LiveSession {
-  constructor({ course, onUpdate, onInterim, onStatus, onError, onLevel, onQuiet }) {
-    Object.assign(this, { course, onUpdate, onInterim, onStatus, onError, onLevel, onQuiet });
+  constructor({ course, onUpdate, onInterim, onStatus, onError, onLevel, onQuiet, resume }) {
+    Object.assign(this, { course, onUpdate, onInterim, onStatus, onError, onLevel, onQuiet, resume });
     this.segments = [];
     this.glossary = {};
     this.buffer = ''; this.bufferStart = null; this.flushTimer = null;
@@ -240,6 +240,16 @@ class LiveSession {
     };
     if (this.seedGlossary) Object.assign(this.glossary, this.seedGlossary);
     this.t0 = Date.now();
+    // 接着上一段录：同一条录音记录，时间轴从上次结束的地方往后走，录音文件按顺序接在后面（不再分成新的一段）
+    if (this.resume && this.resume.id) {
+      const r = this.resume;
+      this.segments = (r.segments || []).map(x => Object.assign({}, x));
+      this.record = Object.assign({}, r, { segments: r.segments || [], highlights: r.highlights || [], confused: r.confused || [], glossary: r.glossary || {}, hasAudio: r.hasAudio || s.saveAudio, resumedAt: (r.resumedAt || []).concat(Date.now()) });
+      Object.assign(this.glossary, r.glossary || {});
+      const prev = Math.max(r.duration || 0, ...this.segments.map(g => (g.t || 0) + 5), 0);
+      this.t0 = Date.now() - prev * 1000;
+      try { this.audioIdx = (await DB.byIndex('audio', 'sessionId', r.id)).length; } catch (e) {}
+    }
     this.transcriber = new LiveTranscriber({
       vocab: this.vocab,
       onInterim: t => this.onDraft(t),
