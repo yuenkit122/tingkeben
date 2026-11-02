@@ -53,7 +53,8 @@ const Sync = (() => {
   }
   const TIMEOUT_JSON = 30000, TIMEOUT_BIG = 180000;
   async function req(method, key, opts = {}) {
-    const big = opts.body && typeof opts.body !== 'string' && (opts.body.size || 0) > 2e6;
+    // 文字也可能很大（几百页课件的全文 + 手写），以前只把文件算「大」，大文字 30 秒超时、每次都失败
+    const big = opts.body && (typeof opts.body === 'string' ? opts.body.length : (opts.body.size || 0)) > 2e6;
     const t = timed(opts.signal, opts.timeout || (big ? TIMEOUT_BIG : TIMEOUT_JSON));
     try { return await req2(method, key, opts, t.signal); }
     catch (e) {
@@ -224,14 +225,18 @@ const Sync = (() => {
 
         // ① 先列出要做的事，才知道总共多少、进度条才准
         const ops = [];
+        const haveBlobs = await DB.blobIds();
         for (const store of STORES) {
           const locals = await DB.all(store);
           const byId = new Map(locals.map(r => [r.id, r]));
           for (const r of locals) {
             const key = store + '/' + r.id, rm = items[key];
-            if (rm && rm.u >= stamp(r)) continue;
+            // 原文件上次没传上去（超时等）：文字没变也要补传，以前会被一起跳过、永远传不上去
+            // 原文件换过（Moodle 上更新了 / PPT 转成了 PDF）：blobAt 变了也要重传
+            const needBlob = store === 'files' && r.hasBlob && haveBlobs.has(r.id) && (!(rm && rm.b) || (r.blobAt && rm.bAt !== r.blobAt));
+            if (rm && rm.u >= stamp(r)) { if (needBlob) ops.push({ kind: 'blob', store, key, r, bytes: r.size || 0 }); continue; }
             ops.push({ kind: 'up', store, key, r, rm });
-            if (store === 'files' && r.hasBlob && !(rm && rm.b)) ops.push({ kind: 'blob', store, key, r, bytes: r.size || 0 });
+            if (needBlob) ops.push({ kind: 'blob', store, key, r, bytes: r.size || 0 });
           }
           for (const [key, rm] of Object.entries(items)) {
             if (!key.startsWith(store + '/')) continue;
@@ -239,7 +244,7 @@ const Sync = (() => {
             if (rm.d) { if (loc && rm.u >= stamp(loc)) ops.push({ kind: 'delLocal', store, key, id }); continue; }
             if (tb[key] && tb[key] >= rm.u) continue;
             if (loc && stamp(loc) >= rm.u) continue;
-            ops.push({ kind: 'down', store, key, loc });
+            ops.push({ kind: 'down', store, key, loc, rm });
           }
         }
         for (const [key, t] of Object.entries(tb)) { const rm = items[key]; if (!rm || (!rm.d && t >= rm.u)) ops.push({ kind: 'delRemote', key, t, rm }); }
@@ -255,18 +260,36 @@ const Sync = (() => {
         async function doOp(o) {
           if (o.kind === 'up') {
             await putJSON(`tingkeben/db/${o.key}.json`, pack(o.store, o.r));
-            items[o.key] = { u: stamp(o.r), b: o.store === 'files' ? !!(o.rm && o.rm.b) : undefined };
+            // 合并而不是整条换掉：并行时「上传原文件」可能先跑完，它记下的 b / bAt 不能被冲掉
+            items[o.key] = Object.assign({}, items[o.key] || {}, { u: stamp(o.r) }); delete items[o.key].d;
             up++; tick(`上传${NAMES[o.store]} · ${nameOf(o.store, o.r)}`);
           } else if (o.kind === 'blob') {
             const blob = await DB.getBlob(o.r.id);
             if (!blob) return; // 这台设备只同步过文字，原文件在另一台设备上，等它传
             await req('PUT', `tingkeben/blob/${o.r.id}`, { body: blob, headers: { 'content-type': o.r.type || 'application/octet-stream' } });
             // 并行时「上传课件」这条可能还没跑完，索引条目要自己兜底
-            items[o.key] = Object.assign({ u: stamp(o.r) }, items[o.key] || {}, { b: true });
+            items[o.key] = Object.assign({ u: stamp(o.r) }, items[o.key] || {}, { b: true }, o.r.blobAt ? { bAt: o.r.blobAt } : {});
             tick(`上传课件原文件 · ${o.r.name}`, o.bytes);
           } else if (o.kind === 'down') {
             const r = await getJSON(`tingkeben/db/${o.key}.json`);
-            if (r) {
+            if (!r) {
+              // 索引里有、云端文件却没有（以前上传一半失败留下的）：以前每次都去下载、永远「没同步」。
+              // 本机有这条就重新传上去；本机也没有就把这条索引作废
+              if (o.loc) {
+                o.loc.updatedAt = o.rm.u;   // 和索引对齐，两边一致后就不会再来回
+                await putJSON(`tingkeben/db/${o.key}.json`, pack(o.store, o.loc));
+                await DB.put(o.store, o.loc, { fromSync: true });
+                items[o.key] = Object.assign({}, o.rm, { u: o.rm.u });
+                up++;
+              } else items[o.key] = { u: o.rm.u, d: 1 };
+              tick(`修复云端索引 · ${nameOf(o.store, o.loc)}`);
+              return;
+            }
+            // 索引的时间比文件里记的新（两台设备同时传时会出现）：按索引的时间记下，不然下次又要下载
+            if (o.rm && o.rm.u > stamp(r)) r.updatedAt = o.rm.u;
+            // 另一台设备换了原文件（比如 PPT 转成了 PDF）：本机旧的那份删掉，打开时再从云端拿新的
+            if (o.store === 'files' && o.loc && r.hasBlob && (r.blobAt || 0) !== (o.loc.blobAt || 0)) await DB.delBlob(o.loc.id).catch(() => {});
+            {
               // 两边都动过同一条：先把本机这份另存为冲突副本，再采用云端的
               if (o.loc && lastSync && stamp(o.loc) > lastSync && stamp(r) > lastSync) {
                 try {
@@ -300,7 +323,7 @@ const Sync = (() => {
             const o = queue[qi++];
             try { await doOp(o); }
             catch (e) {
-              failed.push({ kind: o.kind, key: o.key, msg: (e && e.message) || String(e) });
+              failed.push({ kind: o.kind, key: o.key, name: nameOf(o.store, o.r || o.loc), msg: (e && e.message) || String(e) });
               tick('跳过 ' + (nameOf(o.store, o.r || o.loc) || o.key), 0);
             }
           }
@@ -322,7 +345,7 @@ const Sync = (() => {
         }
         remoteItems = nextItems;
         try { localStorage.setItem(LAST, String(t0)); } catch (e) {}
-        retryN = 0; lastResult = { up, down, del, failed: failed.length, at: Date.now() };
+        retryN = 0; lastResult = { up, down, del, failed: failed.length, failedList: failed.slice(0, 20).map(f => `${f.name || f.key}：${f.msg}`), at: Date.now() };
         if (failed.length) {
           // 大部分都成功了，只是几条没过去：不当作整体失败，只排队重试那几条
           lastErr = `${failed.length} 条没同步成功（${failed[0].msg}），会自动重试`;

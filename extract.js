@@ -88,9 +88,64 @@ const Extract = (() => {
     else if (e === 'txt' || e === 'md') r = { text: new TextDecoder().decode(buf), pages: null };
     else if (['png', 'jpg', 'jpeg', 'webp'].includes(e)) r = { text: '', pages: 1 };
     else throw new Error('不支持的文件类型：' + e);
-    const chars = r.text.replace(/\[第\d+页\]/g, '').replace(/\s/g, '').length;
-    r.scanned = (e === 'pdf' && r.pages && chars / r.pages < 30) || ['png', 'jpg', 'jpeg', 'webp'].includes(e);
+    const chars = r.text.replace(/\[第\d+页\]/g, '').replace(/（讲者备注）/g, '').replace(/\s/g, '').length;
+    r.scanned = (e === 'pdf' && r.pages && chars / r.pages < 30) || ['png', 'jpg', 'jpeg', 'webp'].includes(e)
+      // 整份都是截图的 PPT / Word：也要识图
+      || ((e === 'pptx' || e === 'docx') && chars < 30 * Math.max(1, r.pages || 1) && (await mediaImages(buf, e, 1)).length > 0);
     return r;
+  }
+
+  /* 把课件变成一张张图（给 AI 识图用）：PDF 每页渲染一张；图片原样；PPT / Word 取里面的图片。
+     统一压成 JPEG、长边不超过 1600px，省流量也省 token */
+  const MAX_SIDE = 1600;
+  const canvasJpeg = c => c.toDataURL('image/jpeg', 0.82);
+  async function imageToJpeg(blob) {
+    const bmp = await createImageBitmap(blob);
+    const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(bmp, 0, 0, c.width, c.height);
+    bmp.close && bmp.close();
+    return canvasJpeg(c);
+  }
+  async function mediaImages(buf, e, limit = 200) {
+    const zip = await JSZip.loadAsync(buf);
+    const dir = e === 'pptx' ? 'ppt/media/' : 'word/media/';
+    const num = n => parseInt((n.match(/(\d+)\.\w+$/) || [])[1] || '0');
+    const names = Object.keys(zip.files).filter(n => n.startsWith(dir) && /\.(png|jpe?g|webp|gif|bmp)$/i.test(n)).sort((a, b) => num(a) - num(b));
+    const out = [];
+    for (const n of names.slice(0, limit)) out.push(await zip.file(n).async('blob'));
+    return out;
+  }
+  // 返回 { pages, images(from, to) → [dataURL…] }：按需渲染，不一次把几百页都放进内存
+  async function pageImages(blob, name) {
+    const e = ext(name);
+    if (e === 'pdf') {
+      const pdf = await pdfjsLib.getDocument({ data: await blob.arrayBuffer() }).promise;
+      return {
+        pages: pdf.numPages,
+        async images(from, to) {
+          const out = [];
+          for (let i = from; i <= to; i++) {
+            const page = await pdf.getPage(i);
+            const v0 = page.getViewport({ scale: 1 });
+            const vp = page.getViewport({ scale: Math.min(2.5, MAX_SIDE / Math.max(v0.width, v0.height)) });
+            const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+            const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+            await page.render({ canvasContext: g, viewport: vp }).promise;
+            out.push(canvasJpeg(c));
+            page.cleanup();
+          }
+          return out;
+        },
+      };
+    }
+    let blobs;
+    if (['png', 'jpg', 'jpeg', 'webp'].includes(e)) blobs = [blob];
+    else if (e === 'pptx' || e === 'docx') blobs = await mediaImages(await blob.arrayBuffer(), e);
+    else throw new Error('这种文件不能识图：' + e);
+    if (!blobs.length) throw new Error('这个文件里没有文字，也没有图片');
+    return { pages: blobs.length, images: (from, to) => Promise.all(blobs.slice(from - 1, to).map(imageToJpeg)) };
   }
 
   /* Moodle 的“下载文件夹”是 ZIP：拆开，留下支持的文件 */
@@ -177,5 +232,5 @@ const Extract = (() => {
     return { provider: 'web', id: '', label: '网页' };
   }
 
-  return { fromFile, unzipFiles, isSupported, vocabulary, ext, MIME, classify, linkInfo };
+  return { fromFile, pageImages, unzipFiles, isSupported, vocabulary, ext, MIME, classify, linkInfo };
 })();

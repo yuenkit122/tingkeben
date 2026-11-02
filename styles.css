@@ -1645,7 +1645,7 @@ html.is-touch .board-tools .colors button, html.is-touch .board-tools .sizes but
   cursor: pointer;
 }
 #splash.out { opacity: 0; filter: blur(10px) brightness(1.6); transform: scale(1.06); pointer-events: none; }
-#splash:not(.out) { animation: sp-fallback .5s ease 4s forwards; }
+#splash:not(.out) { animation: sp-fallback .5s ease 20s forwards; }   /* JS 没跑起来的保底；自检要跑几秒，别提前退场 */
 @keyframes sp-fallback { to { opacity: 0; visibility: hidden; } }
 .sp-field { position: absolute; inset: 0; width: 100%; height: 100%; }
 .sp-vignette {
@@ -1863,3 +1863,38 @@ html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
   .recap-map { position: static; order: -1; max-height: 52vh; }
 }
 @media print { .recap-wrap { display: block; } }
+
+/* 课件整体难度（导入时自动判断） */
+.tag.lv-easy { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+.tag.lv-medium { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.tag.lv-hard { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.tag.lv-wait { background: var(--line); color: var(--muted); }
+/* 课件对照的逐页解析：分块、留白，不再是一大坨字 */
+.pair-ex .md p { margin: 0 0 10px; }
+.pair-ex .md p:last-child { margin-bottom: 0; }
+.pair-ex .md ul, .pair-ex .md ol { margin: 4px 0 10px; padding-left: 1.3em; }
+.pair-ex .md li { margin: 3px 0; }
+.pair-ex .md strong { color: var(--ink); }
+/* 工作台中栏标签条右边的「课后优化笔记」 */
+#dk-mtabs .dk-enhance { margin-left: auto; flex: none; white-space: nowrap; }
+
+/* ---------- 全局导航：返回 + 主页，每页同一个位置 ---------- */
+.gnav { display: flex; gap: 6px; align-items: center; margin: 0 0 12px; }
+.desk-top .gnav { margin: 0; flex: none; }
+.gn-btn { min-height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--sheet); color: var(--ink); font-size: 13.5px; cursor: pointer; white-space: nowrap; }
+.gn-btn:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--accent); }
+/* 各页原来自带的返回链接不再显示（位置各不相同），统一用上面那组 */
+#view a[data-back] { display: none !important; }
+
+/* 开屏自检 v4：每项一行「名字 · 结果」，下面一条自己的小进度条，满了才打勾 */
+.sp-checks { min-height: 0; display: flex; flex-direction: column; gap: 5px; }
+.sp-check { display: grid; grid-template-columns: 52px auto 1fr; column-gap: 9px; row-gap: 3px; align-items: center; white-space: normal; }
+.sp-check .sp-name2 { color: #DCE4F7; white-space: nowrap; }
+.sp-check .sp-res { color: #8E9BBB; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sp-check.ok .sp-res { color: #9FDDBC; }
+.sp-check.warn .sp-res { color: #F5D9A8; }
+.sp-check .sp-mini { grid-column: 2 / 4; height: 2px; border-radius: 2px; background: rgba(140, 165, 230, .14); overflow: hidden; }
+.sp-check .sp-mini i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #4F7DFF, #A9C1FF); }
+.sp-check.ok .sp-mini i { width: 100% !important; background: #5FD39A; }
+.sp-check.warn .sp-mini i { width: 100% !important; background: #FFC266; }
+.sp-upd { font: 500 12px/1.4 ui-monospace, Menlo, monospace; color: #9AA7C7; margin-top: 4px; letter-spacing: .02em; }

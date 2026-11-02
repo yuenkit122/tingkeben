@@ -139,8 +139,44 @@ const AI = (() => {
     return btoa(s);
   };
 
-  /* 扫描版 PDF / 照片：让 Gemini 读出文字 */
-  async function ocr(blob, mimeType) {
+  /* 扫描版 PDF / 照片 / 全是图的 PPT：用 DeepSeek（flash）识图读出文字。
+     一次送 4 页图片，逐批拼起来；DeepSeek 没配 key 或不接受图片时，才退回 Gemini。
+     返回 { text, pages } */
+  const OCR_PROMPT = '这是一份大学课件（或白板/讲义照片）。逐页完整转写上面所有文字，保持原文语言，不要翻译、不要总结。每页用一行“[第N页]”开头。标题保留层级，数学公式用 LaTeX（行内 $…$），表格用 Markdown 表格，图表用一句话说明它表达了什么，写成“（图：……）”。只输出转写内容。';
+  async function ocr(blob, mimeType, name, onProgress) {
+    const s = Settings.load();
+    if (!s.deepseekKey) {
+      if (s.geminiKey) return { text: await geminiOcr(blob, mimeType), pages: null };
+      throw new AIError('还没填 DeepSeek 的 API key，识图读不了。先去「设置」填。', 0);
+    }
+    const doc = await Extract.pageImages(blob, name || 'file.pdf');
+    const BATCH = 4, parts = [];
+    for (let from = 1; from <= doc.pages; from += BATCH) {
+      const to = Math.min(doc.pages, from + BATCH - 1);
+      onProgress && onProgress(`${from}–${to} / ${doc.pages} 页`);
+      const imgs = await doc.images(from, to);
+      let text;
+      try {
+        text = await deepseekStream({
+          system: '你是课件文字识别（OCR）助手，只输出图片里的文字转写。',
+          messages: [{ role: 'user', content: [
+            { type: 'text', text: OCR_PROMPT + `\n这一批是第 ${from}–${to} 页（共 ${doc.pages} 页），页码从 ${from} 开始编。` },
+            ...imgs.map(url => ({ type: 'image_url', image_url: { url } })),
+          ] }],
+          thinking: false, maxTokens: 8000, purpose: 'ocr',
+        });
+      } catch (e) {
+        // DeepSeek 不收图片（400 / 422）且有 Gemini key：整份交给 Gemini，别直接报「读不了」
+        if (from === 1 && [400, 404, 415, 422].includes(e.status) && s.geminiKey) return { text: await geminiOcr(blob, mimeType), pages: null };
+        throw e;
+      }
+      parts.push(String(text || '').trim());
+    }
+    const text = parts.join('\n\n').trim();
+    if (!text) throw new AIError('识图没读出文字（可能整份都是图、没有字）', 0);
+    return { text, pages: doc.pages };
+  }
+  async function geminiOcr(blob, mimeType) {
     if (blob.size > 19 * 1024 * 1024) throw new AIError('文件超过 19MB，Gemini 一次读不了，先拆小一点。', 0);
     const data = b64(await blob.arrayBuffer());
     return gemini({
@@ -498,6 +534,12 @@ ${detail}
 
 ${transcript ? '另外：如果课堂录音里老师强调了考试、作业或重点，在开头加一个「⚠️ 老师强调」小节列出来；最后再加一节「## 课堂上老师提到的」，写课件之外老师讲的例子、补充、课堂提问和答案（每条标时间）。' : ''}
 ${extra ? '学生的额外要求：' + extra : ''}
+${sources.length > 1 ? `
+这次有 ${sources.length} 份课件，必须按课件分开写，不要混在一起：
+- 按材料里课件的顺序，一份课件写完再写下一份。每份课件的内容前面单独一行写：## 📄 课件：课件文件名（文件名照材料里「===== 课件：… =====」原样抄）
+- 上面的结构（核心概念、公式、容易混淆、词汇表）在每份课件下面各写一遍。
+- 每份课件下面的 [p.N] 指的是这份课件自己的第 N 页，不能标成别的课件的页码。
+- 课堂录音的内容放在最后，不属于任何一份课件。` : ''}
 
 以下是材料：${material}`;
   }
@@ -647,8 +689,13 @@ ${context}
   const DOC_EX_SYSTEM = `你是商科助教，给英语不好的中国留学生（Monash Diploma of Business 一年级）逐页讲解英文课件。
 规则：
 - 保持原来的分页标记，每页以「## 第N页」开头，一页都不要漏、不要合并。
-- 每页写一段自然的中文讲解，像老师边翻 PPT 边讲：这一页在说什么、关键概念是什么意思、为什么重要，必要时举一个简单的生活或商业例子。
-- 用连贯的段落，不要列「要点 1、2、3」，也不要逐句翻译。一般 2–5 句，内容多的页可以多写一点。
+- 每页的讲解像老师边翻 PPT 边讲，分块写、块之间空一行，方便在小屏上扫读：
+  **这页在讲**：一句话说清楚这页的主题。
+  **关键概念**（没有就省略这块）：
+  - 中文（English）：用大白话解释是什么意思
+  **为什么重要 / 例子**：1–3 句，必要时举一个简单的生活或商业例子。
+  公式单独一行写；有步骤的用 1. 2. 3. 编号。
+- 不要逐句翻译，不要大段连在一起不换行。
 - 专业术语写成「中文（English）」。
 - 只有标题、目录、页码、版权、"Monash University" 之类的页，写一句「这页是××，没有新内容」就行。
 - 不要开场白和总结，直接从第一页开始。`;
