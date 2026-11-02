@@ -771,6 +771,8 @@ html.is-touch .doc-inkbar .colors button { width: 44px; }
 .chat-opts { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 0 2px; }
 .chat-opt { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .chat-opt > span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.chat-opt[hidden] { display: none; }
+.chat-scope { font-size: 12px; padding: 4px 0 0; line-height: 1.5; }
 .chat-opt .seg { flex-wrap: wrap; }
 .chat-opt .seg button { padding: 4px 8px; min-height: 30px; font-size: 12.5px; }
 html.is-touch .chat-opt .seg button { min-height: 38px; min-width: 38px; padding: 4px 10px; font-size: 13.5px; }
@@ -1898,3 +1900,29 @@ html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
 .sp-check.ok .sp-mini i { width: 100% !important; background: #5FD39A; }
 .sp-check.warn .sp-mini i { width: 100% !important; background: #FFC266; }
 .sp-upd { font: 500 12px/1.4 ui-monospace, Menlo, monospace; color: #9AA7C7; margin-top: 4px; letter-spacing: .02em; }
+
+/* ===== 开屏 v4（2026-11-03）：游戏加载页风格 —— 满屏校园地图慢慢推镜，金色路线一点点画出来；
+   左下大标题 + 小提示 + 自检，右下转圈。自检和进度条逻辑没动，只换外观。 ===== */
+#splash.sp-v4 .sp-field { opacity: .25; }
+.sp-map { position: absolute; inset: -6%; overflow: hidden; }
+.sp-map svg { width: 100%; height: 100%; display: block; animation: sp-pan 16s cubic-bezier(.25, .1, .25, 1) both; transform-origin: 62% 40%; }
+@keyframes sp-pan { from { transform: scale(1.18) translate(2%, 1.5%); } to { transform: scale(1.02) translate(-1.5%, -1%); } }
+.sp-map .rt { stroke-dasharray: 2400; stroke-dashoffset: 2400; animation: sp-route 3.2s cubic-bezier(.45, 0, .2, 1) .5s forwards; }
+@keyframes sp-route { to { stroke-dashoffset: 0; } }
+.sp-map .pin { opacity: 0; animation: sp-pin .45s cubic-bezier(.2, 1.6, .4, 1) forwards; }
+@keyframes sp-pin { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+#splash.sp-v4 .sp-vignette { background: linear-gradient(90deg, rgba(5, 8, 16, .88) 0%, rgba(5, 8, 16, .45) 42%, rgba(5, 8, 16, 0) 70%), linear-gradient(0deg, rgba(5, 8, 16, .9) 0%, rgba(5, 8, 16, 0) 45%); }
+#splash.sp-v4 .sp-stage { position: absolute; left: clamp(18px, 5vw, 64px); bottom: clamp(52px, 9vh, 96px); width: min(calc(100vw - 36px), 520px); align-items: flex-start; gap: 8px; padding: 0; }
+#splash.sp-v4 .sp-ascii, #splash.sp-v4 .sp-orbit, #splash.sp-v4 .sp-sub { display: none; }
+#splash.sp-v4 .sp-mark { width: 40px; height: 40px; margin: 0; }
+#splash.sp-v4 .sp-name { flex-wrap: wrap; align-items: flex-end; }
+#splash.sp-v4 .sp-name b { font-size: clamp(38px, 7vw, 64px); line-height: 1; letter-spacing: .06em; padding-left: 0; font-style: italic; text-shadow: 4px 4px 0 rgba(0, 0, 0, .55); }
+.sp-tip { max-width: 100%; font-size: 13px; line-height: 1.55; color: #D6DEEF; border-left: 3px solid #FFD27A; padding: 2px 0 2px 10px; animation: sp-rise .6s ease .5s both; }
+.sp-tip b { color: #FFD27A; margin-right: 6px; }
+#splash.sp-v4 .sp-term { width: 100%; background: rgba(8, 12, 22, .62); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+#splash.sp-v4 .sp-bar { width: 100%; }
+.sp-loader { position: absolute; right: clamp(18px, 4vw, 48px); bottom: clamp(24px, 5vh, 48px); display: flex; align-items: center; gap: 10px; font: 700 12px/1 ui-monospace, Menlo, monospace; letter-spacing: .28em; color: #E8EEFA; }
+.sp-loader i { width: 22px; height: 22px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, .18); border-top-color: #FFD27A; animation: sp-spin .8s linear infinite; }
+@keyframes sp-spin { to { transform: rotate(360deg); } }
+#splash.sp-v4 .sp-skip { text-align: left; left: clamp(18px, 5vw, 64px); }
+@media (max-width: 600px) { .sp-loader span { display: none; } #splash.sp-v4 .sp-stage { bottom: 64px; } }

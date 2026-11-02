@@ -29,7 +29,7 @@
   window.__tkTheme = function (v) { t = v || 'auto'; ap(); };
 })();
 </script>
-<link rel="stylesheet" href="styles.css?v=11030052">
+<link rel="stylesheet" href="styles.css?v=11030114">
 </head>
 <body>
 <!-- 开屏（2026-11-01 v3）：深色电影感 + 终端开机。ASCII 字标从乱码「解码」成型、扫光，下面逐行跑自检。
@@ -55,6 +55,33 @@
 /* 开屏动画：放在页面最前面，主程序还在加载时就开始播 */
 (function () {
   var sp = document.getElementById('splash'); if (!sp) return;
+  /* v4 外观：满屏校园地图（每次随机生成）+ 金色路线串起 课件→课堂→笔记→复习 + 左下提示 + 右下转圈 */
+  (function () {
+    sp.classList.add('sp-v4');
+    var W = 1600, H = 1000, r = Math.random, o = [];
+    o.push('<rect width="1600" height="1000" fill="#0B1222"/>');
+    o.push('<path d="M-50 ' + (620 + r() * 80) + ' C 400 ' + (520 + r() * 80) + ', 900 ' + (760 + r() * 60) + ', 1650 ' + (560 + r() * 80) + '" stroke="#12304A" stroke-width="90" fill="none"/>');
+    for (var x = 0; x < W; x += 100) for (var y = 0; y < H; y += 90) {
+      if (r() < .16) continue;
+      var c = r() < .1 ? '#14301F' : r() < .5 ? '#121B30' : '#16213A';
+      o.push('<rect x="' + (x + 12) + '" y="' + (y + 12) + '" width="' + (76 - r() * 20) + '" height="' + (66 - r() * 18) + '" rx="4" fill="' + c + '"/>');
+    }
+    for (var gx = 0; gx <= W; gx += 100) o.push('<path d="M' + gx + ' 0V' + H + '" stroke="#1E2A44" stroke-width="' + (gx % 400 ? 2 : 6) + '"/>');
+    for (var gy = 0; gy <= H; gy += 90) o.push('<path d="M0 ' + gy + 'H' + W + '" stroke="#1E2A44" stroke-width="' + (gy % 360 ? 2 : 6) + '"/>');
+    var P = [[300, 270, '课件'], [700, 450, '课堂'], [1100, 270, '笔记'], [1300, 630, '复习']], d = 'M' + P[0][0] + ' ' + P[0][1];
+    for (var i = 1; i < P.length; i++) d += ' H' + P[i][0] + ' V' + P[i][1];
+    o.push('<path class="rt" d="' + d + '" stroke="#FFD27A" stroke-width="6" fill="none" stroke-linecap="round" stroke-dasharray="14 10"/>');
+    P.forEach(function (p, i) {
+      o.push('<g class="pin" style="animation-delay:' + (.6 + i * .8) + 's"><circle cx="' + p[0] + '" cy="' + p[1] + '" r="16" fill="#FFD27A"/><circle cx="' + p[0] + '" cy="' + p[1] + '" r="6" fill="#0B1222"/><text x="' + (p[0] + 24) + '" y="' + (p[1] + 7) + '" fill="#F4F7FF" font-size="22" font-weight="700" font-family="-apple-system,PingFang SC,sans-serif">' + p[2] + '</text></g>');
+    });
+    var m = document.createElement('div'); m.className = 'sp-map';
+    m.innerHTML = '<svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">' + o.join('') + '</svg>';
+    sp.insertBefore(m, sp.querySelector('.sp-vignette'));
+    var TIPS = ['上课前点「上课」开个空白工作台，先录音，课件到了再加。', '没听懂就点「❓ 没听懂」，课后会用中文重新讲那一段。', '左边选哪份课件，右边就只显示那份课件的笔记。', '课后点「优化 AI 笔记」，老师讲的和你手写的会一起整理进去。', '「重点」里点「已掌握」，复习页会帮你算还剩多少。', '考前在课程页「考前复习」里做一套模拟考试。'];
+    var tip = document.createElement('div'); tip.className = 'sp-tip'; tip.innerHTML = '<b>提示</b>' + TIPS[Math.floor(r() * TIPS.length)];
+    var nm = sp.querySelector('.sp-name'); if (nm) nm.parentNode.insertBefore(tip, nm.nextSibling);
+    var ld = document.createElement('div'); ld.className = 'sp-loader'; ld.innerHTML = '<i></i><span>LOADING</span>'; sp.appendChild(ld);
+  })();
   var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
   var pre = document.getElementById('sp-ascii'), art = pre.getAttribute('data-art').replace(/\\n/g, '\n');
   var v = (document.querySelector('link[href*="styles.css?v="]') || {}).href || '';
@@ -129,15 +156,15 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="device.js?v=11030052"></script>
-<script src="db.js?v=11030052"></script>
-<script src="sync.js?v=11030052"></script>
-<script src="extract.js?v=11030052"></script>
-<script src="ai.js?v=11030052"></script>
-<script src="live.js?v=11030052"></script>
-<script src="study.js?v=11030052"></script>
-<script src="schedule.js?v=11030052"></script>
-<script src="app.js?v=11030052"></script>
+<script src="device.js?v=11030114"></script>
+<script src="db.js?v=11030114"></script>
+<script src="sync.js?v=11030114"></script>
+<script src="extract.js?v=11030114"></script>
+<script src="ai.js?v=11030114"></script>
+<script src="live.js?v=11030114"></script>
+<script src="study.js?v=11030114"></script>
+<script src="schedule.js?v=11030114"></script>
+<script src="app.js?v=11030114"></script>
 <script>
 /* 离线缓存：断网 / 教室 WiFi 很差时也能打开。见 sw.js */
 if ('serviceWorker' in navigator) {

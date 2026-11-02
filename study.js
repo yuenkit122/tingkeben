@@ -1733,22 +1733,25 @@ const Chat = (() => {
   }
 
   /* host: 放聊天框的元素；opts.getLive() 返回正在录的 LiveSession；opts.getPage() 返回 {fileId,name,page,text} */
-  function mount(host, { note, course, getLive, getPage, getFileIds, getExtra, compact, suggestions } = {}) {
+  function mount(host, { note, course, getLive, getPage, getFileIds, getExtra, compact, suggestions, scope: scopeText } = {}) {
     const store = note || course; // 聊天记录存在笔记里；没有笔记就存在课程里
     store.chat = store.chat || [];
     let busy = null;
+    // 只有能拿到录音（工作台正在录 / 这份笔记录过）才有「老师讲的 N 秒」；只有工作台看得到课件页才有「总结这一页」
+    const hasRec = !!getLive || !!(note && ((note.sessionIds || []).length || note.sessionId));
     host.innerHTML = `
       <div class="chat ${compact ? 'compact' : ''}">
         <div class="chat-log" id="chat-log"></div>
         <div class="chat-quick" id="chat-quick">${suggestions ? suggestions.map(t => `<button data-s="${esc(t)}">${esc(t)}</button>`).join('') : `
-          <button data-q="teacher">🙋 老师刚才问了什么？</button>
+          ${hasRec ? '<button data-q="teacher">🙋 老师刚才问了什么？</button>' : ''}
           <button data-q="hard">解释最难的概念</button>
-          <button data-q="page">总结这一页</button>
+          ${getPage ? '<button data-q="page">总结这一页</button>' : ''}
           <button data-q="quiz">考考我</button>`}
         </div>
+        ${scopeText ? `<div class="chat-scope hint">AI 会读：${scopeText}</div>` : ''}
         <div class="chat-quote" id="chat-quote" hidden>引用：<span></span><button aria-label="去掉引用">×</button></div>
         <div class="chat-opts">
-          <div class="chat-opt"><span>老师讲的</span><div class="seg" id="chat-win" role="radiogroup" aria-label="用老师最近多久讲的内容">${CHAT_WINDOWS.map(([v, l]) => `<button data-w="${v}">${l}</button>`).join('')}</div></div>
+          <div class="chat-opt" ${hasRec ? '' : 'hidden'}><span>老师讲的</span><div class="seg" id="chat-win" role="radiogroup" aria-label="用老师最近多久讲的内容">${CHAT_WINDOWS.map(([v, l]) => `<button data-w="${v}">${l}</button>`).join('')}</div></div>
           <div class="chat-opt"><span>资料</span><div class="seg" id="chat-src" role="radiogroup" aria-label="要不要读材料"><button data-s2="all" title="读这门课的笔记、课件和录音再回答">📚 读资料</button><button data-s2="none" title="什么都不读，直接聊天（更快、不占上下文）">💬 直接聊</button></div></div>
           <div class="chat-opt"><span>模式</span><div class="seg" id="chat-mode" role="radiogroup" aria-label="回答模式"><button data-m="fast" title="不思考，直接简短回答，一两秒出字">⚡ 快速</button><button data-m="deep" title="先认真想再回答，慢一些、更准、更详细">🧠 详细思考</button></div></div>
         </div>
@@ -2577,7 +2580,7 @@ document.addEventListener('tkb-ask', async e => {
   Chat.setQuote(e.detail.text);
   if (document.body.classList.contains('desk-mode')) { const b = $('#dk-rtabs [data-r="chat"]'); if (b) { if (b.classList.contains('on')) Chat.setQuote(e.detail.text); else b.click(); setTimeout(() => $('#chat-text')?.focus(), 100); } return; }
   const h = location.hash.slice(1);
-  if (h.startsWith('note-')) { const note = await DB.get('notes', h.slice(5).split('~')[0]); if (note) chatDrawer({ note, course: await DB.get('courses', note.courseId) }); }
+  if (h.startsWith('note-')) { const note = await DB.get('notes', h.slice(5).split('~')[0]); if (note) chatDrawer({ note, course: await DB.get('courses', note.courseId), scope: '这份笔记 + 它的课件 + 它关联的课堂录音' }); }
   else toast('打开一份笔记或上课工作台再问 AI');
 });
 
@@ -2667,7 +2670,7 @@ async function renderDesk(noteId) {
       </div>
       <div class="desk-cols" id="dk-cols">
         <section class="dcol" data-col="left">
-          <div class="dhead"><select id="dk-file" class="dk-sel">${files.length && !fileId ? '<option value="" selected>还没加课件 · 选一份加进来</option>' : ''}${files.length ? files.map(f => `<option value="${f.id}" ${f.id === fileId ? 'selected' : ''}>${esc(weekOf(f).label)}${phaseOf(f) ? '·' + phaseOf(f) : ''} · ${esc(f.name)}</option>`).join('') : '<option value="">这门课还没有课件</option>'}<option value="__add">＋ 上传 / 管理课件…</option></select><span id="dk-ai"></span></div>
+          <div class="dhead"><select id="dk-file" class="dk-sel">${files.length && !fileId ? '<option value="" selected>还没加课件 · 选一份加进来</option>' : ''}${files.length ? files.map(f => `<option value="${f.id}" ${f.id === fileId ? 'selected' : ''}>${esc(weekOf(f).label)}${phaseOf(f) ? '·' + phaseOf(f) : ''} · ${esc(f.name)}</option>`).join('') : '<option value="">这门课还没有课件</option>'}<option value="__add">＋ 上传 / 管理课件…</option></select></div>
           <div class="dbody" id="dk-doc"></div>
         </section>
         <div class="dk-divider" id="dk-divider" hidden role="separator" aria-label="拖动调整上下高度"><span></span></div>
@@ -2797,12 +2800,14 @@ async function renderDesk(noteId) {
     } else Nav.replace('desk-' + e.target.value);
   };
 
+  // 中栏标签旁那一个「AI 笔记」按钮：跟着左栏选中的课件变（新增 / 优化 / 用录音生成）
+  const aiSlot = () => mountAiNoteBtn($('#ai-note-slot'), note, course, files.some(f => f.id === fileId) ? fileId : '', files, () => { if (location.hash.slice(1) === 'desk-' + note.id) renderDesk(note.id); });
   // 左栏：课件
   const left = $('#dk-doc');
   let deskLock = () => {};
   const showDoc = async () => {
     const f = files.find(x => x.id === fileId);
-    const ab = $('#dk-ai'); if (ab) { ab.innerHTML = f ? aiNoteBtnHTML(note, f.id) : ''; if (f) bindAiNoteBtn(ab, note, course, f.id, () => { if (location.hash.slice(1) === 'desk-' + note.id) renderDesk(note.id); }); }
+    aiSlot();
     if (!f) { left.innerHTML = files.length ? '<div class="empty"><strong>这份笔记还没加课件</strong>可以先录音、手写。课件到了在上面下拉框选一份，就会加进这份笔记，之后能和录音一起生成笔记。</div>' : '<div class="empty">这门课还没有课件。可以先录音、手写；课件以后在上面「＋ 上传 / 管理课件」加。</div>'; return; }
     const full = await DB.get('files', f.id);
     // 「＋到画板」：在笔记画布里给这一页开一块（已经有就直接跳过去），去中间写
@@ -2852,10 +2857,9 @@ async function renderDesk(noteId) {
   const mid = $('#dk-mid');
   const showMid = (tab, opt = {}) => {
     midTab = tab; DeskPref.set({ mtab: tab });
-    // 工作台里也能「课后优化笔记」（以前只有工作台外面的笔记页有）
-    $('#dk-mtabs').innerHTML = noteTabsHTML(tab, note, true) + `<button class="btn small primary dk-enhance" id="dk-enhance" title="用录音、手写和补充笔记，把老师讲的和你记的整理进笔记">${ICON.spark}课后优化笔记</button>`;
+    $('#dk-mtabs').innerHTML = noteTabsHTML(tab, note, true) + '<span id="ai-note-slot" class="dk-enhance"></span>';
     $$('#dk-mtabs [data-ntab]').forEach(b => b.onclick = () => showMid(b.dataset.ntab));
-    $('#dk-enhance').onclick = () => enhanceNote(note, course, async () => { Object.assign(note, await DB.get('notes', note.id)); showMid(midTab); });
+    aiSlot();
     mid.className = 'dbody';
     // 「笔记」就是白板：课件顺序的文字 + 手写，和笔记页里是同一个东西
     if (tab === 'note') {
@@ -2875,7 +2879,7 @@ async function renderDesk(noteId) {
     DeskPref.set({ rtab: tab });
     $$('#dk-rtabs [data-r]').forEach(b => b.classList.toggle('on', b.dataset.r === tab));
     if (tab === 'chat') {
-      Chat.mount(right, { note, course, compact: true, getLive: () => (State.live && (!State.live.noteId || State.live.noteId === note.id) ? State.live : null), getFileIds: () => fileId ? [fileId] : [],
+      Chat.mount(right, { note, course, compact: true, scope: '这份笔记 + 左边课件（含你正在看的那一页）+ 这节课的录音（正在录的也算）', getLive: () => (State.live && (!State.live.noteId || State.live.noteId === note.id) ? State.live : null), getFileIds: () => fileId ? [fileId] : [],
         getPage: async () => { const f = files.find(x => x.id === fileId); if (!f || !viewer) return null; const p = viewer.page(); const full = await DB.get('files', f.id); return { fileId, name: f.name, page: p, text: (splitPages(full.text).find(x => x.n === p) || {}).text || '' }; } });
     } else deskLive(note, course, right);
   };
@@ -3001,14 +3005,14 @@ async function renderAsk(courseId) {
   try { localStorage.setItem('tingkeben.askCourse', course.id); } catch (e) {}
   view.innerHTML = `
     <div class="head"><div><h1>问 AI</h1><div class="meta">AI 会参考这门课所有笔记的重点、截止日期和学习进度</div></div>
-      <div class="row"><button class="btn" id="ak-study">${ICON.mic}手写笔记 + 课堂录音优化笔记</button>
+      <div class="row">
         <select id="ak-c" style="width:auto">${courses.map(c => `<option value="${c.id}" ${c.id === course.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div></div>
     <div class="card ask-card" id="ak-chat"></div>`;
   $('#ak-c').onchange = e => { Nav.replace('ask-' + e.target.value); };
-  $('#ak-study').onclick = () => studyFlow({ courseId: course.id });
   const notes = (await DB.byIndex('notes', 'courseId', course.id)).sort((a, b) => a.createdAt - b.createdAt);
   Chat.mount($('#ak-chat'), {
     course,
+    scope: `「${esc(course.name)}」所有笔记和知识点掌握情况 + 截止日期（不读课件原文；问具体某一讲，去那份笔记里问更准）`,
     suggestions: ['最近有什么作业或考试要准备？', '我这门课的学习进度怎么样？哪些还没掌握？', '帮我安排下周的复习计划', '把这门课到现在的重点串起来讲一遍'],
     getExtra: async () => {
       const dl = Deadlines.upcoming(12).map(d => `- ${new Date(d.due).toLocaleString('zh-CN')} · ${d.course || ''} · ${d.name}`).join('\n');
