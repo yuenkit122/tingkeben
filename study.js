@@ -346,17 +346,21 @@ const Board = (() => {
     const ids = new Set(files.map(f => f.id));
     if (wd.blocks.every(b => ids.has(b.f))) return false;
     const norm = s => String(s || '').toLowerCase().replace(/\.[a-z0-9]{2,5}$/, '').replace(/[^a-z0-9一-鿿]+/g, '');
-    const byName = fn => {
+    const all = files;
+    const byName = (fn, files) => {
       const k = norm(fn); if (!k) return null;
       return files.find(f => norm(f.name) === k) || files.find(f => { const n = norm(f.name); return n && (n.includes(k) || k.includes(n)); }) || null;
     };
     const words = s => String(s || '').toLowerCase().match(/[a-z][a-z-]{4,}/g) || [];
+    // 没标记的块只可能来自生成过 AI 笔记的课件：后加进来、还没生成的课件不会分到老内容
+    const ai = Array.isArray(note.aiFiles) ? files.filter(f => note.aiFiles.includes(f.id)) : [];
+    if (ai.length) files = ai;
     const vocab = files.map(f => new Set(words(f.text)));
     const pages = files.map(f => f.pages || splitPages(f.text).length || 0);
     let prev = null;
     for (const b of wd.blocks) {
       if (ids.has(b.f)) { prev = b.f; continue; }
-      let f = b.fn ? byName(b.fn) : null;
+      let f = b.fn ? byName(b.fn, all) : null;
       if (!f) {
         const ws = [...new Set(words(b.text))].filter(w => !vocab.every(v => v.has(w)));
         const refs = [...String(b.text || '').matchAll(/\[p\.?\s*(\d+)/g)].map(m => Number(m[1]));
@@ -377,20 +381,23 @@ const Board = (() => {
     const ps = new Set(v.blocks.map(b => b.p));
     v.strokes = full.strokes.filter(s => ps.has(s.p));
     v.texts = (full.texts || []).filter(t => ps.has(t.p));
-    if (!v.blocks.length) v.blocks.push({ p: full.blocks.reduce((m, b) => Math.max(m, Number(b.p) || 0), 0) + 1, y: 0, text: '', f: fileId });
+    if (!v.blocks.length) v.blocks.push({ p: full.blocks.reduce((m, b) => Math.max(m, Number(b.p) || 0), 0) + 1, y: 0, text: '', f: fileId, ph: true });
     let ownB = new Set(v.blocks.filter(b => full.blocks.includes(b))), ownS = new Set(v.strokes), ownT = new Set(v.texts);
     v.commit = () => {
       // 整份笔记在别处被重新切过块（改了正文）：这份视图已经过期，不要拿旧的盖回去
       if (ownB.size && !full.blocks.some(b => ownB.has(b))) return;
       v.blocks.forEach(b => { b.f = fileId; });
+      // 这份课件原来一块都没有时临时放的空白块：没写过东西就不存，免得以后生成的笔记上面多一块空白
+      const keep = v.blocks.filter(b => !b.ph || String(b.text || '').trim() || v.strokes.some(s => s.p === b.p) || v.texts.some(t => t.p === b.p));
+      keep.forEach(b => { delete b.ph; });
       const at = full.blocks.findIndex(b => ownB.has(b));
       const rest = full.blocks.filter(b => !ownB.has(b) && !v.blocks.includes(b));
       const i = at < 0 ? rest.length : full.blocks.slice(0, at).filter(b => !ownB.has(b)).length;
-      full.blocks = [...rest.slice(0, i), ...v.blocks, ...rest.slice(i)];
+      full.blocks = [...rest.slice(0, i), ...keep, ...rest.slice(i)];
       full.strokes = full.strokes.filter(s => !ownS.has(s)).concat(v.strokes);
       full.texts = (full.texts || []).filter(t => !ownT.has(t)).concat(v.texts);
       full.mdSig = v.mdSig; full.h = Math.max(full.h || 0, v.h || 0);
-      ownB = new Set(v.blocks); ownS = new Set(v.strokes); ownT = new Set(v.texts);
+      ownB = new Set(keep); ownS = new Set(v.strokes); ownT = new Set(v.texts);
     };
     return v;
   }
@@ -2644,7 +2651,8 @@ async function renderDesk(noteId) {
   const files = sortFiles((await DB.byIndex('files', 'courseId', note.courseId)).filter(f => own.size ? own.has(f.id) : (f.status === 'ready' || isPdf(f))));
   const notes = (await DB.byIndex('notes', 'courseId', note.courseId)).sort((a, b) => b.createdAt - a.createdAt);
   const P = DeskPref.get();
-  let fileId = note.deskFile && files.some(f => f.id === note.deskFile) ? note.deskFile : (note.sourceFileIds || []).find(id => files.some(f => f.id === id)) || (files[0] && files[0].id);
+  // 空白工作台（还没加课件）：左栏先空着，等你在下拉框里选一份再加进来
+  let fileId = !own.size ? '' : note.deskFile && files.some(f => f.id === note.deskFile) ? note.deskFile : (note.sourceFileIds || []).find(id => files.some(f => f.id === id)) || (files[0] && files[0].id);
   let midTab = 'note', viewer = null;
   view.innerHTML = `
     <div class="desk">
@@ -2659,7 +2667,7 @@ async function renderDesk(noteId) {
       </div>
       <div class="desk-cols" id="dk-cols">
         <section class="dcol" data-col="left">
-          <div class="dhead"><select id="dk-file" class="dk-sel">${files.length ? files.map(f => `<option value="${f.id}" ${f.id === fileId ? 'selected' : ''}>${esc(weekOf(f).label)}${phaseOf(f) ? '·' + phaseOf(f) : ''} · ${esc(f.name)}</option>`).join('') : '<option value="">这门课还没有课件</option>'}<option value="__add">＋ 上传 / 管理课件…</option></select></div>
+          <div class="dhead"><select id="dk-file" class="dk-sel">${files.length && !fileId ? '<option value="" selected>还没加课件 · 选一份加进来</option>' : ''}${files.length ? files.map(f => `<option value="${f.id}" ${f.id === fileId ? 'selected' : ''}>${esc(weekOf(f).label)}${phaseOf(f) ? '·' + phaseOf(f) : ''} · ${esc(f.name)}</option>`).join('') : '<option value="">这门课还没有课件</option>'}<option value="__add">＋ 上传 / 管理课件…</option></select><span id="dk-ai"></span></div>
           <div class="dbody" id="dk-doc"></div>
         </section>
         <div class="dk-divider" id="dk-divider" hidden role="separator" aria-label="拖动调整上下高度"><span></span></div>
@@ -2794,7 +2802,8 @@ async function renderDesk(noteId) {
   let deskLock = () => {};
   const showDoc = async () => {
     const f = files.find(x => x.id === fileId);
-    if (!f) { left.innerHTML = '<div class="empty">这门课还没有课件。先在课程页导入或从 Moodle 同步。</div>'; return; }
+    const ab = $('#dk-ai'); if (ab) { ab.innerHTML = f ? aiNoteBtnHTML(note, f.id) : ''; if (f) bindAiNoteBtn(ab, note, course, f.id, () => { if (location.hash.slice(1) === 'desk-' + note.id) renderDesk(note.id); }); }
+    if (!f) { left.innerHTML = files.length ? '<div class="empty"><strong>这份笔记还没加课件</strong>可以先录音、手写。课件到了在上面下拉框选一份，就会加进这份笔记，之后能和录音一起生成笔记。</div>' : '<div class="empty">这门课还没有课件。可以先录音、手写；课件以后在上面「＋ 上传 / 管理课件」加。</div>'; return; }
     const full = await DB.get('files', f.id);
     // 「＋到画板」：在笔记画布里给这一页开一块（已经有就直接跳过去），去中间写
     // （以前写进了旧的 board.pages，换成无限画布后那里已经不显示了，点了没反应）
@@ -2834,7 +2843,7 @@ async function renderDesk(noteId) {
     viewer = mountDocViewer(left, full, { note, course });   // 不自动联动，页码自己看
     deskLock = ms => { lockBoard = Date.now() + ms; };
   };
-  $('#dk-file').onchange = async e => { if (e.target.value === '__add') { e.target.value = fileId || ''; noteFilesModal(note, course, () => renderDesk(note.id)); return; } if (Board.current) await Board.current.flush(); fileId = e.target.value; note.deskFile = fileId; if (!(note.sourceFileIds || []).includes(fileId)) note.sourceFileIds = [...(note.sourceFileIds || []), fileId]; await DB.put('notes', note); showDoc(); if (midTab === 'note' && multi()) showMid('note'); };
+  $('#dk-file').onchange = async e => { if (e.target.value === '__add') { e.target.value = fileId || ''; noteFilesModal(note, course, () => renderDesk(note.id)); return; } if (!e.target.value) { e.target.value = fileId || ''; return; } if (Board.current) await Board.current.flush(); fileId = e.target.value; note.deskFile = fileId; pinAiFiles(note); if (!(note.sourceFileIds || []).includes(fileId)) note.sourceFileIds = [...(note.sourceFileIds || []), fileId]; await DB.put('notes', note); showDoc(); if (midTab === 'note' && multi()) showMid('note'); };
   // 这份笔记有好几份课件：中间的笔记只显示左边选中那份课件的部分
   const multi = () => (note.sourceFileIds || []).filter(id => files.some(f => f.id === id)).length > 1;
   showDoc();

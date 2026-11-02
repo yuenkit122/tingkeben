@@ -1193,6 +1193,7 @@ async function noteFilesModal(note, course, after) {
       const added = ids.filter(x => !before.has(x));
       const mode = (modeEl.querySelector('input[name=nf-m]:checked') || {}).value || 'link';
       const fresh = await DB.get('notes', note.id) || note;
+      pinAiFiles(fresh);
       fresh.sourceFileIds = ids;
       if (!ids.includes(fresh.deskFile)) fresh.deskFile = added[0] || ids[0] || '';
       else if (added.length) fresh.deskFile = added[0];   // 刚加的课件直接显示在左边
@@ -1237,6 +1238,7 @@ async function appendFromFiles(note, course, fileIds, after) {
     if (src.length === 1 && !/^##\s*📄/m.test(add)) add = `## 📄 课件：${src[0].name}\n\n` + add;
     if (!add) throw new Error('DeepSeek 没有返回内容');
     const n = await DB.get('notes', note.id) || note;
+    n.aiFiles = [...new Set([...aiFilesOf(n), ...src.map(f => f.id)])];
     Board.appendMd(n, add);
     await DB.put('notes', n);
     job.done();
@@ -1245,13 +1247,14 @@ async function appendFromFiles(note, course, fileIds, after) {
   } catch (e) { job.done(); toast('补进笔记失败：' + e.message, 6000); }
 }
 
-async function startGeneration({ course, fileIds, sessionId, title, style, extra, noteId, thenParts = [] }) {
+async function startGeneration({ course, fileIds, sessionId, title, style, extra, noteId, thenParts = [], keepSources = false }) {
   if (await blockIfUnread(fileIds)) return null;
   const files = await Promise.all(fileIds.map(id => DB.get('files', id)));
   const session = sessionId ? await DB.get('sessions', sessionId) : null;
   const p = AI.notesProvider();
   const note = noteId ? await DB.get('notes', noteId) : { id: DB.uid('n_'), courseId: course.id, createdAt: Date.now() };
-  Object.assign(note, { title, sourceFileIds: fileIds, sessionId, style, extra, markdown: '', status: 'generating', model: p.label + ' ' + p.model, error: '' });
+  // keepSources：只拿其中一份课件生成时，别把笔记里其他已经加进来的课件丢掉
+  Object.assign(note, { title, sourceFileIds: keepSources ? [...new Set([...(note.sourceFileIds || []), ...fileIds])] : fileIds, aiFiles: fileIds.slice(), sessionId, style, extra, markdown: '', status: 'generating', model: p.label + ' ' + p.model, error: '' });
   await DB.put('notes', note);
   const gen = { text: '', think: '', ctl: new AbortController(), listeners: new Set() };
   State.gens.set(note.id, gen);
@@ -1344,6 +1347,7 @@ async function studyFlow({ courseId = null, noteId = null, title = '' } = {}) {
       if (!n) n = await newBlankNote(course, { files: fid ? [fid] : [], title });
       if (fid) {
         n.deskFile = fid;
+        pinAiFiles(n);
         if (!(n.sourceFileIds || []).includes(fid)) n.sourceFileIds = [...(n.sourceFileIds || []), fid];
         await DB.put('notes', n);
       }
@@ -1401,6 +1405,26 @@ async function openClassroom(course, fileId) {
   const ns = notes.sort((a, b) => b.createdAt - a.createdAt);
   // 优先上次在这门课用的笔记（有 deskFile 的），否则最近一份
   const note = ns.find(n => n.deskFile) || ns[0];
+  // 没指定课件：先问一下。以前一点「上课」就直接进上次那份笔记，想先开个空白工作台录音都不行
+  if (!fileId) {
+    modal(`<h2>${ICON.mic}上课</h2>
+      <p class="hint" style="margin:0">可以先开一个空白工作台录音、手写；课件以后在左栏随时加，加好再生成笔记，录音会一起用上。</p>
+      <div style="display:grid;gap:8px;margin-top:14px">
+        <button class="btn primary" id="oc-blank">${ICON.mic}新建空白工作台，先录音</button>
+        ${note ? `<button class="btn" id="oc-last">接着上次：${esc(note.title)}</button>` : ''}
+        ${ready.length || ns.length ? '<button class="btn ghost" id="oc-more">选课件 / 选笔记…</button>' : ''}
+      </div>`, (box, close) => {
+      $('#oc-blank', box).onclick = async () => {
+        close();
+        const n = await newBlankNote(course, { title: `${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} ${course.code || course.name}` });
+        DeskPref.set({ left: true, mid: true, mtab: 'note', rtab: 'live' });
+        location.hash = 'desk-' + n.id;
+      };
+      const last = $('#oc-last', box); if (last) last.onclick = () => { close(); DeskPref.set({ left: true, mid: true, mtab: 'note', rtab: 'live' }); location.hash = 'desk-' + note.id; };
+      const more = $('#oc-more', box); if (more) more.onclick = () => { close(); startClassModal(course); };
+    });
+    return;
+  }
   const fid = fileId || (note && note.deskFile) || (ready[0] && ready[0].id) || '';
   if (note) {
     if (fid && note.deskFile !== fid) { note.deskFile = fid; await DB.put('notes', note); }
@@ -1431,7 +1455,7 @@ async function startClassModal(course) {
     fsel.onchange = () => { const m = notes.find(n => (n.sourceFileIds || []).includes(fsel.value)); if (m) nsel.value = m.id; };
     $('#sc-go', box).onclick = async () => {
       close();
-      if (nsel.value) { const n = await DB.get('notes', nsel.value); if (fsel.value) { n.deskFile = fsel.value; if (!(n.sourceFileIds || []).includes(fsel.value)) n.sourceFileIds = [...(n.sourceFileIds || []), fsel.value]; await DB.put('notes', n); } location.hash = 'desk-' + n.id; }
+      if (nsel.value) { const n = await DB.get('notes', nsel.value); if (fsel.value) { n.deskFile = fsel.value; pinAiFiles(n); if (!(n.sourceFileIds || []).includes(fsel.value)) n.sourceFileIds = [...(n.sourceFileIds || []), fsel.value]; await DB.put('notes', n); } location.hash = 'desk-' + n.id; }
       else { const f = files.find(x => x.id === fsel.value); const n = { id: DB.uid('n_'), courseId: course.id, createdAt: Date.now(), title: f ? f.name.replace(/\.[^.]+$/, '') : `${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} 课堂笔记`, markdown: '', status: 'done', sourceFileIds: f ? [f.id] : [], deskFile: f ? f.id : null, model: '' }; await DB.put('notes', n); location.hash = 'desk-' + n.id; }
     };
   });
@@ -1758,6 +1782,49 @@ async function linkSessionModal(note, after) {
 }
 
 /* 笔记页左边的课件栏：一页一页画出来，滚到哪一页就告诉右边 */
+/* 这份笔记里哪些课件已经生成过 AI 笔记（note.aiFiles）。
+   老笔记没记过：没正文就是一份都没有；只有一份课件就是它；多份就看笔记块分给了哪些课件。 */
+function aiFilesOf(note) {
+  if (Array.isArray(note.aiFiles)) return note.aiFiles;
+  const ids = note.sourceFileIds || [];
+  if (!String(note.markdown || '').trim()) return [];
+  if (ids.length <= 1) return ids.slice();
+  try { const fs = new Set(Board.world(note).blocks.map(b => b.f).filter(Boolean)); return fs.size ? ids.filter(id => fs.has(id)) : ids.slice(); }
+  catch (e) { return ids.slice(); }
+}
+/* 往笔记里加课件之前先把「哪些课件有 AI 笔记」记死，不然新加的课件会被当成已经生成过 */
+function pinAiFiles(note) { if (!Array.isArray(note.aiFiles)) note.aiFiles = aiFilesOf(note); }
+
+/* 左栏课件旁边的按钮：这份课件还没有 AI 笔记 →「新增 AI 笔记」；生成过 →「优化 AI 笔记」 */
+function aiNoteBtnHTML(note, fid) {
+  if (!fid) return '';
+  return aiFilesOf(note).includes(fid)
+    ? `<button class="btn small" data-ai-note="opt" title="用录音、手写和补充笔记，把老师讲的整理进这份 AI 笔记">${ICON.spark}优化 AI 笔记</button>`
+    : `<button class="btn small primary" data-ai-note="new" title="这份课件还没有 AI 笔记：读课件生成，接在笔记里">${ICON.spark}新增 AI 笔记</button>`;
+}
+function bindAiNoteBtn(host, note, course, fid, after) {
+  const b = $('[data-ai-note]', host); if (!b) return;
+  b.onclick = async () => {
+    if (State.gens.has(note.id)) { toast('这份笔记正在生成，等它写完'); return; }
+    if (Board.current && Board.current.note === note) await Board.current.flush();
+    if (b.dataset.aiNote === 'opt') { enhanceNote(note, course, after); return; }
+    if (await blockIfUnread([fid])) return;
+    if (!String(note.markdown || '').trim()) {
+      // 笔记还是空的（比如先录了音）：用这份课件 + 录音直接生成整份笔记
+      const id = await startGeneration({ course, fileIds: [fid], sessionId: note.sessionId, title: note.title, style: note.style || 'detailed', extra: note.extra, noteId: note.id, keepSources: true });
+      if (!id) return;
+      toast('开始生成 AI 笔记，左下角能看进度');
+      const g = State.gens.get(id);
+      if (g) { const fn = () => { if (!State.gens.has(id)) { g.listeners.delete(fn); after && after(); } }; g.listeners.add(fn); }
+      return;
+    }
+    b.disabled = true;
+    toast('开始读这份课件，写好会接在笔记里（左下角能看进度）');
+    await appendFromFiles(note, course, [fid], after);
+    if (b.isConnected) b.disabled = false;
+  };
+}
+
 /* 笔记页左边默认显示哪份课件（右边的笔记也跟着它） */
 function noteDocFile(note, files) {
   const pdfs = sortFiles(files).filter(f => f.pages || isPdf(f));
@@ -1782,12 +1849,13 @@ async function noteDocPane(host, note, course, onPage, { onFile, onReady } = {})
     if (!n) { host.innerHTML = '<div class="empty">这份课件读不出页数</div>'; return; }
     host.innerHTML = `<div class="nb-head">${pdfs.length > 1
       ? `<select id="nb-file" class="dk-sel">${pdfs.map(x => `<option value="${x.id}" ${x.id === cur ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`
-      : `<b class="grow">${esc(f.name)}</b>`}<span class="hint">${n} 页</span></div>
+      : `<b class="grow">${esc(f.name)}</b>`}<span class="hint">${n} 页</span>${aiNoteBtnHTML(note, f.id)}</div>
       <div class="nb-pages" id="nb-pages">${Array.from({ length: n }, (_, i) => i + 1).map(p => {
         if (pdf) return `<div class="pdfpage nb-page" data-p="${p}"><div class="ph">第 ${p} 页</div><span class="pnum">P${p}</span></div>`;
         const txt = (splitPages(full.text).find(x => x.n === p) || {}).text || '';
         return `<div class="docpage nb-page" data-p="${p}"><div class="doc-text">${esc(txt)}</div><span class="pnum">P${p}</span></div>`;
       }).join('')}</div>`;
+    bindAiNoteBtn(host, note, course, f.id, () => { if (location.hash.slice(1).startsWith('note-' + note.id)) renderNote(note.id); });
     const sel = $('#nb-file', host); if (sel) sel.onchange = async () => { cur = sel.value; if (onFile) await onFile(cur); const x = await draw(); if (onReady) onReady(x); };
     const pages = $('.nb-pages', host);
     if (pdf) {
