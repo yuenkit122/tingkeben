@@ -40,23 +40,23 @@ const Device = (() => {
 })();
 
 /* 防手掌误触（iPad + Apple Pencil）
-   规则：笔正在写、笔悬停在屏幕上方、或者笔刚离开不到半秒，这段时间里所有手指 / 手掌的触摸都不算：
+   规则（跟 GoodNotes 一样）：只有笔真的接触屏幕时才压手指，抬笔 0.12 秒后手指立刻能滑；笔悬停不算写字。笔接触期间所有手指 / 手掌的触摸都不算：
    不会点到按钮、不会拖动或缩放画布、不会滚动页面，也不会被当成「两指轻点撤销」。
    手掌先放上去、笔后落下的情况也算：笔一落下，之前按着的手指全部作废（画布会收到 tk:pendown，把它们清掉）。
    保险：笔的抬起事件丢了也不会一直锁着（4 秒没有笔的动静就自动解锁）。
-   写字优先：笔写完 1 秒内，笔记区 / 课件以外的地方手指也点不动（换笔画的间隙手掌抬起落下不会碰到工具栏）。
+   换笔画的间隙：抬笔 0.4 秒内手指不会点中按钮（手掌抬起落下碰不到工具栏），滑动不受影响。
    笔本身也管：屏幕上有笔记区时，笔只在笔记区里写，碰到工具栏、侧栏都不算点击（要切工具用手指；输入框和弹窗不受影响）。
    笔停顿时 iOS 会当成长按选字，取消这一笔再选中最近的文字（比如工具栏的「更多」），所以笔的触摸和选字都要拦。 */
 const PenGuard = (() => {
-  const HOLD = 500, OFF_HOLD = 1000;
-  const WRITE = '.ic-stage, .pdfpage', FREE = 'input, textarea, select, .modal';
+  const HOLD = 120, OFF_HOLD = 400, PALM_HOLD = 1500;
+  const WRITE = '.ic-stage, .pdfpage', FREE = 'input, textarea, select, .modal', CONTROL = 'button, a, summary, label, [role="button"]';
   let penDown = false, lastPen = 0, seen = false, lastBlockedUp = 0, offPen = null, lastOffPen = 0;
   const live = new Set(), blocked = new Set();
   const now = () => Date.now();
   const active = () => (penDown && now() - lastPen < 4000) || now() - lastPen < HOLD;
   const recent = ms => seen && now() - lastPen < ms;
-  // 手掌接触面大：浏览器给了接触尺寸、而且这台设备用过笔时，大块接触直接当手掌（不确定 iPad 是否总会给尺寸）
-  const palmShape = e => seen && e.width > 0 && e.width * e.height > 45 * 45;
+  // 手掌接触面大：刚写过字时，大块接触当手掌（不确定 iPad 是否总会给尺寸）；平时再大的手指也照常滑
+  const palmShape = e => recent(PALM_HOLD) && e.width > 0 && e.width * e.height > 60 * 60;
   const kill = e => { e.preventDefault(); e.stopImmediatePropagation(); };
   const pen = e => {
     seen = true; lastPen = now();
@@ -67,7 +67,7 @@ const PenGuard = (() => {
   const writing = () => [...document.querySelectorAll(WRITE)].some(el => el.getClientRects().length > 0);
   const inWrite = t => { const el = elOf(t); return !!el && !!el.closest(WRITE); };
   const penOff = t => !inWrite(t) && !editable(t) && writing();
-  const touchOff = t => recent(OFF_HOLD) && penOff(t);
+  const touchOff = t => { const el = elOf(t); return recent(OFF_HOLD) && !!el && !!el.closest(CONTROL) && penOff(t); };
   document.addEventListener('pointerdown', e => {
     if (e.pointerType === 'pen') {
       pen(e); penDown = true;
@@ -82,7 +82,7 @@ const PenGuard = (() => {
     live.add(e.pointerId);
   }, true);
   document.addEventListener('pointermove', e => {
-    if (e.pointerType === 'pen') { pen(e); return; }   // 笔悬停（M2 以后的 iPad Pro）也算「准备写字」
+    if (e.pointerType === 'pen') { if (penDown) pen(e); return; }   // 悬停（M2 以后的 iPad Pro）不算写字，不然拿着笔手指就滑不动
     if (e.pointerType === 'touch' && blocked.has(e.pointerId)) kill(e);
   }, true);
   const up = e => {
@@ -123,13 +123,15 @@ const PenGuard = (() => {
       if ([...e.changedTouches].every(direct)) e.preventDefault();
     }
   }, { capture: true, passive: false });
+  const penLift = e => { if ([...e.changedTouches].some(t => !direct(t))) { penDown = false; lastPen = now(); } };   // pointerup 丢了也能解锁
   const tend = e => {
+    penLift(e);
     let hit = false;
     for (const t of e.changedTouches) { if (tstart.has(t.identifier)) { hit = true; tstart.delete(t.identifier); } }
     if ((hit || active()) && [...e.changedTouches].every(direct) && e.cancelable) e.preventDefault();
   };
   document.addEventListener('touchend', tend, { capture: true, passive: false });
-  document.addEventListener('touchcancel', e => { for (const t of e.changedTouches) tstart.delete(t.identifier); }, true);
+  document.addEventListener('touchcancel', e => { penLift(e); for (const t of e.changedTouches) tstart.delete(t.identifier); }, true);
   // 兜底：写字时不许起选区、不弹长按菜单；已经选上的（不在输入框里）立刻清掉
   const noSelect = e => { if (active() && !editable(e.target) && writing()) e.preventDefault(); };
   document.addEventListener('selectstart', noSelect, true);
