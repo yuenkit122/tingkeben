@@ -43,10 +43,14 @@ const Device = (() => {
    规则：笔正在写、笔悬停在屏幕上方、或者笔刚离开不到半秒，这段时间里所有手指 / 手掌的触摸都不算：
    不会点到按钮、不会拖动或缩放画布、不会滚动页面，也不会被当成「两指轻点撤销」。
    手掌先放上去、笔后落下的情况也算：笔一落下，之前按着的手指全部作废（画布会收到 tk:pendown，把它们清掉）。
-   保险：笔的抬起事件丢了也不会一直锁着（4 秒没有笔的动静就自动解锁）。 */
+   保险：笔的抬起事件丢了也不会一直锁着（4 秒没有笔的动静就自动解锁）。
+   写字优先：笔写完 1 秒内，笔记区 / 课件以外的地方手指也点不动（换笔画的间隙手掌抬起落下不会碰到工具栏）。
+   笔本身也管：屏幕上有笔记区时，笔只在笔记区里写，碰到工具栏、侧栏都不算点击（要切工具用手指；输入框和弹窗不受影响）。
+   笔停顿时 iOS 会当成长按选字，取消这一笔再选中最近的文字（比如工具栏的「更多」），所以笔的触摸和选字都要拦。 */
 const PenGuard = (() => {
-  const HOLD = 500;
-  let penDown = false, lastPen = 0, seen = false, lastBlockedUp = 0;
+  const HOLD = 500, OFF_HOLD = 1000;
+  const WRITE = '.ic-stage, .pdfpage', FREE = 'input, textarea, select, .modal';
+  let penDown = false, lastPen = 0, seen = false, lastBlockedUp = 0, offPen = null, lastOffPen = 0;
   const live = new Set(), blocked = new Set();
   const now = () => Date.now();
   const active = () => (penDown && now() - lastPen < 4000) || now() - lastPen < HOLD;
@@ -58,16 +62,23 @@ const PenGuard = (() => {
     seen = true; lastPen = now();
     if (!document.documentElement.classList.contains('pen-seen')) document.documentElement.classList.add('pen-seen');
   };
+  const elOf = t => (t && t.nodeType === 1 ? t : t && t.parentElement) || null;
+  const editable = t => { const el = elOf(t); return !!el && (el.isContentEditable || !!el.closest(FREE)); };
+  const writing = () => [...document.querySelectorAll(WRITE)].some(el => el.getClientRects().length > 0);
+  const inWrite = t => { const el = elOf(t); return !!el && !!el.closest(WRITE); };
+  const penOff = t => !inWrite(t) && !editable(t) && writing();
+  const touchOff = t => recent(OFF_HOLD) && penOff(t);
   document.addEventListener('pointerdown', e => {
     if (e.pointerType === 'pen') {
       pen(e); penDown = true;
       if (live.size) { live.forEach(id => blocked.add(id)); live.clear(); }
       window.dispatchEvent(new Event('tk:pendown'));
+      if (penOff(e.target)) { offPen = e.pointerId; lastOffPen = now(); kill(e); }
       return;
     }
     if (e.pointerType !== 'touch') return;
     if (e.isPrimary) { live.clear(); }
-    if (active() || palmShape(e)) { blocked.add(e.pointerId); kill(e); return; }
+    if (active() || palmShape(e) || touchOff(e.target)) { blocked.add(e.pointerId); kill(e); return; }
     live.add(e.pointerId);
   }, true);
   document.addEventListener('pointermove', e => {
@@ -75,7 +86,11 @@ const PenGuard = (() => {
     if (e.pointerType === 'touch' && blocked.has(e.pointerId)) kill(e);
   }, true);
   const up = e => {
-    if (e.pointerType === 'pen') { penDown = false; lastPen = now(); return; }
+    if (e.pointerType === 'pen') {
+      penDown = false; lastPen = now();
+      if (e.pointerId === offPen) { offPen = null; lastOffPen = now(); kill(e); }
+      return;
+    }
     if (e.pointerType !== 'touch') return;
     live.delete(e.pointerId);
     if (blocked.has(e.pointerId)) { blocked.delete(e.pointerId); lastBlockedUp = now(); kill(e); }
@@ -85,17 +100,24 @@ const PenGuard = (() => {
   // 被作废的触摸，浏览器随后还会补一个 click：一起拦掉
   document.addEventListener('click', e => {
     if (now() - lastBlockedUp < 450 && e.pointerType !== 'pen' && e.pointerType !== 'mouse') kill(e);
+    else if (now() - lastOffPen < 450 || (e.pointerType === 'pen' && penOff(e.target))) kill(e);
   }, true);
   // 触摸事件这一层也要拦：取消滚动、取消 iOS 自己合成的点击
   const direct = t => t.touchType !== 'stylus';
   const tstart = new Set();
+  // 笔的触摸取消默认动作：iOS 就不会把它当长按选字 / 随手写，这一笔不会被中途掐断（pointer 事件照常来）
+  const holdPen = e => {
+    if (e.cancelable && [...e.changedTouches].some(t => !direct(t)) && !editable(e.target) && (inWrite(e.target) || writing())) e.preventDefault();
+  };
   document.addEventListener('touchstart', e => {
     const stylus = [...e.touches].some(t => !direct(t));
     if (stylus) { pen(); }
-    if (stylus || active()) { for (const t of e.changedTouches) if (direct(t)) tstart.add(t.identifier); if ([...e.changedTouches].every(direct)) e.preventDefault(); }
+    holdPen(e);
+    if (stylus || active() || touchOff(e.target)) { for (const t of e.changedTouches) if (direct(t)) tstart.add(t.identifier); if ([...e.changedTouches].every(direct)) e.preventDefault(); }
   }, { capture: true, passive: false });
   document.addEventListener('touchmove', e => {
     if (!seen) return;
+    holdPen(e);
     const stylus = [...e.touches].some(t => !direct(t));
     if (stylus || active() || [...e.changedTouches].some(t => tstart.has(t.identifier))) {
       if ([...e.changedTouches].every(direct)) e.preventDefault();
@@ -108,6 +130,15 @@ const PenGuard = (() => {
   };
   document.addEventListener('touchend', tend, { capture: true, passive: false });
   document.addEventListener('touchcancel', e => { for (const t of e.changedTouches) tstart.delete(t.identifier); }, true);
+  // 兜底：写字时不许起选区、不弹长按菜单；已经选上的（不在输入框里）立刻清掉
+  const noSelect = e => { if (active() && !editable(e.target) && writing()) e.preventDefault(); };
+  document.addEventListener('selectstart', noSelect, true);
+  document.addEventListener('contextmenu', noSelect, true);
+  document.addEventListener('selectionchange', () => {
+    if (!active()) return;
+    const sel = document.getSelection();
+    if (sel && !sel.isCollapsed && !editable(sel.anchorNode) && !editable(document.activeElement) && writing()) sel.removeAllRanges();
+  });
   return { active, recent, seen: () => seen };
 })();
 window.PenGuard = PenGuard;

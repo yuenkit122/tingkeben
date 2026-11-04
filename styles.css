@@ -1824,6 +1824,8 @@ html.is-touch .ic-stage.mode-text .ic-grip { left: -16px; } html.is-touch .ic-st
 html.is-touch .ic-stage, html.is-touch .board-tools, html.is-touch .desk-top, html.is-touch .dhead, html.is-touch .tabbar, html.is-touch .side {
   -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
 }
+html.is-touch .board-tools *, html.is-touch .desk-top *, html.is-touch .dhead *, html.is-touch .tabbar * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+html.is-touch .board-tools input, html.is-touch .desk-top input, html.is-touch .dhead input { -webkit-user-select: text; user-select: text; }
 html.is-touch .ic-stage .md.editing, html.is-touch .ic-text.editing .ic-tx-body { -webkit-user-select: text; user-select: text; }
 /* 上课工作台 / 笔记页：手掌在屏幕边上蹭，整页不会被拖得弹来弹去 */
 html.is-touch body.desk-mode, html.is-touch body.desk-mode main { overscroll-behavior: none; }
@@ -1926,3 +1928,10 @@ html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
 @keyframes sp-spin { to { transform: rotate(360deg); } }
 #splash.sp-v4 .sp-skip { text-align: left; left: clamp(18px, 5vw, 64px); }
 @media (max-width: 600px) { .sp-loader span { display: none; } #splash.sp-v4 .sp-stage { bottom: 64px; } }
+
+#dk-mtabs .dk-enhance, .ai-note-slot { display: inline-flex; gap: 6px; align-items: center; }
+/* 重命名小铅笔：跟删除按钮一个样子，不变红 */
+.ren-x:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.course-card .ren-x { right: 42px; }
+h1 .ren-x { vertical-align: middle; opacity: .5; }
+h1 .ren-x:hover { opacity: 1; }

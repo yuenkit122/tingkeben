@@ -456,6 +456,37 @@ const Board = (() => {
     wd.mdSig = mdSig(note.markdown);
     return wd;
   }
+  /* 在笔记中间插几段新内容：list = [{ i, md }]，i 是插在整份笔记第几块后面（0 = 最前面）。
+     原来的块（文字、编号、手写）一个都不改，只多出新块；新块跟着前一块记在同一份课件名下。 */
+  function insertMd(note, list) {
+    const wd = world(note);
+    const taken = new Set(wd.blocks.map(b => b.p));
+    let next = Math.max(0, ...taken), n = 0;
+    let doc = String(note.markdown || '').trim(), fallback = false;
+    [...list].sort((a, b) => b.i - a.i).forEach(({ i, md }) => {
+      md = String(md || '').trim(); if (!md) return;
+      i = Math.max(0, Math.min(wd.blocks.length, i | 0));
+      const ref = wd.blocks[i ? i - 1 : 0];
+      const nb = blocksFromMd(md).map(b => { if (!b.p || taken.has(b.p)) b.p = ++next; else next = Math.max(next, b.p); taken.add(b.p); const o = { p: b.p, text: b.text }; if (ref && ref.f) o.f = ref.f; return o; });
+      if (!nb.length) return;
+      wd.blocks.splice(i, 0, ...nb);
+      n += nb.length;
+      // 正文里也插在同一个地方；找不到原文（块被按课件重排过）就用所有块重新拼
+      if (!fallback) {
+        const anchor = String((ref && ref.text) || '').trim();
+        const at = anchor ? doc.indexOf(anchor) : -1;
+        if (!i) doc = md + (doc ? '\n\n' + doc : '');
+        else if (at >= 0) { const e = at + anchor.length; doc = doc.slice(0, e) + '\n\n' + md + doc.slice(e); }
+        else fallback = true;
+      }
+    });
+    if (!n) return 0;
+    note.markdown = fallback ? wd.blocks.map(b => String(b.text || '').trim()).filter(Boolean).join('\n\n') : doc;
+    // 重新排一次：后面的块往下挪，它们的手写跟着块一起挪
+    layout(wd);
+    wd.mdSig = mdSig(note.markdown);
+    return n;
+  }
 
   /* 把一块区域画成图（导出 / 交给 Gemini 认手写） */
   function inkImage(src, targetW = 1600, maxPx = 4.2e6, bold = 1, region) {
@@ -1332,7 +1363,7 @@ const Board = (() => {
     return { gotoPage: p => current && current.gotoPage(p) };
   }
 
-  return { mount, pageImage: inkImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK, world, sections, layout, blockOf, appendMd, assignFiles, pgOf, get current() { return current; } };
+  return { mount, pageImage: inkImage, inkImage, inkBox, shoot, hasInk, drawStroke, INK, world, sections, layout, blockOf, appendMd, insertMd, assignFiles, pgOf, get current() { return current; } };
 })();
 
 /* ======================================================================
@@ -2069,7 +2100,7 @@ const Recap = (() => {
     await DB.put('notes', note);
     } finally { job.done(); }
   }
-  return { run, START, END, handwritingMerge };
+  return { run, START, END, handwritingMerge, handwriting };
 })();
 
 /* ======================================================================
@@ -2309,6 +2340,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
       return;
     }
     const pdf = isPdf(f);
+    if (!pdf && typeof autoPdf === 'function') autoPdf(f);   // Mac 版：PPT / Word 在后台转成 PDF，转好后再打开就是原样
     let n;
     if (pdf) { try { n = await Pdf.count(f.id); } catch (e) { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; } }
     const textPages = splitPages(f.text);
@@ -2661,7 +2693,7 @@ async function renderDesk(noteId) {
     <div class="desk">
       <div class="desk-top noprint">
         ${Nav.crumb('note-' + note.id, '笔记', 'btn small ghost', '←')}
-        <select id="dk-note" class="dk-sel" title="切换笔记">${notes.map(n => `<option value="${n.id}" ${n.id === note.id ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}<option value="__new">＋ 新建空白笔记</option></select>
+        <select id="dk-note" class="dk-sel" title="切换笔记">${notes.map(n => `<option value="${n.id}" ${n.id === note.id ? 'selected' : ''}>${esc(n.title)}</option>`).join('')}<option value="__new">＋ 新建空白笔记</option></select><button class="btn small ghost" data-rename="note:${note.id}" title="重命名这份笔记">重命名</button>
         <span class="grow"></span>
         <div class="seg dk-toggles" role="group" aria-label="显示哪几栏">
           <button data-col="left">课件</button><button data-col="mid">笔记</button><button data-col="right">翻译 / AI</button>

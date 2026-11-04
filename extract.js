@@ -5,9 +5,9 @@ const Extract = (() => {
   }
 
   const ext = name => (name.split('.').pop() || '').toLowerCase();
-  const SUPPORTED = ['pdf', 'pptx', 'docx', 'txt', 'md', 'png', 'jpg', 'jpeg', 'webp'];
+  const SUPPORTED = ['pdf', 'pptx', 'ppt', 'docx', 'doc', 'txt', 'md', 'png', 'jpg', 'jpeg', 'webp'];
   const MIME = {
-    pdf: 'application/pdf', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    pdf: 'application/pdf', ppt: 'application/vnd.ms-powerpoint', doc: 'application/msword', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', txt: 'text/plain', md: 'text/markdown',
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
   };
@@ -87,6 +87,8 @@ const Extract = (() => {
     else if (e === 'docx') r = await docxText(buf);
     else if (e === 'txt' || e === 'md') r = { text: new TextDecoder().decode(buf), pages: null };
     else if (['png', 'jpg', 'jpeg', 'webp'].includes(e)) r = { text: '', pages: 1 };
+    // 老格式 .ppt / .doc 读不了文字：Mac 版听课本会先用 Keynote / Pages 转成 PDF，转好后各设备都能看
+    else if (e === 'ppt' || e === 'doc') throw new Error('老格式 ' + e.toUpperCase() + '：打开 Mac 版听课本会自动转成 PDF');
     else throw new Error('不支持的文件类型：' + e);
     const chars = r.text.replace(/\[第\d+页\]/g, '').replace(/（讲者备注）/g, '').replace(/\s/g, '').length;
     r.scanned = (e === 'pdf' && r.pages && chars / r.pages < 30) || ['png', 'jpg', 'jpeg', 'webp'].includes(e)
