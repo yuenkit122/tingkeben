@@ -159,6 +159,7 @@ const Settings = (() => {
     liveLanguage: 'en-GB',
     liveMode: 'SMART',
     saveAudio: true,
+    micRaw: false,   // true = 关掉浏览器降噪（老师离得远时可能更准，要在教室实测）
     translateGap: 6000,
     translateProvider: 'pool',
     groqKey: '', groqModel: 'qwen/qwen3.8-27b', groqModel2: 'openai/gpt-oss-120b',

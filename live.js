@@ -4,16 +4,37 @@
    Gemini Live 单次连接最长 10 分钟：到 9 分钟自动无缝换一条新连接，中间的声音先缓存不丢。 */
 
 const WORKLET_SRC = `
+/* 降到 16kHz 前先低通：直接平均相邻采样挡不住 8kHz 以上的声音，它们会折回语音频段，
+   s / f / t 这些辅音就糊了。这里用带 Hann 窗的 sinc 滤波，44.1k 这种非整数倍也按小数位置取值。 */
 class PCM16 extends AudioWorkletProcessor {
-  constructor() { super(); this.ratio = sampleRate / 16000; this.pos = 0; this.sum = 0; this.cnt = 0; this.out = new Int16Array(1600); this.n = 0; this.sq = 0; }
+  constructor() {
+    super();
+    this.ratio = sampleRate / 16000; this.out = new Int16Array(1600); this.n = 0; this.sq = 0;
+    const P = this.P = 32, half = this.half = Math.max(8, Math.ceil(this.ratio * 8)), c = Math.min(.5, 7200 / sampleRate);
+    this.table = Array.from({ length: P }, (_, ph) => {
+      const h = new Float32Array(2 * half); let sum = 0;
+      for (let k = 0; k < 2 * half; k++) {
+        const x = k - half + 1 - ph / P, a = 2 * Math.PI * c * x;
+        const w = Math.abs(x) < half ? .5 + .5 * Math.cos(Math.PI * x / half) : 0;
+        h[k] = (x === 0 ? 2 * c : Math.sin(a) / (Math.PI * x)) * w; sum += h[k];
+      }
+      for (let k = 0; k < 2 * half; k++) h[k] /= sum;
+      return h;
+    });
+    this.size = 2 * half + 8; this.buf = new Float32Array(this.size); this.count = 0; this.at = half;
+  }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
     if (!ch) return true;
+    const { buf, size, half, P, table } = this;
     for (let i = 0; i < ch.length; i++) {
-      this.sum += ch[i]; this.cnt++; this.pos += 1;
-      if (this.pos >= this.ratio) {
-        this.pos -= this.ratio;
-        let v = this.sum / this.cnt; this.sum = 0; this.cnt = 0;
+      buf[this.count % size] = ch[i]; this.count++;
+      while (this.at + half + 1 < this.count) {
+        let c0 = Math.floor(this.at), ph = Math.round((this.at - c0) * P);
+        if (ph === P) { ph = 0; c0++; }
+        const h = table[ph]; let v = 0;
+        for (let k = 0; k < 2 * half; k++) v += buf[(c0 + k - half + 1) % size] * h[k];
+        this.at += this.ratio;
         v = Math.max(-1, Math.min(1, v));
         this.sq += v * v;
         this.out[this.n++] = v < 0 ? v * 0x8000 : v * 0x7fff;
@@ -36,7 +57,7 @@ class AudioCapture {
   constructor(onChunk) { this.onChunk = onChunk; }
   async start() {
     this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: Object.assign({ channelCount: 1, echoCancellation: false, noiseSuppression: true, autoGainControl: true }, Settings.load().micId ? { deviceId: { ideal: Settings.load().micId } } : {}),
+      audio: Object.assign({ channelCount: 1, echoCancellation: false, noiseSuppression: !Settings.load().micRaw, autoGainControl: true }, Settings.load().micId ? { deviceId: { ideal: Settings.load().micId } } : {}),
     });
     const Ctx = window.AudioContext || window.webkitAudioContext;
     this.ctx = new Ctx();
@@ -220,7 +241,10 @@ class LiveSession {
     // 课程词汇：从这门课已导入的课件里挑
     if (this.course) {
       const files = await DB.byIndex('files', 'courseId', this.course.id);
-      this.vocab = Extract.vocabulary(files.map(f => f.text || ''), 100);
+      // 词表只放得下约 100 个：这节课用的课件先占位，其余才从整门课里补
+      const focus = files.find(f => f.id === this.focusFileId);
+      const near = focus && focus.text ? Extract.vocabulary([focus.text], 60) : [];
+      this.vocab = [...new Set([...near, ...Extract.vocabulary(files.map(f => f.text || ''), 100)])].slice(0, 100);
       if (this.course.glossary) this.vocab = [...new Set([...this.course.glossary, ...this.vocab])].slice(0, 100);
       // 课前包里的术语表：这节课用的课件优先，英文进识别词表，中文译法直接定死
       const prepped = files.filter(f => f.prep && f.prep.terms).sort((a, b) => (b.id === this.focusFileId) - (a.id === this.focusFileId));

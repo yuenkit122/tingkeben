@@ -1364,8 +1364,13 @@ async function startGeneration({ course, fileIds, sessionId, sessionIds, title, 
       note.markdown = gen.text; note.status = gen.text ? 'done' : 'error';
       note.error = e.name === 'AbortError' ? '已停止' : e.message;
       if (e.name !== 'AbortError') toast(e.message, 6000);
+      // 笔记断了不等于勾选的那几样不用出了：照样从写好的部分和课件出（自己点的停止除外）
+      autoStudy = e.name !== 'AbortError' && thenParts.length > 0;
     }
-    await DB.put('notes', note);
+    // 生成期间用户可能在写手写：只写这几样，别用开始时的旧对象盖掉
+    const latest = await DB.get('notes', note.id) || note;
+    Object.assign(latest, { markdown: note.markdown, status: note.status, error: note.error });
+    await DB.put('notes', latest);
     State.gens.delete(note.id);
     job.done();
     ping();
@@ -2040,14 +2045,16 @@ async function noteDocPane(host, note, course, onPage, { onFile, onReady } = {})
       }).join('')}</div>`;
     const sel = $('#nb-file', host); if (sel) sel.onchange = async () => { cur = sel.value; if (onFile) await onFile(cur); const x = await draw(); if (onReady) onReady(x); };
     const pages = $('.nb-pages', host);
+    const ink = DocInk.controller(full);   // 这里的课件也能直接用笔写，和文档查看器存在同一份 f.ink
     if (pdf) {
       const io = new IntersectionObserver(ents => ents.forEach(async en => {
         if (!en.isIntersecting) return;
         const node = en.target; if (node.dataset.done) return; node.dataset.done = '1';
-        try { await renderPdfPageInto(node, f.id, Number(node.dataset.p)); } catch (e) { node.innerHTML = `<div class="ph">第 ${node.dataset.p} 页加载失败</div>`; }
+        try { await renderPdfPageInto(node, f.id, Number(node.dataset.p)); if (node.isConnected) ink.attach(node, Number(node.dataset.p)); } catch (e) { node.innerHTML = `<div class="ph">第 ${node.dataset.p} 页加载失败</div>`; }
       }), { root: pages, rootMargin: '600px' });
       $$('.nb-page', host).forEach(x => io.observe(x));
-    }
+    } else $$('.nb-page', host).forEach(x => ink.attach(x, Number(x.dataset.p)));
+    let rz; const ro = new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(() => { if (!pages.isConnected) { ro.disconnect(); return; } ink.resize(); }, 150); }); ro.observe(pages);
     let ticking = false;
     const pick = () => {
       ticking = false;
@@ -2535,6 +2542,7 @@ function renderSettings(cat = '') {
             </select><span class="hint">灰色草稿（Chrome 内置翻译）不受影响，照样马上出来</span></div>
           <div class="field"><label for="w-max">老师一直不停时，最多几秒强制翻一次</label><input id="w-max" type="number" min="3" max="20" value="${s.maxWaitSec || 6}"><span class="hint">越小中文越及时，但句子会被切得更碎；建议 5–8</span></div>
         </div>
+        <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-micraw" ${s.micRaw ? 'checked' : ''}>关掉麦克风降噪（老师离得远、字幕漏词时试试，下次录音生效）</label>
         <div class="field" style="margin-top:8px"><label for="s-mic">麦克风</label><div class="row"><select id="s-mic" class="grow"><option value="">系统默认麦克风</option>${s.micId ? `<option value="${esc(s.micId)}" selected>上次选的麦克风</option>` : ''}</select><button class="btn small" id="s-mic-scan">列出麦克风</button></div><span class="hint">Mac 外接了麦克风或者用 AirPods 时可以在这里选</span></div>
         <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-auto-study" ${s.autoStudy === true ? 'checked' : ''}>每次生成笔记后，都自动出重点和测验题（默认关；一般在「生成」窗口里按需勾选就行）</label>
         <label class="switch" style="margin-top:8px"><input type="checkbox" id="s-audio" ${s.saveAudio ? 'checked' : ''}>同时保存录音（之后可以下载回听，1 小时约 115MB）</label>
@@ -2628,7 +2636,7 @@ function renderSettings(cat = '') {
     if (p === 'denied') toast('浏览器通知被拒绝了，只能在页面里提醒', 6000);
   };
   bind('#m-ds', 'deepseekModel', v => v.trim()); bind('#ds-think', 'deepseekThinking');
-  bind('#l-lang', 'liveLanguage'); bind('#l-mode', 'liveMode'); bind('#s-audio', 'saveAudio'); bind('#t-prov', 'translateProvider'); bind('#d-mode', 'draftMode'); bind('#t-pace', 'translatePace'); bind('#s-auto-study', 'autoStudy'); bind('#s-mic', 'micId'); bind('#s-autodiff', 'autoDiff'); bind('#l-enonly2', 'liveEnglishOnly');
+  bind('#l-lang', 'liveLanguage'); bind('#l-mode', 'liveMode'); bind('#s-audio', 'saveAudio'); bind('#s-micraw', 'micRaw'); bind('#t-prov', 'translateProvider'); bind('#d-mode', 'draftMode'); bind('#t-pace', 'translatePace'); bind('#s-auto-study', 'autoStudy'); bind('#s-mic', 'micId'); bind('#s-autodiff', 'autoDiff'); bind('#l-enonly2', 'liveEnglishOnly');
   $('#s-mic-scan').onclick = async () => {
     try {
       const st = await navigator.mediaDevices.getUserMedia({ audio: true }); st.getTracks().forEach(t => t.stop());
@@ -3030,8 +3038,9 @@ async function renderWrong() {
   const notes = (await DB.all('notes')).filter(n => (n.wrong || []).length);
   const courses = State.courses;
   const items = Learn.wrongList(notes, courses);
+  const draftKey = 'paper:wrong', draft = await Learn.paperDraft(draftKey);
   view.innerHTML = `<div class="head"><div><h1>错题本</h1><div class="meta">测验做错的题自动进来；同一道连对两次就出本</div></div>${Nav.crumb('review', '复习', 'btn small ghost')}</div>
-    ${items.length ? `<div class="row" style="margin-bottom:12px"><button class="btn primary" id="wb-go">开始刷错题（${items.length}）</button><span class="hint">做对了会从本子里淡出，别重做整套测验</span></div>
+    ${items.length ? `<div class="row" style="margin-bottom:12px">${draft ? `<button class="btn primary" id="wb-resume">接着刷（已答 ${draft.ans.filter(a => a !== null).length} / ${draft.qs.length}）</button>` : ''}<button class="btn ${draft ? '' : 'primary'}" id="wb-go">${draft ? '重新开始' : '开始刷错题'}（${items.length}）</button><span class="hint">做对了会从本子里淡出，别重做整套测验</span></div>
     <div class="wb-list">${items.map(it => `<div class="card pad wb-item">
       <div class="row" style="justify-content:space-between"><span class="pill mute">${esc(it.courseName)}</span><span class="hint">${esc(it.noteTitle)}</span></div>
       <div class="wb-q">${esc(it.q.q)}</div>
@@ -3040,10 +3049,9 @@ async function renderWrong() {
     </div>`).join('')}</div>`
     : `<div class="empty"><strong>错题本是空的 👍</strong>去做一次测验，答错的题会自动进来。</div>`}`;
   const go = $('#wb-go');
-  if (go) go.onclick = () => {
-    Learn.runPaper(null, items.map(it => Object.assign({}, it.q, { noteId: it.noteId, noteTitle: it.noteTitle, qi: it.qi })), 0,
-      { title: '错题重刷', meta: '连对两次自动出本', onWrong: q => Learn.wrongResolve(q.noteId, q.qi, false), onRight: q => Learn.wrongResolve(q.noteId, q.qi, true) });
-  };
+  const wbOpts = { title: '错题重刷', meta: '连对两次自动出本', draftKey, onWrong: q => Learn.wrongResolve(q.noteId, q.qi, false), onRight: q => Learn.wrongResolve(q.noteId, q.qi, true) };
+  if (go) go.onclick = () => Learn.runPaper(null, items.map(it => Object.assign({}, it.q, { noteId: it.noteId, noteTitle: it.noteTitle, qi: it.qi })), 0, wbOpts);
+  const wr = $('#wb-resume'); if (wr) wr.onclick = () => Learn.runPaper(null, draft.qs, 0, Object.assign({}, wbOpts, { resume: draft }));
   $$('[data-drop]').forEach(b => b.onclick = async () => {
     const [nid, qi] = b.dataset.drop.split('|');
     const n = await DB.get('notes', nid); if (!n) return;
@@ -3165,10 +3173,11 @@ const SyncUI = (() => {
   function table(c) {
     if (!c) return '<div class="hint">正在统计…</div>';
     const cell = r => { const n = r.up + r.down; return n ? `<span class="sd-bad">${n}</span>${r.up ? ` <small>↑${r.up}</small>` : ''}${r.down ? ` <small>↓${r.down}</small>` : ''}` : '<span class="sd-ok">0</span>'; };
-    return `<table class="sd-table"><thead><tr><th></th><th>一共</th><th>已同步</th><th>没同步</th></tr></thead><tbody>
-      ${NAMES.map(([k, n]) => `<tr><th>${n}</th><td>${c.by[k].total}</td><td>${c.by[k].synced}</td><td>${cell(c.by[k])}</td></tr>`).join('')}
-      ${c.del ? `<tr><th>删除</th><td>—</td><td>—</td><td><span class="sd-bad">${c.del}</span> <small>↑${c.del}</small></td></tr>` : ''}
-      <tr class="sum"><th>合计</th><td>${c.total}</td><td>${c.synced}</td><td>${cell({ up: c.up + c.del, down: c.down })}</td></tr></tbody></table>
+    return `<table class="sd-table"><thead><tr><th></th><th>一共</th><th>已同步</th><th>没同步</th><th>大小</th></tr></thead><tbody>
+      ${NAMES.map(([k, n]) => `<tr><th>${n}</th><td>${c.by[k].total}</td><td>${c.by[k].synced}</td><td>${cell(c.by[k])}</td><td>${c.by[k].bytes ? fmtSize(c.by[k].bytes) : '—'}</td></tr>`).join('')}
+      ${c.del ? `<tr><th>删除</th><td>—</td><td>—</td><td><span class="sd-bad">${c.del}</span> <small>↑${c.del}</small></td><td>—</td></tr>` : ''}
+      <tr class="sum"><th>合计</th><td>${c.total}</td><td>${c.synced}</td><td>${cell({ up: c.up + c.del, down: c.down })}</td><td>${fmtSize(c.bytes)}</td></tr></tbody></table>
+      <div class="hint">总共 ${fmtSize(c.bytes)}（课件原文件 ${fmtSize(c.blobBytes)}，笔记和资料 ${fmtSize(c.bytes - c.blobBytes)}）${c.upBytes ? ` · 待上传约 ${fmtSize(c.upBytes)}` : ''}${c.downBytes ? ` · 待下载约 ${fmtSize(c.downBytes)}` : ''}。录音音频不同步，不算在内。</div>
       <div class="hint">↑ 这台设备改了、还没传上云端　↓ 云端有新的、还没下载到这台设备${c.exact ? '' : '　（正在核对云端，数字可能还会变）'}</div>
       ${c.blobs ? `<div class="hint">课件原文件（PDF/PPT）：这台设备已下载 ${c.blobsLocal} / ${c.blobs} 个，其余打开时才下载。</div>` : ''}`;
   }
@@ -3372,6 +3381,10 @@ document.addEventListener('click', e => {
     const item = e.target.closest('.more-menu button, .more-menu a');
     if (item && !item.closest('.mm-row') && !item.closest('[data-keep]')) setTimeout(() => d.removeAttribute('open'), 0);
   });
+}, true);
+// 笔在画板上落笔不产生 click，菜单要在按下时就收起
+document.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'pen') document.querySelectorAll('details.more[open]').forEach(d => { if (!d.contains(e.target)) d.removeAttribute('open'); });
 }, true);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('details.more[open]').forEach(d => d.removeAttribute('open')); });
 

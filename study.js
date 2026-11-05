@@ -74,37 +74,88 @@ function splitPages(text) {
    ====================================================================== */
 const Jobs = (() => {
   const map = new Map(); let tray = null, timer = null;
+  /* 进度的依据：AI 实际写出来的字数 ÷ 预计字数。预计字数用这台设备过去的实际字数校准，用得越多越准。
+     没有字数的阶段（连接、识别）才按时间估。 */
+  const KEY = 'tingkeben.jobhist';
+  const hist = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } };
+  const kind = j => j.id.split(':')[0] + '|' + j.phaseLabel;
+  function learn(j) {
+    if (!j.baseLen || j.len < j.baseLen * .25) return;   // 中途失败的不算
+    const h = hist(), k = kind(j), r = Math.max(.3, Math.min(4, j.len / j.baseLen));
+    h[k] = h[k] ? h[k] * .6 + r * .4 : r;
+    try { localStorage.setItem(KEY, JSON.stringify(h)); } catch (e) {}
+  }
   function start(id, label) {
-    const j = { id, label, t0: Date.now(), lo: 0, hi: .05, len: 0, pt0: Date.now(), expectLen: 0, expectSec: 4, phaseLabel: '正在连接…', sub: '' };
+    const now = Date.now();
+    const j = { id, label, t0: now, lo: 0, hi: .05, len: 0, pt0: now, moved: now, baseLen: 0, expectLen: 0, expectSec: 4, phaseLabel: '正在连接…', sub: '', shown: 0, rest: null };
     map.set(id, j); loop();
     const api = {
-      phase(label, lo, hi, { expectLen = 0, expectSec = 10 } = {}) { j.lo = Math.max(cur(j), lo); j.hi = hi; j.phaseLabel = label; j.expectLen = expectLen; j.expectSec = expectSec; j.len = 0; j.pt0 = Date.now(); return api; },
-      len(n) { j.len = n; return api; },
+      phase(label, lo, hi, { expectLen = 0, expectSec = 10 } = {}) {
+        learn(j);
+        j.lo = Math.max(cur(j), lo); j.hi = hi; j.phaseLabel = label; j.baseLen = expectLen;
+        j.expectLen = expectLen * (hist()[kind(j)] || 1); j.expectSec = expectSec; j.len = 0; j.pt0 = j.moved = Date.now();
+        return api;
+      },
+      len(n) { if (n > j.len) j.moved = Date.now(); j.len = n; return api; },
       sub(t) { j.sub = t; return api; },
-      done() { map.delete(id); paint(); return api; },
+      done() { learn(j); map.delete(id); paint(); return api; },
       get: () => j,
     };
     return api;
   }
+  // 线性走到 90%；比预计写得多就放慢，不倒退，也不会假装到 100%
   function cur(j) {
-    const f = j.expectLen ? 1 - Math.exp(-j.len / j.expectLen * 1.6) : 1 - Math.exp(-(Date.now() - j.pt0) / 1000 / j.expectSec * 1.3);
-    return Math.min(.99, j.lo + (j.hi - j.lo) * Math.max(0, f));
+    const x = j.expectLen ? j.len / j.expectLen : (Date.now() - j.pt0) / 1000 / j.expectSec;
+    const f = x < .9 ? x : .9 + .09 * (1 - Math.exp(-(x - .9) * 3));
+    j.shown = Math.max(j.shown, Math.min(.99, j.lo + (j.hi - j.lo) * Math.max(0, f)));
+    return j.shown;
   }
   const secs = j => Math.round((Date.now() - j.t0) / 1000);
+  // 剩余时间：正在写字时按这一次的真实写入速度算，其余按已用时间和进度推
+  function left(j, p) {
+    const now = Date.now(), used = (now - j.t0) / 1000, wrote = (now - j.pt0) / 1000;
+    if (j.expectLen && !j.len && wrote > 20) return '等 AI 开始写…';
+    if (j.len && now - j.moved > 15000) return '比平时慢，还在等 AI';
+    if (p < .08 || used < 3) return '正在估算时间';
+    const rest = j.expectLen && j.len > 50
+      ? Math.max(0, j.expectLen - j.len) / (j.len / Math.max(1, wrote)) + (1 - j.hi) * used / Math.max(.05, p)
+      : used * (1 - p) / p;
+    j.rest = j.rest == null ? rest : j.rest * .85 + rest * .15;
+    return j.rest < 5 ? '马上好' : j.rest < 60 ? `约剩 ${Math.ceil(j.rest / 5) * 5} 秒` : `约剩 ${Math.ceil(j.rest / 60)} 分钟`;
+  }
+  const note = j => `${left(j, cur(j))} · 已用 ${secs(j)} 秒`;
   function html(id, compact) {
     const j = map.get(id); if (!j) return '';
     const p = Math.round(cur(j) * 100);
-    return `<div class="prog${compact ? ' compact' : ''}" data-job="${esc(id)}"><div class="prog-top"><span class="spin"></span><b>${esc(compact ? j.label : j.phaseLabel)}</b><span class="grow"></span><span class="prog-n">${p}% · ${secs(j)} 秒</span></div><div class="prog-bar"><i style="width:${p}%"></i></div>${!compact && j.sub ? `<div class="hint">${esc(j.sub)}</div>` : compact ? `<div class="hint">${esc(j.phaseLabel)}</div>` : ''}</div>`;
+    return `<div class="prog${compact ? ' compact' : ''}" data-job="${esc(id)}"><div class="prog-top"><span class="prog-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p}"><svg viewBox="0 0 36 36" aria-hidden="true"><circle class="bg" cx="18" cy="18" r="15.5"/><circle class="fg" cx="18" cy="18" r="15.5" pathLength="100" stroke-dasharray="100" stroke-dashoffset="${100 - p}"/></svg><em>${p}</em></span><b>${esc(compact ? j.label : j.phaseLabel)}</b><span class="grow"></span><span class="prog-n">${esc(note(j))}</span></div><div class="prog-bar"><i style="width:${p}%"></i></div><div class="hint prog-sub"${(compact ? j.phaseLabel : j.sub) ? '' : ' hidden'}>${esc(compact ? j.phaseLabel : j.sub)}</div></div>`;
+  }
+  // 原地改数字：整块重写的话进度条的过渡动画永远播不出来，只会一格一格跳
+  function update(el, j) {
+    const p = Math.round(cur(j) * 100), compact = el.classList.contains('compact');
+    $('.prog-bar i', el).style.width = p + '%';
+    $('.prog-ring .fg', el).setAttribute('stroke-dashoffset', 100 - p);
+    $('.prog-ring em', el).textContent = p;
+    $('.prog-ring', el).setAttribute('aria-valuenow', p);
+    $('.prog-top b', el).textContent = compact ? j.label : j.phaseLabel;
+    $('.prog-n', el).textContent = note(j);
+    const t = compact ? j.phaseLabel : j.sub, sub = $('.prog-sub', el); sub.textContent = t; sub.hidden = !t;
   }
   /* 页面里的进度块：el 里放一个 [data-job-slot="id"]，这里会自动刷新 */
   function paint() {
-    $$('[data-job-slot]').forEach(el => { const id = el.dataset.jobSlot; el.innerHTML = map.has(id) ? html(id) : ''; });
+    $$('[data-job-slot]').forEach(el => {
+      const id = el.dataset.jobSlot, now = el.firstElementChild;
+      if (!map.has(id)) el.innerHTML = '';
+      else if (now && now.dataset.job === id) update(now, map.get(id));
+      else el.innerHTML = html(id);
+    });
     // 左下角任务托盘：当前页面没显示的任务放这里
     const shown = new Set($$('[data-job-slot]').map(el => el.dataset.jobSlot));
     const rest = [...map.keys()].filter(id => !shown.has(id));
     if (!tray) { tray = document.createElement('div'); tray.className = 'job-tray'; document.body.appendChild(tray); }
     tray.hidden = !rest.length;
-    tray.innerHTML = rest.map(id => html(id, true)).join('');
+    const have = [...tray.children].map(el => el.dataset.job);
+    if (have.join('\n') === rest.join('\n')) [...tray.children].forEach(el => update(el, map.get(el.dataset.job)));
+    else tray.innerHTML = rest.map(id => html(id, true)).join('');
   }
   function loop() { if (timer) return; timer = setInterval(() => { paint(); if (!map.size) { clearInterval(timer); timer = null; } }, 400); paint(); }
   const slot = id => `<div data-job-slot="${esc(id)}">${html(id)}</div>`;
@@ -1381,30 +1432,48 @@ const Study = (() => {
   function merge(note, pack) {
     note.study = Object.assign({ points: [], quiz: [] }, note.study || {});
     if (pack.points) { note.study.points = pack.points; note.mastered = {}; }
-    if (pack.quiz) { note.study.quiz = pack.quiz; note.quizLog = null; }
+    if (pack.quiz) { note.study.quiz = pack.quiz; note.quizLog = null; note.quizRun = null; }
     note.study.at = pack.at;
   }
-  const doneMsg = pack => '生成了 ' + [pack.points && `${pack.points.length} 个重点`, pack.quiz && `${pack.quiz.length} 道题`].filter(Boolean).join('、');
-  async function run(note, parts, job) {
-    let first = true;
-    const label = parts.map(k => PART_NAME[k]).join('、');
-    const pack = await AI.studyPack({ title: note.title, parts, points: (note.study && note.study.points) || [], markdown: (note.markdown || '').slice(0, 80000), sources: await sourcesExcerpt(note, note.markdown ? 20000 : 60000), onText: t => { if (first) { first = false; job.phase('正在出' + label, .08, .97, { expectLen: parts.length * 2500 }); } job.len(t.length).sub(`已写 ${t.length} 字`); } });
-    if (pack.points && !pack.points.length) throw new Error('没有生成出知识点，再试一次');
-    return pack;
+  // 结果说实话：哪样出来了、哪样没出来、为什么
+  const doneMsg = ({ made, failed }) => [
+    made.points && `生成了 ${made.points.length} 个重点`, made.quiz && `生成了 ${made.quiz.length} 道题`,
+    ...[...new Set(failed.map(f => f[1]))].map(why => `${failed.filter(f => f[1] === why).map(f => PART_NAME[f[0]]).join('、')}没出来（${why}），再点一次生成`),
+  ].filter(Boolean).join('；');
+  /* 一样一样出：重点和题分开请求，一次写不完不会两样都丢；先出的重点马上存下，题也能挂到新重点上 */
+  async function run(noteId, parts, job) {
+    const want = ['points', 'quiz'].filter(k => parts.includes(k));
+    const made = {}, failed = [];
+    for (const [n, k] of want.entries()) {
+      const note = await DB.get('notes', noteId); if (!note) break;
+      const sources = await sourcesExcerpt(note, note.markdown ? 20000 : 60000);
+      if (!String(note.markdown || '').trim() && !sources.trim()) { failed.push([k, '课件里读不出文字']); continue; }
+      let first = true;
+      try {
+        const pack = await AI.studyPack({ title: note.title, parts: [k], points: (note.study && note.study.points) || [], markdown: (note.markdown || '').slice(0, 80000), sources, onText: t => { if (first) { first = false; job.phase('正在出' + PART_NAME[k], .08 + .89 * n / want.length, .08 + .89 * (n + 1) / want.length, { expectLen: 2500 }); } job.len(t.length).sub(`已写 ${t.length} 字`); } });
+        const fresh = await DB.get('notes', noteId) || note;
+        merge(fresh, pack);
+        await DB.put('notes', fresh);
+        made[k] = pack[k];
+      } catch (e) { failed.push([k, e.message]); }
+    }
+    return { made, failed };
   }
   async function generate(note, el, after, parts = ['points', 'quiz']) {
     if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
     if (!note.markdown && !(note.sourceFileIds || []).length) { toast('这份笔记还是空的，先生成笔记或选课件'); return; }
+    if (State.studyGens.has(note.id)) { toast('正在出了，好了会自动显示'); return; }
+    State.studyGens.add(note.id);
     const job = Jobs.start('study:' + note.id, '出' + parts.map(k => PART_NAME[k]).join('、') + '：' + note.title);
     el.innerHTML = Jobs.slot('study:' + note.id);
     try {
-      const pack = await run(note, parts, job);
-      const fresh = await DB.get('notes', note.id) || note; merge(fresh, pack); Object.assign(note, fresh);
-      await DB.put('notes', fresh);
-      toast(doneMsg(pack));
+      const res = await run(note.id, parts, job);
+      Object.assign(note, await DB.get('notes', note.id) || {});
+      toast(doneMsg(res), res.failed.length ? 7000 : undefined);
     } catch (e) { toast(e.message, 6000); }
-    job.done();
-    after();
+    job.done(); State.studyGens.delete(note.id);
+    // 等的时候切走又切回来，原来的 el 已经不在页面上了：重画当前页，不然结果看不到
+    if (el.isConnected) after(); else refreshTabs(note.id, true);
   }
   function emptyGen(note, el, after, part) {
     if (State.studyGens.has(note.id) || Jobs.has('study:' + note.id)) { el.innerHTML = Jobs.slot('study:' + note.id) + '<p class="hint">好了会自动显示，可以先去看别的。</p>'; return; }
@@ -1438,22 +1507,39 @@ const Study = (() => {
 
   function quiz(note, el, { gotoPoint } = {}) {
     const st = note.study; if (!st || !(st.quiz || []).length) return emptyGen(note, el, () => quiz(note, el, { gotoPoint }), 'quiz');
-    let set = st.quiz.map((_, i) => i), i = 0, picked = null, score = 0, wrong = [];
+    // 做到哪一题存在笔记里（note.quizRun，跟着云同步走）：切走、关掉再回来都接着做；题重新出过才从头来
+    const sig = `${st.at || 0}:${st.quiz.length}`;
+    const had = note.quizRun;
+    const ok = had && had.sig === sig && Array.isArray(had.set) && had.set.length && had.set.every(k => st.quiz[k]);
+    let set = ok ? had.set : st.quiz.map((_, k) => k), i = ok ? had.i : 0, picked = ok ? had.picked : null, score = ok ? had.score : 0, wrong = ok ? had.wrong : [];
+    let finished = ok && i >= set.length, writes = Promise.resolve();
     const L = 'ABCDEF';
+    const remember = () => {
+      note.quizRun = { sig, set, i, picked, score, wrong, at: Date.now() };
+      // 只写这几样，别的（手写、笔记正文）以库里最新的为准
+      writes = writes.then(async () => {
+        const f = await DB.get('notes', note.id) || note;
+        Object.assign(f, { quizRun: note.quizRun, quizLog: note.quizLog || null, wrong: note.wrong || [] });
+        await DB.put('notes', f);
+      }).catch(e => toast('进度没存上：' + e.message, 5000));
+    };
+    const restart = list => { set = list; i = 0; score = 0; wrong = []; picked = null; finished = false; remember(); paint(); };
+    const reQuiz = () => generate(note, el, () => quiz(note, el, { gotoPoint }), ['quiz']);
     const paint = () => {
       if (i >= set.length) {
-        note.quizLog = { at: Date.now(), score, total: set.length, wrong }; DB.put('notes', note);
+        if (!finished) { finished = true; note.quizLog = { at: Date.now(), score, total: set.length, wrong }; remember(); }
         el.innerHTML = `<div class="card pad" style="text-align:center"><div style="font-size:40px;font-weight:800">${score} / ${set.length}</div><div class="hint">${score === set.length ? '全对！' : `错了 ${wrong.length} 道，点下面的知识点回去看看`}</div>
           ${wrong.length ? `<div class="points" style="text-align:left;margin-top:14px">${wrong.map(k => { const q = st.quiz[k], pt = st.points.find(p => p.id === q.point); return `<div class="point"><div class="grow"><div class="pt">${esc(q.q)}</div><div class="hint">正确答案：${L[q.answer]}. ${esc(q.options[q.answer])}</div></div>${pt ? `<button class="btn small" data-go="${esc(pt.id)}">看重点</button>` : ''}</div>`; }).join('')}</div>` : ''}
-          <div class="row" style="justify-content:center;margin-top:14px">${wrong.length ? '<button class="btn" id="qz-wrong">只做错题</button>' : ''}<button class="btn primary" id="qz-again">再做一遍</button></div></div>`;
+          <div class="row" style="justify-content:center;margin-top:14px">${wrong.length ? '<button class="btn" id="qz-wrong">只做错题</button>' : ''}<button class="btn primary" id="qz-again">再做一遍</button><button class="btn ghost" id="qz-new">重新出题</button></div></div>`;
         $$('[data-go]', el).forEach(b => b.onclick = () => gotoPoint && gotoPoint(b.dataset.go));
-        const w = $('#qz-wrong', el); if (w) w.onclick = () => { set = wrong.slice(); i = 0; score = 0; wrong = []; picked = null; paint(); };
-        $('#qz-again', el).onclick = () => { set = st.quiz.map((_, k) => k).sort(() => Math.random() - .5); i = 0; score = 0; wrong = []; picked = null; paint(); };
+        const w = $('#qz-wrong', el); if (w) w.onclick = () => restart(wrong.slice());
+        $('#qz-again', el).onclick = () => restart(st.quiz.map((_, k) => k).sort(() => Math.random() - .5));
+        confirmClick($('#qz-new', el), '再点一次：换一套新题（进度清零）', reQuiz);
         return;
       }
       const q = st.quiz[set[i]], pt = st.points.find(p => p.id === q.point);
       el.innerHTML = `
-        <div class="row" style="justify-content:space-between"><span class="hint">第 ${i + 1} / ${set.length} 题 · 答对 ${score}</span>${note.quizLog ? `<span class="hint">上次 ${note.quizLog.score}/${note.quizLog.total}</span>` : ''}</div>
+        <div class="row" style="justify-content:space-between"><span class="hint">第 ${i + 1} / ${set.length} 题 · 答对 ${score}</span><span class="row" style="gap:8px">${note.quizLog ? `<span class="hint">上次 ${note.quizLog.score}/${note.quizLog.total}</span>` : ''}${i || picked !== null ? '<button class="btn small ghost" id="qz-reset">重新开始</button>' : ''}<button class="btn small ghost" id="qz-new">重新出题</button></span></div>
         <div class="card pad quiz">
           <div class="qq">${esc(q.q)}</div>
           <div class="opts">${q.options.map((o, k) => `<button class="opt ${picked !== null ? (k === q.answer ? 'right' : k === picked ? 'wrong' : '') : ''}" data-k="${k}" ${picked !== null ? 'disabled' : ''}><b>${L[k]}</b><span>${esc(o)}</span></button>`).join('')}</div>
@@ -1467,29 +1553,32 @@ const Study = (() => {
         if (picked === q.answer) {
           score++;
           const rec = (note.wrong || []).find(x => x.qi === qi);
-          if (rec) { rec.ok = (rec.ok || 0) + 1; if (rec.ok >= 2) note.wrong = note.wrong.filter(x => x !== rec); DB.put('notes', note); }
-        } else { wrong.push(qi); Learn.wrongAdd(note, qi); DB.put('notes', note); }
+          if (rec) { rec.ok = (rec.ok || 0) + 1; if (rec.ok >= 2) note.wrong = note.wrong.filter(x => x !== rec); }
+        } else { wrong.push(qi); Learn.wrongAdd(note, qi); }
+        remember();
         paint();
       });
-      const n = $('#qz-next', el); if (n) n.onclick = () => { i++; picked = null; paint(); };
+      const n = $('#qz-next', el); if (n) n.onclick = () => { i++; picked = null; if (i < set.length) remember(); paint(); };
       const g = $('#qz-pt', el); if (g) g.onclick = () => gotoPoint && gotoPoint(q.point);
+      const r = $('#qz-reset', el); if (r) confirmClick(r, '再点一次：清掉进度从第 1 题做', () => restart(st.quiz.map((_, k) => k)));
+      confirmClick($('#qz-new', el), '再点一次：换一套新题（进度清零）', reQuiz);
     };
     paint();
   }
   /* 笔记生成完自动出重点/卡片/测验（后台跑，不挡界面） */
   async function background(noteId, parts = ['points', 'quiz']) {
-    if (State.studyGens.has(noteId) || !Settings.load().deepseekKey) return;
+    const names = parts.map(k => PART_NAME[k]).join('、');
+    if (State.studyGens.has(noteId)) { toast('已经在出了，好了会自动显示'); return; }
+    if (!Settings.load().deepseekKey) { toast(`${names}没出：先去设置里填 DeepSeek key`, 6000); return; }
     State.studyGens.add(noteId); refreshTabs(noteId);
     let job = null;
     try {
       const note = await DB.get('notes', noteId);
-      if (!note || (!note.markdown && !(note.sourceFileIds || []).length)) return;
-      job = Jobs.start('study:' + noteId, '出' + parts.map(k => PART_NAME[k]).join('、') + '：' + note.title);
-      const pack = await run(note, parts, job);
-      const fresh = await DB.get('notes', noteId); if (!fresh) return;
-      merge(fresh, pack);
-      await DB.put('notes', fresh);
-      toast(`「${fresh.title}」${doneMsg(pack)}`);
+      if (!note) return;
+      if (!note.markdown && !(note.sourceFileIds || []).length) { toast(`${names}没出：这份笔记没有内容也没有课件`, 6000); return; }
+      job = Jobs.start('study:' + noteId, '出' + names + '：' + note.title);
+      const res = await run(noteId, parts, job);
+      toast(`「${note.title}」${doneMsg(res)}`, res.failed.length ? 7000 : undefined);
     } catch (e) { toast('出复习材料失败：' + e.message, 5000); }
     finally { job && job.done(); State.studyGens.delete(noteId); refreshTabs(noteId, true); }
   }
@@ -2308,7 +2397,7 @@ const DocInk = (() => {
 
 function mountDocViewer(host, f, { onPage, note, course } = {}) {
   let mode = host._mode || 'orig';
-  const ink = isPdf(f) ? DocInk.controller(f) : null;
+  const ink = DocInk.controller(f);   // PDF 和 PPT / Word 的文字页都能写
   const modes = [['orig', '原文'], ['pair', '对照'], ['zh', '中文'], ['prep', '课前包']];
   const paint = async () => {
     host._mode = mode;
@@ -2367,7 +2456,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
         try { await renderPdfPageInto(el, f.id, Number(el.dataset.p)); if (ink && el.isConnected) ink.attach(el, Number(el.dataset.p)); } catch (e) { el.innerHTML = `<div class="ph">第 ${el.dataset.p} 页加载失败</div>`; }
       }), { root: body, rootMargin: '800px' });
       $$('.pdfpage', body).forEach(el => io.observe(el));
-    }
+    } else $$('.docpage', body).forEach(el => ink.attach(el, Number(el.dataset.p)));
     const sel = mode === 'pair' ? '.pair' : pdf ? '.pdfpage' : '.docpage';
     const cur = new IntersectionObserver(ents => ents.forEach(en => { if (en.isIntersecting && en.intersectionRatio > .3) { const p = Number(en.target.dataset.p); host.dataset.page = p; const pg = $('#dv-page', host); if (pg) pg.textContent = `${p}/${n}`; onPage && onPage(p); } }), { root: body, threshold: [.3] });
     $$(sel, body).forEach(el => cur.observe(el));
@@ -2375,7 +2464,7 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
     const goto = e => { if (!host.isConnected) { document.removeEventListener('tkb-goto-page', goto); return; } const el = $(`${sel}[data-p="${e.detail.page}"]`, body); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
     document.addEventListener('tkb-goto-page', goto);
     const add = $('#dv-add', host); add.hidden = !(host._onAddPage && pdf); add.onclick = () => host._onAddPage && host._onAddPage(f.id, Number(host.dataset.page || 1));
-    if (ink && pdf) {
+    if (ink) {
       const ib = $('#dv-ink', host), bar = $('#dv-inkbar', host);
       ib.hidden = false;
       const syncBar = () => {
@@ -2889,7 +2978,7 @@ async function renderDesk(noteId) {
   const mid = $('#dk-mid');
   const showMid = (tab, opt = {}) => {
     midTab = tab; DeskPref.set({ mtab: tab });
-    $('#dk-mtabs').innerHTML = noteTabsHTML(tab, note, true) + '<span id="ai-note-slot" class="dk-enhance"></span>';
+    $('#dk-mtabs').innerHTML = `<div class="dk-tablist">${noteTabsHTML(tab, note, true)}</div><span id="ai-note-slot" class="dk-enhance"></span>`;
     $$('#dk-mtabs [data-ntab]').forEach(b => b.onclick = () => showMid(b.dataset.ntab));
     aiSlot();
     mid.className = 'dbody';
@@ -3084,7 +3173,10 @@ async function mockExamModal(course) {
   const cfg = (course.exams && course.exams[0]) || { weights: {} };
   const wOf = id => (cfg.weights || {})[id] ?? 1;
   const minW = Math.min(...notes.map(n => weeks[n.id] || 99)), maxW = Math.max(...notes.map(n => weeks[n.id] || 0));
+  const draftKey = 'paper:exam:' + course.id, draft = await Learn.paperDraft(draftKey);
+  const examOpts = meta => ({ title: '模拟考试', meta, draftKey, onWrong: q => Learn.wrongHit(q.noteId, q.qi, false), onRight: q => Learn.wrongHit(q.noteId, q.qi, true) });
   modal(`<h2>模拟考试 · 按权重组卷</h2>
+    ${draft ? `<div class="card pad row" style="margin-bottom:10px"><span class="grow">上次的卷子做到一半：已答 ${draft.ans.filter(a => a !== null).length} / ${draft.qs.length}${draft.left != null ? `，还剩 ${fmtTime(draft.left / 1000)}` : ''}</span><button class="btn primary" id="me-resume">接着做</button></div>` : ''}
     <p class="hint" style="margin:0">真考试里各 topic 占分不一样。给每份笔记填一个权重（1 = 正常，2 = 考得多，0 = 不考），题目按权重分，不是平均抽。</p>
     <div class="row" style="margin-top:12px"><div class="field grow"><label for="me-from">从 Week</label><input id="me-from" type="number" min="0" value="${minW === 99 ? 1 : minW}"></div>
       <div class="field grow"><label for="me-to">到 Week</label><input id="me-to" type="number" min="0" value="${maxW || 12}"></div>
@@ -3097,6 +3189,7 @@ async function mockExamModal(course) {
       $$('[data-w]', box).forEach(inp => { const w = weeks[inp.dataset.w]; if (w && w >= 900) return; inp.value = (!w || (w >= a && w <= b)) ? (Number(inp.value) || 1) : 0; });
     };
     $('#me-from', box).onchange = applyRange; $('#me-to', box).onchange = applyRange;
+    const mr = $('#me-resume', box); if (mr) mr.onclick = () => { close(); Learn.runPaper(course, draft.qs, draft.minutes, Object.assign(examOpts('接着上次做'), { resume: draft })); };
     $('#me-go', box).onclick = async () => {
       const weights = {}; $$('[data-w]', box).forEach(i => { weights[i.dataset.w] = Number(i.value) || 0; });
       const count = Math.max(5, Math.min(60, Number($('#me-n', box).value) || 20));
@@ -3109,11 +3202,7 @@ async function mockExamModal(course) {
       try {
         const { qs, pools } = await Learn.paperFor(course, { weights, count });
         if (!qs.length) { toast('没有抽到题，把权重调回来试试'); return; }
-        Learn.runPaper(course, qs, mins, {
-          title: '模拟考试', meta: `${pools.length} 个 topic 按权重组卷`,
-          onWrong: q => Learn.wrongHit(q.noteId, q.qi, false),
-          onRight: q => Learn.wrongHit(q.noteId, q.qi, true),
-        });
+        Learn.runPaper(course, qs, mins, examOpts(`${pools.length} 个 topic 按权重组卷`));
       } catch (e) { toast(e.message, 6000); }
     };
   });
@@ -3681,18 +3770,31 @@ const Learn = (() => {
 
   /* ==================== 通用：一题一题的做题器（错题本 / 模考共用） ==================== */
   function runPaper(course, qs, minutes, opts = {}) {
-    const ans = new Array(qs.length).fill(null), L = 'ABCDEF';
-    const end = minutes ? Date.now() + minutes * 60e3 : 0;
+    // 做到一半的卷子存在本机（opts.draftKey）：离开再回来接着做，限时只算真正在做的时间
+    const key = opts.draftKey, was = opts.resume;
+    const ans = was ? was.ans.slice() : new Array(qs.length).fill(null), L = 'ABCDEF';
+    const end = minutes ? Date.now() + (was && was.left != null ? was.left : minutes * 60e3) : 0;
+    let savedAt = 0;
+    const keep = () => {
+      if (!key || ans.every(a => a === null)) return;
+      savedAt = Date.now();
+      DB.putBlob(key, { qs, ans, minutes, left: end ? Math.max(0, end - Date.now()) : null, at: savedAt }).catch(() => {});
+    };
+    if (key && !was) DB.delBlob(key).catch(() => {});
     const title = opts.title || '模拟考试';
     const onWrong = opts.onWrong || (() => {});
     const onRight = opts.onRight || (() => {});
     view.innerHTML = `<div class="head"><div><h1>${esc(title)}${course ? ' · ' + esc(course.name) : ''}</h1><div class="meta">${qs.length} 题${minutes ? ` · 限时 ${minutes} 分钟` : ' · 不限时'}${opts.meta ? ' · ' + esc(opts.meta) : ''}</div></div>
       <div class="row">${minutes ? '<span class="clock" id="ex-clock"></span>' : ''}<button class="btn primary" id="ex-submit">交卷</button></div></div>
       <div class="exam">${qs.map((q, i) => `<div class="card pad quiz" data-i="${i}"><div class="qq">${i + 1}. ${esc(q.q)} ${q.noteTitle ? `<span class="hint">· ${esc(q.noteTitle)}</span>` : ''}</div><div class="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}"><b>${L[k]}</b><span>${esc(o)}</span></button>`).join('')}</div></div>`).join('')}</div>`;
-    $$('.exam .quiz').forEach(c => $$('.opt', c).forEach(b => b.onclick = () => { ans[Number(c.dataset.i)] = Number(b.dataset.k); $$('.opt', c).forEach(x => x.classList.toggle('sel', x === b)); }));
+    $$('.exam .quiz').forEach(c => $$('.opt', c).forEach(b => {
+      if (ans[Number(c.dataset.i)] === Number(b.dataset.k)) b.classList.add('sel');
+      b.onclick = () => { ans[Number(c.dataset.i)] = Number(b.dataset.k); $$('.opt', c).forEach(x => x.classList.toggle('sel', x === b)); keep(); };
+    }));
     let tick = null;
     const submit = () => {
       if (tick) clearInterval(tick);
+      if (key) DB.delBlob(key).catch(() => {});
       const score = qs.filter((q, i) => ans[i] === q.answer).length;
       const byNote = new Map();
       qs.forEach((q, i) => {
@@ -3708,9 +3810,14 @@ const Learn = (() => {
           <div class="explain ${ans[i] === q.answer ? 'ok' : 'bad'}"><b>${ans[i] === q.answer ? '对' : ans[i] === null ? '没答' : '错'}</b> · ${esc(q.explain || '')} ${q.noteId ? `<a href="#note-${q.noteId}~points">（${esc(q.noteTitle)}）</a>` : ''}</div></div>`).join('')}</div>`;
       window.scrollTo(0, 0);
     };
-    if (minutes) tick = setInterval(() => { const c = $('#ex-clock'); if (!c) { clearInterval(tick); return; } const left = Math.max(0, end - Date.now()); c.textContent = fmtTime(left / 1000); if (!left) submit(); }, 500);
+    if (minutes) tick = setInterval(() => { const c = $('#ex-clock'); if (!c) { clearInterval(tick); return; } const left = Math.max(0, end - Date.now()); c.textContent = fmtTime(left / 1000); if (!left) submit(); else if (Date.now() - savedAt > 10000) keep(); }, 500);
     $('#ex-submit').onclick = () => { const blank = ans.filter(a => a === null).length; if (blank && !$('#ex-submit').dataset.armed) { $('#ex-submit').dataset.armed = 1; $('#ex-submit').textContent = `还有 ${blank} 题没答，再点交卷`; return; } submit(); };
   }
+
+  const paperDraft = async key => {
+    const d = await DB.getBlob(key).catch(() => null);
+    return d && Array.isArray(d.qs) && d.ans.some(a => a !== null) ? d : null;
+  };
 
   return {
     vocab, vocabPage, gradeWord, rateWord, deskWords, dueItems, vstats, addWord, screenWord,
@@ -3720,7 +3827,7 @@ const Learn = (() => {
     buildTopics,
     priority, week,
     wrongAdd, wrongList, wrongResolve, wrongHit,
-    paperFor, pickWeighted, runPaper,
+    paperFor, pickWeighted, runPaper, paperDraft,
     packPrompt, DAY, weekStart,
   };
 })();

@@ -162,29 +162,42 @@ const Sync = (() => {
   /* 每类数据：一共几条、已同步几条、没同步几条（要上传 / 要下载）
      有云端索引时按索引精确比较；还没拿到索引时按「上次同步之后改过的」估算 */
   let countTimer = null;
+  // 每条记录占多大：只在记录改过时重算，不然每次保存都要把全部笔记序列化一遍
+  const sizes = new Map();
+  const recBytes = (st, r) => {
+    const k = st + '/' + r.id, hit = sizes.get(k), u = stamp(r);
+    if (hit && hit.u === u) return hit.n;
+    let n = 0; try { n = new TextEncoder().encode(JSON.stringify(r, (key, v) => v instanceof Blob ? undefined : v)).length; } catch (e) {}
+    sizes.set(k, { u, n }); return n;
+  };
   function recount() {
     clearTimeout(countTimer);
     countTimer = setTimeout(async () => {
       const last = Number(localStorage.getItem(LAST) || 0), tb = tombs(), items = remoteItems;
-      const by = {}, sum = { total: 0, synced: 0, up: 0, down: 0, del: 0, blobs: 0, blobsLocal: 0, blobsCloud: 0 };
+      const by = {}, sum = { total: 0, synced: 0, up: 0, down: 0, del: 0, blobs: 0, blobsLocal: 0, blobsCloud: 0, bytes: 0, blobBytes: 0, upBytes: 0, downBytes: 0 };
       const haveBlobs = await DB.blobIds();
       for (const st of STORES) {
         if (st === 'blobs') continue;
         const locals = await DB.all(st), ids = new Set(locals.map(r => r.id));
-        const c = { total: 0, synced: 0, up: 0, down: 0 };
+        const c = { total: 0, synced: 0, up: 0, down: 0, bytes: 0 };
         for (const r of locals) {
           const rm = items && items[st + '/' + r.id];
           const needUp = items ? (!rm || rm.u < stamp(r)) : stamp(r) > last;
           const needDown = !!(items && rm && !rm.d && rm.u > stamp(r));
           c.total++; if (needUp) c.up++; else if (needDown) c.down++; else c.synced++;
-          if (st === 'files') { sum.blobs++; if (haveBlobs.has(r.id)) sum.blobsLocal++; if (rm && rm.b) sum.blobsCloud++; }
+          const own = recBytes(st, r), blob = st === 'files' && r.hasBlob ? (r.size || 0) : 0, here = st === 'files' && haveBlobs.has(r.id);
+          c.bytes += own + blob; sum.blobBytes += blob;
+          if (needUp) sum.upBytes += own;
+          if (blob && here && !(rm && rm.b)) sum.upBytes += blob;
+          if (blob && !here && rm && rm.b) sum.downBytes += blob;
+          if (st === 'files') { sum.blobs++; if (here) sum.blobsLocal++; if (rm && rm.b) sum.blobsCloud++; }
         }
         if (items) for (const [key, rm] of Object.entries(items)) {
           if (!key.startsWith(st + '/') || rm.d) continue;
           const id = key.slice(st.length + 1);
           if (!ids.has(id) && !tb[key]) { c.total++; c.down++; }
         }
-        by[st] = c; sum.total += c.total; sum.synced += c.synced; sum.up += c.up; sum.down += c.down;
+        by[st] = c; sum.total += c.total; sum.synced += c.synced; sum.up += c.up; sum.down += c.down; sum.bytes += c.bytes;
       }
       sum.del = Object.keys(tb).length;
       counts = { by, ...sum, exact: !!items };

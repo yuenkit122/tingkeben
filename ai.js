@@ -573,19 +573,31 @@ ${sources ? `\n<课件原文${markdown ? '（节选）' : ''}>\n${sources}\n</�
   async function studyPack({ title, markdown, sources, signal, onText, parts = ['points', 'quiz'], points: known }) {
     let j;
     const want = Object.keys(STUDY_PARTS).filter(k => parts.includes(k));
-    const maxTokens = 2000 + want.reduce((n, k) => n + ({ points: 4500, quiz: 6000 })[k], 0);
+    const maxTokens = 2000 + want.reduce((n, k) => n + ({ points: 4500, quiz: 8000 })[k], 0);
     for (let attempt = 0; ; attempt++) {
       const text = await deepseekStream({ system: STUDY_SYSTEM, user: studyPrompt({ title, markdown, sources, parts: want, points: known }), signal, onText, thinking: false, json: true, maxTokens, purpose: 'study' });
-      try { j = parseJSON(text); break; } catch (e) { if (attempt >= 1) throw e; } // 偶尔格式坏掉，自动再来一次
+      let out;
+      try { j = parseJSON(text); out = studyOut(j, want, known); } catch (e) { if (attempt >= 1) throw e; continue; } // 偶尔格式坏掉，自动再来一次
+      const empty = want.filter(k => !out[k].length);
+      if (!empty.length) return out;
+      if (attempt >= 1) throw new AIError(`AI 没给出${empty.map(k => STUDY_PARTS[k].name).join('、')}`, 0); // 格式对但内容是空的，也算没成功
     }
+  }
+  // 模型有时把答案写成字母 "B"，当成数字就成了 0，判分全错
+  const answerIndex = (a, n) => {
+    const m = /^\s*([A-Fa-f])\b/.exec(String(a));
+    const k = m ? m[1].toUpperCase().charCodeAt(0) - 65 : Number(a);
+    return Number.isInteger(k) && k >= 0 && k < n ? k : -1;
+  };
+  function studyOut(j, want, known) {
     const out = { at: Date.now() };
     let points = known || [];
     if (want.includes('points')) points = out.points = (j.points || []).filter(p => p && p.title).map((p, i) => ({ id: String(p.id || 'p' + (i + 1)), title: String(p.title), items: (Array.isArray(p.items) ? p.items : [p.detail]).filter(Boolean).map(String), page: String(p.page || '') }));
     const ids = new Set(points.map(p => p.id));
     const fix = id => ids.has(String(id)) ? String(id) : '';
-    if (want.includes('quiz')) out.quiz = (j.quiz || []).filter(q => q && q.q && Array.isArray(q.options) && q.options.length >= 2).map(q => {
+    if (want.includes('quiz')) out.quiz = (j.quiz || []).filter(q => q && q.q && Array.isArray(q.options) && q.options.length >= 2 && answerIndex(q.answer, q.options.length) >= 0).map(q => {
       // 打乱选项顺序（模型爱把正确答案放在 B）；去掉选项开头自带的 "A." 之类
-      const ans = Math.max(0, Math.min(q.options.length - 1, Number(q.answer) || 0));
+      const ans = answerIndex(q.answer, q.options.length);
       const opts = q.options.map((o, k) => ({ t: String(o).replace(/^\s*[A-F][.、)．]\s*/, ''), ok: k === ans })).sort(() => Math.random() - .5);
       return { q: String(q.q), options: opts.map(o => o.t), answer: opts.findIndex(o => o.ok), explain: String(q.explain || ''), point: fix(q.point) };
     });

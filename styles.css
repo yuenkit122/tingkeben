@@ -232,8 +232,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 .captions { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; min-height: 40vh; max-height: calc(100vh - 300px); overflow-y: auto; scroll-behavior: smooth; }
 @media (max-width: 760px) { .captions { max-height: calc(100vh - 340px); } }
-.cap { display: grid; grid-template-columns: 52px 1fr; gap: 12px; padding: 10px 18px; border-left: 3px solid transparent; }
-.cap .ts { font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: .35em; font-variant-numeric: tabular-nums; }
+.cap { display: grid; grid-template-columns: minmax(52px, max-content) minmax(0, 1fr); gap: 12px; padding: 10px 18px; border-left: 3px solid transparent; }
+.cap .ts { white-space: nowrap; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: .35em; font-variant-numeric: tabular-nums; }
 .cap .zh { font-size: var(--cap, 20px); line-height: 1.55; font-weight: 500; }
 .cap .en { font-size: calc(var(--cap, 20px) * .72); line-height: 1.5; color: var(--muted); margin-top: 2px; }
 .cap.important { background: color-mix(in srgb, var(--marker-soft) 55%, var(--sheet)); border-left-color: var(--marker); border-left-width: 4px; }
@@ -477,7 +477,7 @@ body.desk-mode .wrap { max-width: none; gap: 0; }
 .recbtn.small { width: 38px; height: 38px; } .recbtn.small svg { width: 18px; height: 18px; }
 .dk-live-top .clock { font-size: 17px; }
 .dk-caps { flex: 1; min-height: 0; max-height: none !important; }
-.dk-caps .cap { grid-template-columns: 40px 1fr; padding: 8px 6px; gap: 8px; }
+.dk-caps .cap { grid-template-columns: minmax(40px, max-content) minmax(0, 1fr); padding: 8px 6px; gap: 8px; }
 #dk-right .interim { padding: 6px; }
 #dk-right .jump { position: sticky; bottom: 6px; align-self: center; }
 
@@ -553,6 +553,13 @@ pre.cors { font-family: var(--mono); font-size: 12px; white-space: pre; overflow
 /* ---------- 进度条 ---------- */
 .prog { border: 1px solid var(--line); background: var(--sheet); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .prog-top { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.prog-ring { position: relative; flex: none; width: 34px; height: 34px; display: inline-grid; place-items: center; }
+.prog-ring svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.prog-ring circle { fill: none; stroke-width: 3.5; }
+.prog-ring .bg { stroke: var(--line); }
+.prog-ring .fg { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .4s ease; }
+.prog-ring em { font-style: normal; font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ink); }
+.prog-top b { min-width: 0; }
 .prog-n { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .prog-bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; position: relative; }
 .prog-bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; transition: width .4s ease; position: relative; overflow: hidden; }
@@ -564,7 +571,7 @@ pre.cors { font-family: var(--mono); font-size: 12px; white-space: pre; overflow
 .job-tray .prog { box-shadow: 0 6px 24px rgba(0,0,0,.14); padding: 10px 12px; gap: 6px; }
 .job-tray .prog-top b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 @media (max-width: 760px) { .job-tray { bottom: calc(80px + env(safe-area-inset-bottom)); } }
-@media (prefers-reduced-motion: reduce) { .prog-bar i::after { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .prog-bar i::after { animation: none; } .prog-bar i, .prog-ring .fg { transition: none; } }
 
 .cap.flash-hit { animation: hit 1.6s ease; }
 @keyframes hit { 0%, 60% { background: var(--marker); } 100% { background: transparent; } }
@@ -757,8 +764,8 @@ html.is-touch .dk-fab { width: 64px; height: 64px; font-size: 16px; right: 24px;
 .rc-st { min-height: 0; margin: 10px 0 0; transition: opacity .2s var(--ease); }
 
 /* ---------- 课件标注 ---------- */
-.pdfpage canvas.docink { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; touch-action: pan-x pan-y pinch-zoom; }
-.pdfpage.inking canvas.docink { cursor: crosshair; }
+.pdfpage canvas.docink, .docpage canvas.docink { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; touch-action: pan-x pan-y pinch-zoom; }
+.pdfpage.inking canvas.docink, .docpage.inking canvas.docink { cursor: crosshair; }
 .doc-inkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0 8px; }
 .doc-inkbar[hidden] { display: none; }
 .doc-inkbar .colors button { width: 34px; padding: 0; display: grid; place-items: center; }
@@ -1880,7 +1887,11 @@ html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
 .pair-ex .md li { margin: 3px 0; }
 .pair-ex .md strong { color: var(--ink); }
 /* 工作台中栏标签条右边的「课后优化笔记」 */
-#dk-mtabs .dk-enhance { margin-left: auto; flex: none; white-space: nowrap; }
+/* 标签自己横向滚动，AI 按钮永远露在外面；放不下就换到第二行，不会被挤出栏外 */
+#dk-mtabs { flex-wrap: wrap; overflow: visible; row-gap: 0; }
+#dk-mtabs .dk-tablist { display: flex; gap: 4px; flex: 1 1 200px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+#dk-mtabs .dk-tablist::-webkit-scrollbar { width: 0; height: 0; }
+#dk-mtabs .dk-enhance { margin-left: auto; flex: none; white-space: nowrap; padding: 3px 0; }
 
 /* ---------- 全局导航：返回 + 主页，每页同一个位置 ---------- */
 .gnav { display: flex; gap: 6px; align-items: center; margin: 0 0 12px; }

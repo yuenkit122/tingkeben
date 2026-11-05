@@ -45,12 +45,17 @@ const Device = (() => {
    手掌先放上去、笔后落下的情况也算：笔一落下，之前按着的手指全部作废（画布会收到 tk:pendown，把它们清掉）。
    保险：笔的抬起事件丢了也不会一直锁着（4 秒没有笔的动静就自动解锁）。
    换笔画的间隙：抬笔 0.4 秒内手指不会点中按钮（手掌抬起落下碰不到工具栏），滑动不受影响。
-   笔本身也管：屏幕上有笔记区时，笔只在笔记区里写，碰到工具栏、侧栏都不算点击（要切工具用手指；输入框和弹窗不受影响）。
+   笔本身（跟 GoodNotes / Notability 一样）：在笔记区里只写字；在笔记区外就是普通的点按，工具栏、侧栏、列表都能点，也能拖动滚动。
+   只有两种情况不算点击：笔在按钮上划过去（不是点），或者写字时抬笔 0.2 秒内落到笔记区外（写快了划出界，不是想点）。
+   手掌压在屏幕上时 iOS 可能不合成 click，所以笔点按钮后 0.12 秒没等到 click 就自己补一个（只补一次）。
    笔停顿时 iOS 会当成长按选字，取消这一笔再选中最近的文字（比如工具栏的「更多」），所以笔的触摸和选字都要拦。 */
 const PenGuard = (() => {
-  const HOLD = 120, OFF_HOLD = 400, PALM_HOLD = 1500;
-  const WRITE = '.ic-stage, .pdfpage', FREE = 'input, textarea, select, .modal', CONTROL = 'button, a, summary, label, [role="button"]';
-  let penDown = false, lastPen = 0, seen = false, lastBlockedUp = 0, offPen = null, lastOffPen = 0;
+  const HOLD = 120, OFF_HOLD = 400, PALM_HOLD = 1500, STRAY_GAP = 200, TAP_SLOP = 12, TAP_WAIT = 120, CLICK_WINDOW = 450;
+  const WRITE = '.ic-stage, .pdfpage, .docpage', FREE = 'input, textarea, select, .modal', CONTROL = 'button, a, summary, label, [role="button"]';
+  let penDown = false, lastPen = 0, seen = false, lastBlockedUp = 0;
+  let penInk = false;                                  // 最近这一笔落在笔记区里（写字），不是点按
+  let offTap = null, lastStray = 0;                    // 笔在笔记区外的这一下；最近一次不算点击的时间
+  let lastPenTap = 0, tapClicked = false, tapFilled = false, filling = false, tapTimer = 0;
   const live = new Set(), blocked = new Set();
   const now = () => Date.now();
   const active = () => (penDown && now() - lastPen < 4000) || now() - lastPen < HOLD;
@@ -64,16 +69,32 @@ const PenGuard = (() => {
   };
   const elOf = t => (t && t.nodeType === 1 ? t : t && t.parentElement) || null;
   const editable = t => { const el = elOf(t); return !!el && (el.isContentEditable || !!el.closest(FREE)); };
-  const writing = () => [...document.querySelectorAll(WRITE)].some(el => el.getClientRects().length > 0);
   const inWrite = t => { const el = elOf(t); return !!el && !!el.closest(WRITE); };
-  const penOff = t => !inWrite(t) && !editable(t) && writing();
-  const touchOff = t => { const el = elOf(t); return recent(OFF_HOLD) && !!el && !!el.closest(CONTROL) && penOff(t); };
+  const onInk = t => inWrite(t) && !editable(t);
+  const inkActive = () => penInk && active();
+  const touchOff = t => { const el = elOf(t); return penInk && recent(OFF_HOLD) && !!el && !!el.closest(CONTROL) && !inWrite(t) && !editable(t); };
+  // 笔点完按钮：等浏览器的 click，等不到就补一个
+  const penTapped = el => {
+    lastPenTap = now(); tapClicked = false; tapFilled = false;
+    const c = elOf(el) && elOf(el).closest(CONTROL);
+    clearTimeout(tapTimer);
+    if (!c) return;
+    tapTimer = setTimeout(() => {
+      if (tapClicked || !c.isConnected) return;
+      tapFilled = true; filling = true;
+      try { c.click(); } finally { filling = false; }
+    }, TAP_WAIT);
+  };
   document.addEventListener('pointerdown', e => {
     if (e.pointerType === 'pen') {
+      const off = !inWrite(e.target) && !editable(e.target);
+      const stray = off && penInk && now() - lastPen < STRAY_GAP;
       pen(e); penDown = true;
+      if (!stray) penInk = onInk(e.target);
       if (live.size) { live.forEach(id => blocked.add(id)); live.clear(); }
       window.dispatchEvent(new Event('tk:pendown'));
-      if (penOff(e.target)) { offPen = e.pointerId; lastOffPen = now(); kill(e); }
+      offTap = off ? { id: e.pointerId, x: e.clientX, y: e.clientY, el: e.target, stray } : null;
+      if (stray) kill(e);
       return;
     }
     if (e.pointerType !== 'touch') return;
@@ -88,7 +109,11 @@ const PenGuard = (() => {
   const up = e => {
     if (e.pointerType === 'pen') {
       penDown = false; lastPen = now();
-      if (e.pointerId === offPen) { offPen = null; lastOffPen = now(); kill(e); }
+      if (offTap && e.pointerId === offTap.id) {
+        const t = offTap; offTap = null;
+        if (t.stray || Math.hypot(e.clientX - t.x, e.clientY - t.y) > TAP_SLOP) { lastStray = now(); if (t.stray) kill(e); }
+        else if (e.type === 'pointerup') penTapped(t.el);
+      }
       return;
     }
     if (e.pointerType !== 'touch') return;
@@ -99,15 +124,19 @@ const PenGuard = (() => {
   document.addEventListener('pointercancel', up, true);
   // 被作废的触摸，浏览器随后还会补一个 click：一起拦掉
   document.addEventListener('click', e => {
-    if (now() - lastBlockedUp < 450 && e.pointerType !== 'pen' && e.pointerType !== 'mouse') kill(e);
-    else if (now() - lastOffPen < 450 || (e.pointerType === 'pen' && penOff(e.target))) kill(e);
+    if (filling) return;
+    if (now() - lastStray < CLICK_WINDOW) { kill(e); return; }
+    // 笔点的这一下：手掌同时抬起也不影响；已经补过就不再算第二次
+    if (now() - lastPenTap < CLICK_WINDOW && e.pointerType !== 'touch') { if (tapFilled) kill(e); else tapClicked = true; return; }
+    if (now() - lastBlockedUp < CLICK_WINDOW && e.pointerType !== 'pen' && e.pointerType !== 'mouse') kill(e);
   }, true);
   // 触摸事件这一层也要拦：取消滚动、取消 iOS 自己合成的点击
   const direct = t => t.touchType !== 'stylus';
   const tstart = new Set();
-  // 笔的触摸取消默认动作：iOS 就不会把它当长按选字 / 随手写，这一笔不会被中途掐断（pointer 事件照常来）
+  // 笔记区里笔的触摸取消默认动作：iOS 就不会把它当长按选字 / 随手写，这一笔不会被中途掐断（pointer 事件照常来）。
+  // 笔记区外不取消，不然浏览器不合成 click，笔就点不了按钮了
   const holdPen = e => {
-    if (e.cancelable && [...e.changedTouches].some(t => !direct(t)) && !editable(e.target) && (inWrite(e.target) || writing())) e.preventDefault();
+    if (e.cancelable && [...e.changedTouches].some(t => !direct(t)) && onInk(e.target)) e.preventDefault();
   };
   document.addEventListener('touchstart', e => {
     const stylus = [...e.touches].some(t => !direct(t));
@@ -133,13 +162,13 @@ const PenGuard = (() => {
   document.addEventListener('touchend', tend, { capture: true, passive: false });
   document.addEventListener('touchcancel', e => { penLift(e); for (const t of e.changedTouches) tstart.delete(t.identifier); }, true);
   // 兜底：写字时不许起选区、不弹长按菜单；已经选上的（不在输入框里）立刻清掉
-  const noSelect = e => { if (active() && !editable(e.target) && writing()) e.preventDefault(); };
+  const noSelect = e => { if (inkActive() && !editable(e.target)) e.preventDefault(); };
   document.addEventListener('selectstart', noSelect, true);
   document.addEventListener('contextmenu', noSelect, true);
   document.addEventListener('selectionchange', () => {
-    if (!active()) return;
+    if (!inkActive()) return;
     const sel = document.getSelection();
-    if (sel && !sel.isCollapsed && !editable(sel.anchorNode) && !editable(document.activeElement) && writing()) sel.removeAllRanges();
+    if (sel && !sel.isCollapsed && !editable(sel.anchorNode) && !editable(document.activeElement)) sel.removeAllRanges();
   });
   return { active, recent, seen: () => seen };
 })();
