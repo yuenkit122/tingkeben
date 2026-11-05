@@ -871,6 +871,7 @@ const Board = (() => {
       stage.classList.toggle('mode-ink', draw);
       stage.classList.toggle('mode-text', P.tool === 'text');
       stage.style.cursor = P.tool === 'hand' ? 'grab' : draw ? 'crosshair' : P.tool === 'text' ? 'text' : 'default';
+      window.dispatchEvent(new Event('tk:tool'));
       $$('[data-nbold]', host).forEach(b => b.classList.toggle('on', NS.bold));
       $$('[data-ncolor]', host).forEach(b => { b.classList.toggle('on', b.dataset.ncolor === NS.ink); b.style.setProperty('--sw', shown(b.dataset.ncolor)); });
       $$('[data-color]', host).forEach(b => b.style.setProperty('--sw', shown(b.dataset.color)));
@@ -879,6 +880,15 @@ const Board = (() => {
       host.style.setProperty('--note-ink', shown(NS.ink));
     };
     let prevTool = 'pen';
+    // 课件上的手写和这里用同一份工具：工具栏显示着的时候，以它为准
+    window.TkBoard = {
+      host, get tool() { return P.tool; }, get color() { return P.color; }, get size() { return P.size; },
+      set(patch) {
+        if (patch.color) P.color = patch.color;
+        if (patch.tool) { if (patch.tool === 'pen' || patch.tool === 'hl') prevTool = patch.tool; P.tool = patch.tool; }
+        savePref({ tool: P.tool, color: P.color }); syncTools();
+      },
+    };
     $$('[data-tool]', host).forEach(b => b.onclick = () => {
       const t = b.dataset.tool;
       if (t === 'select' || t === 'hand' || t === 'text') { P.tool = t; savePref({ tool: t }); syncTools(); return; }
@@ -2314,11 +2324,20 @@ const DocInk = (() => {
   const pref = () => { try { return Object.assign({ tool: 'pen', color: Board.INK[2], size: 3 }, JSON.parse(localStorage.getItem('tingkeben.docink') || '{}')); } catch (e) { return { tool: 'pen', color: '#C0392B', size: 3 }; } };
   const savePref = p => { try { localStorage.setItem('tingkeben.docink', JSON.stringify(Object.assign(pref(), p))); } catch (e) {} };
 
+  // 画板工具栏显示着的时候，课件跟它用同一个工具（不然点了橡皮，课件上还在写字）
+  const liveBoard = () => { const b = window.TkBoard; return b && b.host.isConnected && b.host.getClientRects().length ? b : null; };
+  const NO_INK = { select: '选择', hand: '手', text: '文字' };
+  const passing = () => { const b = liveBoard(); return !!b && !!NO_INK[b.tool]; };
+  window.TkInkPass = passing;   // 防误触那边要知道：这时候笔不是在写字，别拦它滚动和选字
+  let hinted = 0;
+  const hint = () => { if (Date.now() - hinted < 20000) return; hinted = Date.now(); toast(`现在是「${NO_INK[liveBoard().tool]}」工具，要在课件上写字先点工具栏的笔`, 3000); };
+
   // 一份课件一个控制器：管工具、撤销、保存
   function controller(f) {
     f.ink = f.ink || {};
     const P = pref(), undo = [], layers = new Map();
     let on = false, save = null, penDown = false;
+    const tool = () => liveBoard() || P;
     const persist = () => { clearTimeout(save); save = setTimeout(async () => { const full = await DB.get('files', f.id); if (!full) return; full.ink = f.ink; await DB.put('files', full); }, 800); };
     const paint = (L) => {
       const ctx = L.c.getContext('2d'); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, L.c.width, L.c.height);
@@ -2335,15 +2354,17 @@ const DocInk = (() => {
       const pos = e => { const r = c.getBoundingClientRect(); const k = W / r.width; return [Math.round((e.clientX - r.left) * k * 10) / 10, Math.round((e.clientY - r.top) * k * 10) / 10, e.pointerType === 'pen' ? (e.pressure || .5) : .5]; };
       // Apple Pencil 不管开没开标注都能写（像在纸上一样）；鼠标要先打开「标注」；手指永远是滚动
       const allowed = e => e.pointerType === 'pen' ? true : e.pointerType === 'touch' ? false : on && e.button === 0;
-      pageEl.addEventListener('touchstart', e => { if ([...e.touches].some(t => t.touchType === 'stylus')) e.preventDefault(); }, { passive: false });
-      pageEl.addEventListener('touchmove', e => { if ([...e.touches].some(t => t.touchType === 'stylus')) e.preventDefault(); }, { passive: false });
+      pageEl.addEventListener('touchstart', e => { if (!passing() && [...e.touches].some(t => t.touchType === 'stylus')) e.preventDefault(); }, { passive: false });
+      pageEl.addEventListener('touchmove', e => { if (!passing() && [...e.touches].some(t => t.touchType === 'stylus')) e.preventDefault(); }, { passive: false });
       pageEl.addEventListener('pointerdown', e => {
         if (!allowed(e)) return;
+        if (passing()) { hint(); return; }
         if (e.pointerType === 'pen') penDown = true;
         e.preventDefault(); try { pageEl.setPointerCapture(e.pointerId); } catch (err) {}
         const pt = pos(e);
-        if (P.tool === 'er') { cur = { er: true, id: e.pointerId, removed: [] }; erase(L, pt, cur); return; }
-        cur = { id: e.pointerId, s: { tool: P.tool, c: P.tool === 'hl' ? '#FFD400' : P.color, w: P.tool === 'hl' ? 22 : P.size, pts: [pt] } };
+        const T = tool();
+        if (T.tool === 'er') { cur = { er: true, id: e.pointerId, removed: [] }; erase(L, pt, cur); return; }
+        cur = { id: e.pointerId, s: { tool: T.tool, c: T.tool === 'hl' ? '#FFD400' : T.color, w: T.tool === 'hl' ? 22 : T.size, pts: [pt] } };
       });
       pageEl.addEventListener('pointermove', e => {
         if (!cur || e.pointerId !== cur.id) return;
@@ -2384,9 +2405,9 @@ const DocInk = (() => {
     return {
       attach, resize: () => layers.forEach(size),
       get on() { return on; },
-      setOn(v) { on = v; layers.forEach(L => { L.c.style.pointerEvents = v ? 'auto' : ''; L.el.classList.toggle('inking', v); }); },
-      tool: () => P,
-      setTool(patch) { Object.assign(P, patch); savePref(patch); },
+      setOn(v) { on = v; if (v && passing()) liveBoard().set({ tool: 'pen' }); layers.forEach(L => { L.c.style.pointerEvents = v ? 'auto' : ''; L.el.classList.toggle('inking', v); }); },
+      tool,
+      setTool(patch) { const b = liveBoard(); if (b) b.set(patch); else { Object.assign(P, patch); savePref(patch); } },
       undo() { const a = undo.pop(); if (!a) { toast('没有可以撤销的'); return; } if (a.add) f.ink[a.p] = (f.ink[a.p] || []).filter(x => x !== a.add); else (f.ink[a.p] = f.ink[a.p] || []).push(...a.er); const L = layers.get(a.p); if (L) paint(L); persist(); },
       clearPage(p) { const had = f.ink[p] || []; if (!had.length) return false; undo.push({ p, er: had }); f.ink[p] = []; const L = layers.get(p); if (L) paint(L); persist(); return true; },
       count: () => Object.values(f.ink).reduce((a, l) => a + l.length, 0),
@@ -2474,6 +2495,8 @@ function mountDocViewer(host, f, { onPage, note, course } = {}) {
         $$('[data-ic]', bar).forEach(b => b.classList.toggle('on', b.dataset.ic === T.color));
       };
       ib.onclick = () => { ink.setOn(!ink.on); syncBar(); };
+      const onTool = () => { if (!host.isConnected || !bar.isConnected) { window.removeEventListener('tk:tool', onTool); return; } syncBar(); };
+      window.addEventListener('tk:tool', onTool);
       $$('[data-it]', bar).forEach(b => b.onclick = () => { const T = ink.tool(); ink.setTool({ tool: b.dataset.it === T.tool && b.dataset.it !== 'er' ? 'er' : b.dataset.it }); syncBar(); });
       $$('[data-ic]', bar).forEach(b => b.onclick = () => { ink.setTool({ color: b.dataset.ic, tool: ink.tool().tool === 'er' ? 'pen' : ink.tool().tool }); syncBar(); });
       $('[data-ia=undo]', bar).onclick = () => ink.undo();

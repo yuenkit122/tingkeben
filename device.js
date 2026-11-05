@@ -70,7 +70,9 @@ const PenGuard = (() => {
   const elOf = t => (t && t.nodeType === 1 ? t : t && t.parentElement) || null;
   const editable = t => { const el = elOf(t); return !!el && (el.isContentEditable || !!el.closest(FREE)); };
   const inWrite = t => { const el = elOf(t); return !!el && !!el.closest(WRITE); };
-  const onInk = t => inWrite(t) && !editable(t);
+  // 课件页上选了手 / 选择 / 文字：笔不写字，要让它能滚动、选字
+  const docPass = t => { const el = elOf(t); return !!el && !!el.closest('.pdfpage, .docpage') && typeof window.TkInkPass === 'function' && window.TkInkPass(); };
+  const onInk = t => inWrite(t) && !editable(t) && !docPass(t);
   const inkActive = () => penInk && active();
   const touchOff = t => { const el = elOf(t); return penInk && recent(OFF_HOLD) && !!el && !!el.closest(CONTROL) && !inWrite(t) && !editable(t); };
   // 笔点完按钮：等浏览器的 click，等不到就补一个
