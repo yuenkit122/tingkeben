@@ -2775,7 +2775,7 @@ function cloudLoginModal(after) {
     pw.onkeydown = e => { if (e.key === 'Enter') go(); };
   });
 }
-const DEFAULT_CLOUD = 'https://tingkeben-cloud.yuenkit122.workers.dev';
+const DEFAULT_CLOUD = ''; // 不预填任何人的云服务：每个人用自己建的
 
 function bindR2() {
   const cl = $('#cl-login'); if (cl) cl.onclick = () => cloudLoginModal(renderSettings);
