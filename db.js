@@ -175,7 +175,7 @@ const Settings = (() => {
     liveEnglishOnly: true, // 默认只转写英文：录音的用途是课后整理笔记，中文实时翻译有自己的软件
     micId: '',
     r2Account: '', r2KeyId: '', r2Secret: '', r2Bucket: 'tingkeben',
-    cloudUrl: '', cloudToken: '',
+    cloudUrl: '', cloudToken: '', cloudUser: '', cloudRole: '',
     captionView: 'both',
     captionSize: 20,
   };

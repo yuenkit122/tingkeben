@@ -430,15 +430,21 @@ const Sync = (() => {
 
   /* ---------- 听课本云服务：密码登录 + 云端保管 API key ---------- */
   const VAULT_KEYS = ['geminiKey', 'deepseekKey', 'groqKey', 'cerebrasKey', 'mistralKey', 'deepseekModel', 'groqModel', 'groqModel2', 'liveLanguage', 'liveMode', 'translatePace', 'draftMode', 'translateProvider', 'poolFallback', 'maxWaitSec', 'dsPriceIn', 'dsPriceHit', 'dsPriceOut'];
-  async function login(url, password) {
+  /* 账号：云服务的主人只用密码；朋友用邀请码注册自己的用户名和密码，数据各存各的 */
+  const login = (url, password, name) => enter(url, '/login', { password, name: String(name || '').trim().toLowerCase() });
+  const register = (url, invite, name, password) => enter(url, '/register', { invite: String(invite || '').trim(), name: String(name || '').trim().toLowerCase(), password });
+  async function enter(url, path, payload) {
     url = String(url || '').trim().replace(/\/+$/, '');
     if (!/^https:\/\//.test(url) && !/^http:\/\/localhost/.test(url)) throw new Error('云服务网址要以 https:// 开头');
     let r;
-    try { r = await fetch(url + '/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }); }
-    catch (e) { throw new Error('连不上这个网址。检查网址有没有抄错，Worker 有没有部署。'); }
+    try { r = await fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); }
+    catch (e) { throw new Error('连不上这个网址。检查网络，或者网址有没有抄错。'); }
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || ('登录失败 ' + r.status));
-    Settings.save({ cloudUrl: url, cloudToken: j.token });
+    if (!r.ok) throw new Error(path === '/register' && r.status === 404 ? '这个云服务还是旧版，不支持邀请码注册（要先升级 Worker）' : j.error || ('登录失败 ' + r.status));
+    // 换了账号：把上一个账号的同步进度清掉，不然会以为「云端都有了」而漏传
+    const old = Settings.load();
+    if (old.cloudUrl && (old.cloudUrl !== url || (old.cloudUser || '') !== (j.name || ''))) { localStorage.removeItem(LAST); }
+    Settings.save({ cloudUrl: url, cloudToken: j.token, cloudUser: j.name || '', cloudRole: j.role || '' });
     // 云端有保管的 key 就拿下来；没有就把本机的存上去
     const v = await getJSON('tingkeben/vault.json');
     if (v && v.settings) { const patch = {}; VAULT_KEYS.forEach(k => { if (v.settings[k] !== undefined && v.settings[k] !== '') patch[k] = v.settings[k]; }); vaultMute = true; Settings.save(patch); vaultMute = false; }
@@ -446,8 +452,22 @@ const Sync = (() => {
     emit(); started = false; start(); syncNow({ silent: true });
     return { pulled: !!(v && v.settings) };
   }
+  /* 云服务的其他接口：/me（用量）、/password、/admin/…（主人发邀请码、管账号） */
+  async function api(path, method = 'GET', body) {
+    const c = cloud(); if (!c) throw new Error('还没登录云服务');
+    let r;
+    try { r = await fetch(c.url + path, { method, headers: Object.assign({ Authorization: 'Bearer ' + c.token }, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined }); }
+    catch (e) { throw new Error('连不上听课本云服务，检查网络。'); }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 404) throw new Error('这个云服务还是旧版，没有这个功能（按「云服务说明」升级 Worker 就有了）');
+    if (!r.ok) throw new Error(j.error || ('云服务出错 ' + r.status));
+    return j;
+  }
+  const account = () => { const s = Settings.load(); return { user: s.cloudUser || '', role: s.cloudRole || '', url: s.cloudUrl || '' }; };
+  async function me(fresh) { const j = await api('/me' + (fresh ? '?fresh=1' : '')); if (j.role && j.role !== Settings.load().cloudRole) Settings.save({ cloudRole: j.role, cloudUser: j.name || '' }); return j; }
+  async function changePassword(old, password) { const j = await api('/password', 'POST', { old, password }); Settings.save({ cloudToken: j.token }); return true; }
   function logout(clearKeys) {
-    const patch = { cloudToken: '' };
+    const patch = { cloudToken: '', cloudRole: '' };
     if (clearKeys) VAULT_KEYS.forEach(k => { if (/Key$/.test(k)) patch[k] = ''; });
     Settings.save(patch); started = false; emit();
   }
@@ -487,5 +507,5 @@ const Sync = (() => {
 
   const CORS = (origin) => JSON.stringify([{ AllowedOrigins: [origin, 'https://yuenkit122.github.io', 'http://localhost:8765'].filter((v, i, a) => a.indexOf(v) === i), AllowedMethods: ['GET', 'PUT', 'DELETE', 'HEAD'], AllowedHeaders: ['*'], ExposeHeaders: ['ETag'], MaxAgeSeconds: 3600 }], null, 2);
 
-  return { auto, setAuto, recount, peek, login, logout, onSettings, pushVault, mode, syncNow, schedule, tomb, ready, status, listeners, ensureBlob, downloadAll, test, exportSettings, importSettings, start, CORS, signed, STORES };
+  return { auto, setAuto, recount, peek, login, register, api, account, me, changePassword, logout, onSettings, pushVault, mode, syncNow, schedule, tomb, ready, status, listeners, ensureBlob, downloadAll, test, exportSettings, importSettings, start, CORS, signed, STORES };
 })();

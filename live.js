@@ -54,11 +54,14 @@ registerProcessor('pcm16', PCM16);
 function liveEnglishOnly() { try { return Settings.load().liveEnglishOnly !== false; } catch (e) { return true; } }
 
 class AudioCapture {
-  constructor(onChunk) { this.onChunk = onChunk; }
+  constructor(onChunk, onLost) { this.onChunk = onChunk; this.onLost = onLost; }
   async start() {
+    this.stopped = false;
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: Object.assign({ channelCount: 1, echoCancellation: false, noiseSuppression: !Settings.load().micRaw, autoGainControl: true }, Settings.load().micId ? { deviceId: { ideal: Settings.load().micId } } : {}),
     });
+    // 麦克风中途没了（AirPods 断开、拔掉耳机、系统换了输入设备）：以前没人知道，界面还显示在录，其实后面全是空的
+    this.stream.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (!this.stopped && this.onLost) this.onLost(); }));
     const Ctx = window.AudioContext || window.webkitAudioContext;
     this.ctx = new Ctx();
     if (this.ctx.state === 'suspended') await this.ctx.resume();
@@ -90,7 +93,10 @@ class AudioCapture {
       this.src.connect(this.node); this.node.connect(this.ctx.destination);
     }
   }
+  /* 切到别的 App 再回来、来电话之后，音频可能被系统暂停：回来时接着跑 */
+  wake() { try { if (this.ctx && this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume(); } catch (e) {} }
   stop() {
+    this.stopped = true;
     try { this.src && this.src.disconnect(); } catch (e) {}
     try { this.node && this.node.disconnect(); } catch (e) {}
     try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
@@ -120,7 +126,24 @@ class LiveTranscriber {
     if (this.vocab && this.vocab.length) cfg.customVocabulary = this.vocab.slice(0, 100);
     return { setup: { model: 'models/' + s.liveModel, generationConfig: { responseModalities: ['TEXT'] }, inputAudioTranscription: cfg } };
   }
-  start() { this.stopping = false; this.open(false); }
+  start() {
+    this.stopping = false; this.open(false);
+    // 网络回来了就马上连，不等下一次定时重试
+    this._online = () => { if (!this.stopping && !this.ws) { clearTimeout(this.retryTimer); this.open(false); } };
+    window.addEventListener('online', this._online);
+  }
+  /* 连接看着还在、其实已经不通了（合盖再打开、换了 Wi-Fi）：不等它自己报断开，直接换一条新的 */
+  kick() {
+    if (this.stopping) return;
+    const old = this.ws;
+    if (old) { old._retired = true; try { old.close(); } catch (e) {} }
+    this.ws = null;
+    clearTimeout(this.retryTimer);
+    this.onStatus && this.onStatus('reconnecting');
+    this.open(false);
+  }
+  stalled() { const ws = this.ws; return !!(ws && ws.readyState === 1 && ws.bufferedAmount > 2000000); }
+  ready() { const ws = this.ws; return !!(ws && ws._ready && ws.readyState === 1); }
 
   open(isRotation) {
     const ws = new WebSocket(this.url());
@@ -156,7 +179,11 @@ class LiveTranscriber {
     ws.onerror = () => { /* 细节在 onclose 里 */ };
     ws.onclose = ev => {
       if (ws._retired || this.stopping) return;
-      if (ws === this.pending) this.pending = null;
+      if (ws === this.pending) {
+        this.pending = null;
+        // 换线没换成：旧连接还在用，过几秒再换一次。以前这里就不再试了，旧连接到 10 分钟被服务器掐掉，中间会漏一小段
+        if (this.ws && this.ws !== ws) { clearTimeout(this.rotateTimer); this.rotateTimer = setTimeout(() => this.rotate(), 8000); return; }
+      }
       if (ws !== this.ws && this.ws) return; // 旧连接正常退休
       if (!ws._ready && ev.code !== 1000) {
         const reason = ev.reason || '';
@@ -169,9 +196,12 @@ class LiveTranscriber {
       // 意外断开：自动重连，期间声音先缓存
       this.ws = null;
       this.retries++;
-      if (this.retries > 6) { this.onError && this.onError('实时转写多次断开，已停止重连。录音还在继续保存。' + (ev.reason ? '（' + ev.reason + '）' : '')); this.onStatus && this.onStatus('error'); return; }
+      // 以前连续断 6 次（大约半分钟）就永久放弃，教室 Wi-Fi 掉一下，后面整节课都没有转写。
+      // 现在一直重连：前几次很快，之后每 10 秒一次；只在第 7 次时提醒一句。
+      if (this.retries === 7) this.onError && this.onError('实时转写断开了，正在每 10 秒重连一次，网络恢复后会自动接上。录音还在继续保存。' + (ev.reason ? '（' + ev.reason + '）' : ''));
       this.onStatus && this.onStatus('reconnecting');
-      setTimeout(() => { if (!this.stopping) this.open(false); }, Math.min(500 * 2 ** this.retries, 8000));
+      clearTimeout(this.retryTimer);
+      this.retryTimer = setTimeout(() => { if (!this.stopping && !this.ws) this.open(false); }, this.retries > 6 ? 10000 : Math.min(500 * 2 ** this.retries, 8000));
     };
     if (isRotation) this.pending = ws; else this.ws = ws;
   }
@@ -196,7 +226,8 @@ class LiveTranscriber {
   }
   async stop() {
     this.stopping = true;
-    clearTimeout(this.rotateTimer);
+    clearTimeout(this.rotateTimer); clearTimeout(this.retryTimer);
+    if (this._online) window.removeEventListener('online', this._online);
     const ws = this.ws;
     if (ws && ws.readyState === 1) {
       try { ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } })); } catch (e) {}
@@ -281,16 +312,45 @@ class LiveSession {
       onStatus: st => this.onStatus && this.onStatus(st),
       onError: m => this.onError && this.onError(m),
     });
-    this.capture = new AudioCapture((pcm, rms) => {
+    const onChunk = (pcm, rms) => {
       this.transcriber.sendAudio(pcm);
       this.onLevel && this.onLevel(rms);
+      if (rms > 0.02) this.loudNoText = (this.loudNoText || 0) + 1;   // 明显有人在说话、却一直没出字的时长（每块 0.1 秒）
       // 声音够响就算「在说话」，用来判断老师有没有停顿（只录英文时按停顿断句）
       if (rms > 0.008) { this.lastLoudAt = Date.now(); this.heard(); }
       if (s.saveAudio) { this.audioChunks.push(pcm); if (this.audioChunks.length >= 600) this.flushAudio(); }
-    });
+    };
+    // 麦克风中途断了：自动重新打开一次（会用系统当前的输入设备），打不开就明说
+    const onLost = async () => {
+      if (this.stopped || this.reopening) return;
+      this.reopening = true;
+      this.onError && this.onError('麦克风断开了（耳机没电 / 拔掉了？），正在重新打开…');
+      try { this.capture.stop(); } catch (e) {}
+      await new Promise(r => setTimeout(r, 800));
+      try {
+        if (this.stopped) return;
+        const cap = new AudioCapture(onChunk, onLost);
+        await cap.start();
+        if (this.stopped) { cap.stop(); return; }
+        this.capture = cap;
+        this.onError && this.onError('麦克风重新接上了，继续录。中间断开的那几秒没有录到。');
+      } catch (e) {
+        this.onError && this.onError('麦克风断开后重新打不开：' + (e.message || e) + '。现在没有在录音，请检查麦克风后停止再重新开始。');
+        this.onStatus && this.onStatus('error');
+      } finally { this.reopening = false; }
+    };
+    this.capture = new AudioCapture(onChunk, onLost);
     await this.capture.start();
     this.transcriber.start();
     try { this.wake = await navigator.wakeLock?.request('screen'); } catch (e) { /* 不支持就算了 */ }
+    // 切走再回来：屏幕常亮会被系统收回，音频也可能被暂停，回来时都补上（iPad 上最常见）
+    this._vis = async () => {
+      if (this.stopped || document.visibilityState !== 'visible') return;
+      this.capture && this.capture.wake();
+      try { this.wake = await navigator.wakeLock?.request('screen'); } catch (e) {}
+    };
+    document.addEventListener('visibilitychange', this._vis);
+    this.lastTextAt = Date.now(); this.loudNoText = 0; this.lastKickAt = 0;
     this.watchQuiet();
     this.watchSegments();
     await DB.put('sessions', this.record);
@@ -306,6 +366,11 @@ class LiveSession {
     clearInterval(this.quietTimer);
     this.quietTimer = setInterval(() => {
       if (this.stopped) return;
+      // 连接假死：数据发不出去越积越多，或者明明一直有人说话（累计 30 秒以上）却 1 分钟没出一个字 → 换一条连接。3 分钟内最多换一次。
+      const tr = this.transcriber;
+      if (tr && Date.now() - this.lastKickAt > 180000 && (tr.stalled() || (tr.ready() && this.loudNoText >= 300 && Date.now() - this.lastTextAt > 60000))) {
+        this.lastKickAt = Date.now(); this.loudNoText = 0; tr.kick();
+      }
       if (Date.now() < this.quietSnoozeUntil) return;
       const mins = Math.floor((Date.now() - this.lastVoiceAt) / 60000);
       if (mins >= 10 && !this.quietWarned) {
@@ -371,7 +436,7 @@ class LiveSession {
   onDraft(t) {
     t = (t || '').trim();
     if (!t) return;
-    this.heard();
+    this.heard(); this.lastTextAt = Date.now(); this.loudNoText = 0;
     // 草稿从头换了内容 = 新的一段开始了；上一段没切完的先收尾
     if (this.turn && !sameStart(this.turn.text, t)) { this.commitWords(splitWords(this.turn.text).slice(this.turn.committed)); this.turn = null; }
     if (!this.turn) this.turn = { text: '', committed: 0, tail: [], pendingSince: Date.now() };
@@ -429,7 +494,8 @@ class LiveSession {
     const seg = { id: DB.uid('g_'), t: Math.max(0, this.elapsed() - Math.round(ws.length * 0.35) - 1), en: text, zh: '', status: 'pending', important: EMPHASIS.test(text) };
     this.draftVer = (this.draftVer || 0) + 1; this.draftZh = ''; this.draftFor = '';
     // 只录英文：这句直接算完成，不排队翻译、不花任何额度
-    if (liveEnglishOnly()) { seg.status = 'done'; this.segments.push(seg); this.emit(); return; }
+    // 也要存盘：以前只有翻译完才存，「只录英文」（默认）下整节课的文字都只在内存里，中途闪退 / 刷新就全没了，只有点了「停止」才写进去
+    if (liveEnglishOnly()) { seg.status = 'done'; this.segments.push(seg); this.emit(); this.scheduleSave(); return; }
     // 草稿基本就是这一句的话，先把草稿中文挂上，正式翻译出来前不会空白
     const dw = splitWords(this.draftFor || '').length;
     if (this.draftZh && dw && ws.length >= dw * 0.75 && ws.length <= dw * 1.6) seg.zhDraft = this.draftZh;
@@ -444,7 +510,7 @@ class LiveSession {
     t = (t || '').trim();
     clearTimeout(this.stableTimer);
     if (!t) return;
-    this.heard();
+    this.heard(); this.lastTextAt = Date.now(); this.loudNoText = 0;
     const words = splitWords(t);
     let start = 0;
     if (this.turn && this.turn.committed) {
@@ -594,8 +660,9 @@ class LiveSession {
   }
   emit() { this.onUpdate && this.onUpdate(this.segments); }
   scheduleSave() {
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.save(), 1500);
+    // 已经排了一次就不往后推：老师一直讲的时候每几秒都有新句子，一直往后推就一直存不上
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.save().catch(e => { if (!this.saveWarned) { this.saveWarned = true; this.onError && this.onError('转写内容存不进本机：' + (e.message || e) + '。可能是存储空间满了，先别关这一页。'); } }); }, 1500);
   }
   async save() {
     this.record.segments = this.segments.map(({ id, t, en, zh, raw, important, starred, status }) => ({ id, t, en, zh, raw, important, starred, status }));
@@ -607,10 +674,13 @@ class LiveSession {
     if (!this.audioChunks.length) return;
     const blob = new Blob(this.audioChunks, { type: 'application/octet-stream' });
     this.audioChunks = [];
-    await DB.put('audio', { id: this.record.id + '_' + String(this.audioIdx).padStart(4, '0'), sessionId: this.record.id, idx: this.audioIdx++, blob });
+    try { await DB.put('audio', { id: this.record.id + '_' + String(this.audioIdx).padStart(4, '0'), sessionId: this.record.id, idx: this.audioIdx++, blob }); }
+    catch (e) { if (!this.audioWarned) { this.audioWarned = true; this.onError && this.onError('录音音频存不进本机（' + (e.message || e) + '），可能是存储空间满了。文字转写还在继续。'); } }
   }
   async stop() {
     this.stopped = true; clearTimeout(this.draftTimer); clearInterval(this.quietTimer); clearInterval(this.segTimer);
+    clearTimeout(this.saveTimer); this.saveTimer = null;
+    if (this._vis) document.removeEventListener('visibilitychange', this._vis);
     this.capture && this.capture.stop();
     await (this.transcriber && this.transcriber.stop());
     this.flushBuffer();

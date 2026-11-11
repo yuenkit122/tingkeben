@@ -258,7 +258,7 @@ async function renderHome() {
       done[id] = 1; localStorage.setItem('tingkeben.hints', JSON.stringify(done)); renderHome();
     };
     const act = $('[data-hint-act]', hs);
-    if (act) act.onclick = () => { if (act.dataset.hintAct === 'login') cloudLoginModal(); else extGuide(); };
+    if (act) act.onclick = () => { if (act.dataset.hintAct === 'guide') setupGuide(); else if (act.dataset.hintAct === 'login') cloudLoginModal(); else extGuide(); };
   }
   $$('[data-study]').forEach(b => b.onclick = () => {
     const c = State.courses.find(x => x.id === b.dataset.study) || State.courses[0];
@@ -278,6 +278,7 @@ function homeHint(k) {
   let done = {};
   try { done = JSON.parse(localStorage.getItem('tingkeben.hints') || '{}'); } catch (e) {}
   const items = [];
+  if (!Settings.load().deepseekKey) items.push({ id: 'guide', t: '新手引导', s: '4 步配好：申请 DeepSeek key、（可选）Gemini、（可选）建自己的云、登录。做到哪一步会记住，随时可以回来接着做。', cta: '开始', act: 'guide' });
   if (!State.courses.length) items.push({ id: 'start', t: '第一次用？', s: '在 Chrome 打开 Moodle 并登录，点右上角「听课本助手」，勾选课程同步进来；也可以先在电脑上新建一门课。', cta: '怎么装扩展', act: 'ext' });
   if (!k.notes || !k.gemini) items.push({ id: 'key', t: '先把 API key 填上', s: `${!k.notes ? '生成笔记要 DeepSeek' : ''}${!k.notes && !k.gemini ? '，' : ''}${!k.gemini ? '实时转写要 Gemini' : ''}。key 只存在这台设备上。`, cta: '去设置', href: '#settings~ai' });
   if (!Sync.ready()) items.push({ id: 'sync', t: '云同步没开', s: '登录之后 Mac 和 iPad 的课程、笔记、录音会自动对上（没登录也能正常用）。', cta: '登录', act: 'login' });
@@ -289,6 +290,75 @@ function homeHint(k) {
     ${pick.href ? `<a class="btn small primary" href="${pick.href}">${esc(pick.cta)}</a>` : `<button class="btn small primary" data-hint-act="${pick.act}">${esc(pick.cta)}</button>`}
     <button class="btn small ghost" data-hint-x aria-label="不再提示">✕</button>
   </div>`;
+}
+
+/* 新手引导：4 步，做到哪一步记在本机（tingkeben.guide），关掉再打开接着做 */
+const SITE_HELP = 'https://yuenkit122.github.io/tingkeben/download/';
+function setupGuide(step) {
+  const mem = () => { try { return JSON.parse(localStorage.getItem('tingkeben.guide') || '{}'); } catch (e) { return {}; } };
+  const remember = patch => { try { localStorage.setItem('tingkeben.guide', JSON.stringify(Object.assign(mem(), patch))); } catch (e) {} };
+  const done = () => { const s = Settings.load(), m = mem(); return [!!s.deepseekKey, !!s.geminiKey || !!m.skip2, Sync.ready() || !!m.skip3 || !!m.built, Sync.ready() || !!m.skip3]; };
+  const close = modal('', () => {});
+  const box = $('#modal-box');
+  const NAMES = ['申请 DeepSeek key', 'Gemini key（可选）', '建自己的云（可选）', '登录云同步'];
+  const paint = (i) => {
+    const d = done();
+    if (i == null) { i = mem().at != null && !d[mem().at] ? mem().at : d.findIndex(x => !x); if (i < 0) i = 4; }
+    if (i < 4) remember({ at: i });
+    const s = Settings.load();
+    const head = `<h2>新手引导</h2><div class="row" style="gap:6px;flex-wrap:wrap">${NAMES.map((n, k) => `<button class="btn small ${k === i ? 'primary' : 'ghost'}" data-go="${k}">${d[k] ? '✓' : k + 1} ${n}</button>`).join('')}</div>`;
+    const foot = (extra = '') => `<div class="hint" id="sg-msg"></div><div class="row" style="justify-content:space-between"><button class="btn ghost" id="sg-x">先到这，下次接着做</button><span>${extra}</span></div>`;
+    const keyStep = (id, val, ph) => `<div class="field"><label for="${id}">粘贴到这里</label><input id="${id}" type="password" autocomplete="off" spellcheck="false" value="${esc(val || '')}" placeholder="${ph}"></div>`;
+    const body = [
+      () => `<p style="margin:0">整理笔记、问 AI、复习出题、翻译课件都靠它。按用量付费，钱直接付给 DeepSeek，十块钱能用很久。</p>
+        <ol class="steps">
+          <li>打开 <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a>，用手机号或邮箱注册、登录。</li>
+          <li>左边「充值」，充一点钱（可能要先实名认证，付款方式以页面为准）。</li>
+          <li>左边「API keys」→「创建 API key」→ 起个名字 → 创建。</li>
+          <li>弹出的 key（<code>sk-</code> 开头）<b>只显示一次</b>，马上复制，粘贴到下面。</li>
+        </ol>${keyStep('sg-ds', s.deepseekKey, 'sk-…')}${foot('<button class="btn primary" id="sg-ok">测试并保存</button>')}`,
+      () => `<p style="margin:0">上课录音的实时转写要用它，有免费额度。不录音可以跳过，以后在「设置」里再填。Google 的服务在中国大陆的网络直接连不上。</p>
+        <ol class="steps">
+          <li>打开 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>，用 Google 账号登录。</li>
+          <li>点「Create API key」，复制生成的 key，粘贴到下面。</li>
+        </ol>${keyStep('sg-gm', s.geminiKey, 'AQ.… 或 AIza…')}${foot('<button class="btn" id="sg-skip">跳过</button> <button class="btn primary" id="sg-ok">测试并保存</button>')}`,
+      () => `<p style="margin:0">只有一台设备就跳过。想让电脑和 iPad 自动同步，要用自己的 Cloudflare 账号建一个云服务（免费 10 GB，开通要绑卡或 PayPal，约 15 分钟），数据只在你自己手里。</p>
+        <ol class="steps">
+          <li>注册 <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Cloudflare</a> → 开通 R2 → 建存储桶 <code>tingkeben</code>。</li>
+          <li>Workers 和 Pages → 创建「Hello World」，名字 <code>tingkeben-cloud</code> → 编辑代码，换成 <a href="${SITE_HELP}worker.js" target="_blank" rel="noopener">worker.js</a> 的内容 → 部署。</li>
+          <li>Worker 设置：绑定 R2 存储桶，变量名 <code>BUCKET</code>；加机密 <code>APP_PASSWORD</code>（你定的密码，至少 10 位）。</li>
+          <li>浏览器打开 Worker 的网址，看到 <code>"ready":true</code> 就好了。</li>
+        </ol>
+        <div class="hint">每一步点哪里的详细说明：<a href="${SITE_HELP}#cloud" target="_blank" rel="noopener">打开完整教程</a></div>${foot('<button class="btn" id="sg-skip">不用云，跳过</button> <button class="btn primary" id="sg-ok">建好了，下一步</button>')}`,
+      () => Sync.ready() ? `<p style="margin:0">云同步已经登录，这台设备会自动同步。</p>${foot('<button class="btn primary" id="sg-ok">完成</button>')}`
+        : `<p style="margin:0">用上一步建好的云服务登录。<b>云服务网址</b>填 Worker 的网址，<b>用户名留空</b>，<b>密码</b>填 <code>APP_PASSWORD</code>。登录一次管 180 天，网址会记住，不用每次输。</p>${foot('<button class="btn" id="sg-skip">不用云，跳过</button> <button class="btn primary" id="sg-ok">去登录</button>')}`,
+      () => `<p style="margin:0"><b>都配好了。</b>${Sync.ready() ? '云同步已登录。' : '没开云同步，数据只在这台设备上，以后想开在「设置 → 云同步」。'}</p><p>接下来：${(typeof Ext !== 'undefined' && Ext.builtIn && Ext.builtIn()) ? '点主页右上角「从 Moodle 同步」拉课件，或者' : ''}点「新建课程」，把 PDF / PPT 拖进去。</p><div class="row" style="justify-content:flex-end"><button class="btn primary" id="sg-x">开始用</button></div>`,
+    ][i]();
+    box.innerHTML = head + `<h3 style="margin:14px 0 6px">${i < 4 ? `第 ${i + 1} 步 · ${NAMES[i]}` : '完成'}</h3>` + body;
+    const msg = (t, bad) => { const m = $('#sg-msg', box); if (m) { m.textContent = t; m.style.color = bad ? 'var(--danger)' : ''; } };
+    $$('[data-go]', box).forEach(b => b.onclick = () => paint(Number(b.dataset.go)));
+    const x = $('#sg-x', box); if (x) x.onclick = () => { close(); route(); };
+    const sk = $('#sg-skip', box); if (sk) sk.onclick = () => { remember(i === 1 ? { skip2: 1 } : { skip3: 1 }); paint(i === 1 ? 2 : 4); };
+    const ok = $('#sg-ok', box); if (!ok) return;
+    ok.onclick = async () => {
+      if (i === 0 || i === 1) {
+        const v = $(i ? '#sg-gm' : '#sg-ds', box).value.trim();
+        if (!v) { msg('先把 key 粘贴进来', true); return; }
+        Settings.save({ [i ? 'geminiKey' : 'deepseekKey']: v });
+        ok.disabled = true; msg('测试中…');
+        try {
+          if (i) await AI.testGemini();
+          else {
+            const r = await AI.testDeepseek();
+            if (r.balance && Number(r.balance.total_balance) <= 0) { msg('key 是对的，但余额是 0，先去 DeepSeek 平台充值，不然用不了。key 已保存。', true); ok.disabled = false; ok.textContent = '下一步'; ok.onclick = () => paint(1); return; }
+          }
+          paint(i + 1);
+        } catch (e) { msg('✗ ' + e.message + '（key 已保存，可以改了再试）', true); ok.disabled = false; }
+      } else if (i === 2) { remember({ built: 1, skip3: 0 }); paint(3); }
+      else if (i === 3) { if (Sync.ready()) paint(4); else { close(); cloudLoginModal(() => setupGuide(4)); } }
+    };
+  };
+  paint(step);
 }
 
 /* 主页：今天的三个动作（背生词 / 清待办 / 刷错题），有东西才显示 */
@@ -2584,10 +2654,12 @@ function renderSettings(cat = '') {
       </section>
       <section class="card pad" id="cloud">
         <div class="row" style="justify-content:space-between"><h2>云服务（跨设备同步）</h2><span class="pill ${Sync.mode() === 'cloud' ? 'ok' : 'mute'}" id="cl-st">${Sync.mode() === 'cloud' ? '已登录' : '未登录'}</span></div>
-        <p>登录后，课程、课件、笔记、画板手写、录音转写会自动同步，所有 API key 也存在你自己的云端。换设备只要打开网址、输密码。</p>
-        ${Sync.mode() === 'cloud' ? `<div class="row"><span class="hint">云服务：${esc(s.cloudUrl)}</span></div>
-          <div class="row" style="margin-top:8px"><button class="btn small primary" id="cl-sync">立即同步</button><button class="btn small" id="cl-push">把本机的 key 存到云端</button><button class="btn small" id="r2-all">全部课件下载到本机</button><button class="btn small ghost" id="cl-out">退出登录</button><span class="hint" id="r2-info"></span></div>`
-          : `<div class="row"><button class="btn primary" id="cl-login">登录云服务</button><span class="hint">第一次用？先按「部署说明」在 Cloudflare 建好云服务</span></div>`}
+        <p>登录后，课程、课件、笔记、画板手写、录音转写会自动同步，API key 也跟着账号走。换设备只要登录一次。</p>
+        ${Sync.mode() === 'cloud' ? `<div class="row"><span class="hint">账号：<b>${Sync.account().role === 'owner' ? '云服务主人' : esc(Sync.account().user || '（旧版登录，重新登录一次可看到账号信息）')}</b> · ${esc(s.cloudUrl)}</span></div>
+          <div class="hint" id="cl-usage"></div>
+          <div class="row" style="margin-top:8px"><button class="btn small primary" id="cl-sync">立即同步</button><button class="btn small" id="cl-push">把本机的 key 存到云端</button><button class="btn small" id="r2-all">全部课件下载到本机</button>${Sync.account().role === 'owner' ? '<button class="btn small" id="cl-admin">邀请朋友 / 管理账号</button>' : ''}${Sync.account().role === 'user' ? '<button class="btn small" id="cl-pwd">改密码</button>' : ''}<button class="btn small ghost" id="cl-out">退出登录</button><span class="hint" id="r2-info"></span></div>`
+          : `<div class="row"><button class="btn primary" id="cl-login">登录</button><button class="btn small" id="cl-guide">一步步教我建</button><button class="btn ghost small" id="cl-reg">我有邀请码</button></div>
+          <div class="hint">云服务要自己建一个：用自己的 Cloudflare 账号，免费额度 10 GB，大约 15 分钟，数据只在你自己手里。步骤见「帮助」菜单里的《云服务说明》。不登录也能正常用，只是不在设备之间同步。</div>`}
       </section>
       <section class="card pad" id="r2">
         <details><summary style="font-weight:600;cursor:pointer">高级：不用云服务，直接连 R2（要在每台设备填 key）</summary>
@@ -2753,32 +2825,111 @@ function renderPool() {
 
 /* 云同步设置 */
 /* 登录云服务的窗口（设置页和主页都用） */
-function cloudLoginModal(after) {
+function cloudLoginModal(after, startTab) {
   const s = Settings.load();
-  modal(`<h2>登录听课本云服务</h2>
-    <div class="field"><label for="cl-url">云服务网址</label><input id="cl-url" type="url" autocomplete="url" spellcheck="false" value="${esc(s.cloudUrl || DEFAULT_CLOUD)}" placeholder="https://tingkeben-cloud.你的名字.workers.dev"></div>
-    <div class="field"><label for="cl-pw">密码</label><input id="cl-pw" type="password" autocomplete="current-password"></div>
-    <div class="hint" id="cl-msg"></div>
-    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="cl-go">登录</button></div>`, (box, close) => {
-    const pw = $('#cl-pw', box); (s.cloudUrl || DEFAULT_CLOUD ? pw : $('#cl-url', box)).focus();
+  let tab = startTab || 'login';
+  const url0 = s.cloudUrl || DEFAULT_CLOUD;
+  const close = modal('', () => {});
+  const box = $('#modal-box');
+  const paint = () => {
+    const reg = tab === 'reg';
+    box.innerHTML = `<h2>${reg ? '用邀请码注册' : '登录听课本云服务'}</h2>
+      <div class="row"><button class="btn small ${reg ? '' : 'primary'}" id="cl-t1">登录</button><button class="btn small ${reg ? 'primary' : ''}" id="cl-t2">我有邀请码，注册</button></div>
+      ${reg ? '<div class="field"><label for="cl-inv">邀请码</label><input id="cl-inv" type="text" autocomplete="off" spellcheck="false" placeholder="例如 ABCDE-FGH23"></div>' : ''}
+      <div class="field"><label for="cl-url">云服务网址</label><input id="cl-url" type="url" autocomplete="url" spellcheck="false" value="${esc(url0)}" placeholder="https://tingkeben-cloud.你的名字.workers.dev"><span class="hint">${reg ? '给你邀请码的人会一起告诉你' : '你自己建的 Worker 的网址。还没建？看「帮助 → 云服务说明」'}</span></div>
+      <div class="field"><label for="cl-name">用户名</label><input id="cl-name" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" value="${reg ? '' : esc(s.cloudUser || '')}" placeholder="${reg ? '自己定：3–20 位小写字母、数字' : '自己建的云服务：留空'}"></div>
+      <div class="field"><label for="cl-pw">密码</label><input id="cl-pw" type="password" autocomplete="${reg ? 'new-password' : 'current-password'}" placeholder="${reg ? '至少 8 位' : ''}"></div>
+      ${reg ? '<div class="field"><label for="cl-pw2">再输一次密码</label><input id="cl-pw2" type="password" autocomplete="new-password"></div>' : ''}
+      ${reg ? '<div class="hint">密码记好：对方看不到你的密码，忘了只能请对方重置。</div>' : ''}
+      <div class="hint" id="cl-msg"></div>
+      <div class="row" style="justify-content:flex-end"><button class="btn" id="cl-x">取消</button><button class="btn primary" id="cl-go">${reg ? '注册并登录' : '登录'}</button></div>`;
+    const msg = t => { $('#cl-msg', box).textContent = t; };
+    $('#cl-x', box).onclick = close;
+    $('#cl-t1', box).onclick = () => { tab = 'login'; paint(); };
+    $('#cl-t2', box).onclick = () => { tab = 'reg'; paint(); };
+    const pw = $('#cl-pw', box);
+    (reg ? $('#cl-inv', box) : url0 ? pw : $('#cl-url', box)).focus();
     const go = async () => {
-      const url = $('#cl-url', box).value, p = pw.value;
-      if (!url || !p) { $('#cl-msg', box).textContent = '网址和密码都要填'; return; }
-      const b = $('#cl-go', box); b.disabled = true; $('#cl-msg', box).textContent = '登录中…';
+      const url = $('#cl-url', box).value, p = pw.value, name = $('#cl-name', box).value;
+      if (!url || !p) { msg('网址和密码都要填'); return; }
+      if (reg && !$('#cl-inv', box).value.trim()) { msg('要填邀请码'); return; }
+      if (reg && !name.trim()) { msg('要定一个用户名'); return; }
+      if (reg && p !== $('#cl-pw2', box).value) { msg('两次输入的密码不一样'); return; }
+      const b = $('#cl-go', box); b.disabled = true; msg(reg ? '注册中…' : '登录中…');
       try {
-        const r = await Sync.login(url, p);
-        close(); toast(r.pulled ? '登录成功，API key 已经从云端拿下来了，正在同步课程…' : '登录成功，本机的 API key 已经存到云端，正在同步…', 5000);
+        const r = reg ? await Sync.register(url, $('#cl-inv', box).value, name, p) : await Sync.login(url, p, name);
+        close(); toast(reg ? '注册成功，已经登录。之后这台设备会自动同步。' : r.pulled ? '登录成功，API key 已经从云端拿下来了，正在同步课程…' : '登录成功，本机的 API key 已经存到云端，正在同步…', 5000);
         await loadCourses(); after ? after() : route();
-      } catch (e) { $('#cl-msg', box).textContent = '✗ ' + e.message; b.disabled = false; }
+      } catch (e) { msg('✗ ' + e.message); b.disabled = false; }
     };
     $('#cl-go', box).onclick = go;
-    pw.onkeydown = e => { if (e.key === 'Enter') go(); };
+    $$('input', box).forEach(i => i.onkeydown = e => { if (e.key === 'Enter') go(); });
+  };
+  paint();
+}
+
+/* 云服务主人：发邀请码、看每个人用了多少、停用账号 */
+function cloudAdminModal() {
+  const close = modal('<h2>邀请朋友 / 管理账号</h2><div class="hint">读取中…</div>', () => {});
+  const box = $('#modal-box');
+  const inviteText = code => `听课本云服务邀请\n1. 打开听课本 → 设置 → 云服务 →「我有邀请码，注册」\n2. 邀请码：${code}\n3. 用户名和密码自己定（密码至少 8 位）。密码我看不到，忘了告诉我，我帮你重置。\n云服务网址（一般已经填好）：${Sync.account().url}`;
+  const showCode = c => c.slice(0, 5) + '-' + c.slice(5);
+  const load = async (flash) => {
+    let d;
+    try { d = await Sync.api('/admin/overview'); }
+    catch (e) { box.innerHTML = `<h2>邀请朋友 / 管理账号</h2><p style="color:var(--danger)">${esc(e.message)}</p><div class="row" style="justify-content:flex-end"><button class="btn" id="ad-x">关闭</button></div>`; $('#ad-x', box).onclick = close; return; }
+    const total = d.ownerBytes + d.users.reduce((n, u) => n + u.usedBytes, 0);
+    box.innerHTML = `<h2>邀请朋友 / 管理账号</h2>
+      <p style="margin:0">每个邀请码只能注册一个账号。朋友的课件和笔记存在你的云端、和你的分开放，但占你的空间（Cloudflare R2 免费 10 GB，现在一共用了 ${fmtSize(total)}，其中你自己 ${fmtSize(d.ownerBytes)}）。</p>
+      <div class="row" style="align-items:end">
+        <div class="field" style="flex:1"><label for="ad-note">给谁（备注）</label><input id="ad-note" type="text" maxlength="40" placeholder="例如：小陈"></div>
+        <div class="field"><label for="ad-q">空间上限</label><select id="ad-q"><option value="512">500 MB</option><option value="1024" selected>1 GB</option><option value="2048">2 GB</option><option value="5120">5 GB</option></select></div>
+        <button class="btn primary" id="ad-new">生成邀请码</button>
+      </div>
+      <div id="ad-flash">${flash || ''}</div>
+      ${d.invites.length ? `<h3 style="margin:10px 0 4px">还没用的邀请码</h3>${d.invites.map(i => `<div class="row" style="justify-content:space-between"><span><code>${showCode(i.code)}</code> <span class="hint">${esc(i.note)} · ${i.quotaMB >= 1024 ? i.quotaMB / 1024 + ' GB' : i.quotaMB + ' MB'}</span></span><span><button class="btn small" data-copy="${i.code}">复制邀请</button> <button class="btn small ghost" data-del="${i.code}">作废</button></span></div>`).join('')}` : ''}
+      <h3 style="margin:10px 0 4px">已注册的账号（${d.users.length}）</h3>
+      ${d.users.length ? d.users.map(u => `<div class="row" style="justify-content:space-between"><span><b>${esc(u.name)}</b> <span class="hint">${esc(u.note)} · 用了 ${fmtSize(u.usedBytes)} / ${u.quotaMB >= 1024 ? u.quotaMB / 1024 + ' GB' : u.quotaMB + ' MB'}${u.disabled ? ' · <span style="color:var(--danger)">已停用</span>' : ''}</span></span><span><button class="btn small" data-reset="${esc(u.name)}">重置密码</button> <button class="btn small ghost" data-toggle="${esc(u.name)}" data-on="${u.disabled ? 1 : 0}">${u.disabled ? '恢复' : '停用'}</button></span></div>`).join('') : '<div class="hint">还没有人注册。</div>'}
+      <div class="hint">停用 = 对方登录不了、同步停掉，数据还留在云端，可以恢复。用量大约 10 分钟更新一次。</div>
+      <div class="row" style="justify-content:flex-end"><button class="btn" id="ad-x">关闭</button></div>`;
+    $('#ad-x', box).onclick = close;
+    const copy = async code => { try { await navigator.clipboard.writeText(inviteText(showCode(code))); toast('邀请已复制，发给朋友就行'); } catch (e) { toast('复制失败，手动抄邀请码：' + showCode(code), 8000); } };
+    $('#ad-new', box).onclick = async () => {
+      const b = $('#ad-new', box); b.disabled = true;
+      try { const j = await Sync.api('/admin/invite', 'POST', { note: $('#ad-note', box).value.trim(), quotaMB: Number($('#ad-q', box).value) }); await copy(j.code); await load(`<div class="hint" style="color:var(--ok, green)">新邀请码 <code>${j.show}</code> 已复制到剪贴板，连同使用步骤一起，直接粘贴发给朋友。</div>`); }
+      catch (e) { toast(e.message, 6000); b.disabled = false; }
+    };
+    $$('[data-copy]', box).forEach(b => b.onclick = () => copy(b.dataset.copy));
+    $$('[data-del]', box).forEach(b => confirmClick(b, '确认作废', async () => { try { await Sync.api('/admin/invites/' + b.dataset.del, 'DELETE'); await load(); } catch (e) { toast(e.message, 6000); } }));
+    $$('[data-toggle]', box).forEach(b => confirmClick(b, b.dataset.on === '1' ? '确认恢复' : '确认停用', async () => { try { await Sync.api('/admin/users/' + b.dataset.toggle, 'POST', { disabled: b.dataset.on !== '1' }); await load(); } catch (e) { toast(e.message, 6000); } }));
+    $$('[data-reset]', box).forEach(b => confirmClick(b, '确认重置', async () => {
+      try { const j = await Sync.api('/admin/users/' + b.dataset.reset, 'POST', { resetPassword: true }); await load(`<div class="hint">${esc(b.dataset.reset)} 的临时密码：<code>${j.tempPassword}</code>（只显示这一次。发给对方，让对方登录后在「设置 → 云服务 → 改密码」换掉）</div>`); }
+      catch (e) { toast(e.message, 6000); }
+    }));
+  };
+  load();
+}
+function cloudPasswordModal() {
+  modal(`<h2>改云服务密码</h2>
+    <div class="field"><label for="cp-old">原密码</label><input id="cp-old" type="password" autocomplete="current-password"></div>
+    <div class="field"><label for="cp-new">新密码（至少 8 位）</label><input id="cp-new" type="password" autocomplete="new-password"></div>
+    <div class="hint">改完后，你的其他设备要用新密码重新登录一次。</div><div class="hint" id="cp-msg"></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="cp-go">改密码</button></div>`, (box, close) => {
+    $('#cp-go', box).onclick = async () => {
+      try { await Sync.changePassword($('#cp-old', box).value, $('#cp-new', box).value); close(); toast('密码改好了'); }
+      catch (e) { $('#cp-msg', box).textContent = '✗ ' + e.message; }
+    };
   });
 }
 const DEFAULT_CLOUD = ''; // 不预填任何人的云服务：每个人用自己建的
 
 function bindR2() {
   const cl = $('#cl-login'); if (cl) cl.onclick = () => cloudLoginModal(renderSettings);
+  const cr = $('#cl-reg'); if (cr) cr.onclick = () => cloudLoginModal(renderSettings, 'reg');
+  const cg = $('#cl-guide'); if (cg) cg.onclick = () => setupGuide(2);
+  const ca = $('#cl-admin'); if (ca) ca.onclick = cloudAdminModal;
+  const cw = $('#cl-pwd'); if (cw) cw.onclick = cloudPasswordModal;
+  const cu = $('#cl-usage'); if (cu) Sync.me().then(m => { if (!cu.isConnected) return; cu.textContent = '云端已用 ' + fmtSize(m.usedBytes) + (m.quotaMB ? ' / 上限 ' + (m.quotaMB >= 1024 ? m.quotaMB / 1024 + ' GB' : m.quotaMB + ' MB') : '') + '（约 10 分钟更新一次）'; if (m.role === 'owner' && !$('#cl-admin')) renderSettings(); }).catch(() => {});
   const co = $('#cl-out'); if (co) co.onclick = () => modal(`<h2>退出登录</h2><p style="margin:0">这台设备不再自动同步。课件和笔记还留在这台设备上。</p><label class="switch"><input type="checkbox" id="lo-k" checked>同时清掉这台设备上的 API key（借别人电脑用的话一定要勾）</label><div class="row" style="justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn primary" id="lo-go">退出</button></div>`, (box, close) => { $('#lo-go', box).onclick = () => { Sync.logout($('#lo-k', box).checked); close(); toast('已退出云服务'); renderSettings(); }; });
   const cs = $('#cl-sync'); if (cs) cs.onclick = async () => { cs.disabled = true; await Sync.syncNow({ onProgress: t => { const i = $('#r2-info'); if (i) i.textContent = t; } }); cs.disabled = false; };
   const cp = $('#cl-push'); if (cp) cp.onclick = async () => { try { await Sync.pushVault(); toast('已经把这台设备的 API key 存到云端'); } catch (e) { toast(e.message, 6000); } };
