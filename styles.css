@@ -204,6 +204,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .md p, .md ul, .md ol { margin: 8px 0; }
 .md li { margin: 3px 0; }
 .md strong { background: linear-gradient(transparent 58%, var(--marker-soft) 58%); }
+.md .empty strong { background: none; }
 .md blockquote { margin: 10px 0; padding: 8px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; color: var(--ink); }
 .md blockquote p { margin: 4px 0; }
 .md code { font-family: var(--mono); font-size: .9em; background: var(--line); padding: 1px 5px; border-radius: 4px; }
@@ -831,7 +832,7 @@ html.is-touch .chat-opt .seg button { min-height: 38px; min-width: 38px; padding
 body.desk-mode #view.tk-in, body.desk-mode #view.tk-in > * { animation: none !important; }
 
 /* 卡片错开出现 */
-.grid > .course-card { animation: tk-rise .4s var(--ease-out) both; }
+#view.tk-in .grid > .course-card { animation: tk-rise .4s var(--ease-out) both; }
 .grid > .course-card:nth-child(1) { animation-delay: .02s; }
 .grid > .course-card:nth-child(2) { animation-delay: .06s; }
 .grid > .course-card:nth-child(3) { animation-delay: .10s; }
@@ -839,7 +840,7 @@ body.desk-mode #view.tk-in, body.desk-mode #view.tk-in > * { animation: none !im
 .grid > .course-card:nth-child(5) { animation-delay: .18s; }
 .grid > .course-card:nth-child(6) { animation-delay: .22s; }
 .grid > .course-card:nth-child(n+7) { animation-delay: .26s; }
-.set-cats > .set-cat { animation: tk-rise .38s var(--ease-out) both; }
+#view.tk-in .set-cats > .set-cat { animation: tk-rise .38s var(--ease-out) both; }
 .set-cats > .set-cat:nth-child(2) { animation-delay: .05s; }
 .set-cats > .set-cat:nth-child(3) { animation-delay: .10s; }
 .set-cats > .set-cat:nth-child(4) { animation-delay: .15s; }
@@ -1205,7 +1206,7 @@ body.desk-mode #view.tk-in, body.desk-mode #view.tk-in > * { animation: none !im
 /* ---------- 复习首页：四个入口 ---------- */
 .hub { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 4px; }
 .hub-card {
-  display: flex; flex-direction: column; gap: 2px; padding: 16px;
+  display: flex; flex-direction: column; gap: 2px; padding: 16px; text-decoration: none;
   background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius);
   color: var(--ink); box-shadow: var(--shadow);
   transition: transform .22s var(--ease-out), box-shadow .22s var(--ease), border-color .18s var(--ease);
@@ -1490,7 +1491,11 @@ body.desk-mode #view.tk-in, body.desk-mode #view.tk-in > * { animation: none !im
   padding: 9px 12px; border-radius: 8px; font-size: 14px; color: var(--ink); cursor: pointer;
 }
 .more-menu button:hover, .more-menu a:hover { background: var(--accent-soft); }
+.more-menu a { text-decoration: none; }
 .more-menu button.danger { color: var(--danger); }
+.more-menu .danger-text { color: var(--danger); }
+.more-menu .danger-text:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.more-menu .danger-text.armed { background: var(--danger); color: #fff; }
 .more-menu button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
 
 /* 画板三种模式：选择（正常鼠标）/ 手（搬画布）/ 笔（写字） */
@@ -1595,7 +1600,7 @@ body.desk-mode #view.tk-in, body.desk-mode #view.tk-in > * { animation: none !im
    ========================================================================== */
 .board-tools { flex-wrap: wrap; gap: 6px; padding: 6px 8px; overflow: visible; border-radius: 12px 12px 0 0; }
 .nb-right, .dk-note, .board-host { container-type: inline-size; }
-@container (max-width: 820px) { .board-tools .seg.tools .lbl { display: none; } }
+@container (max-width: 1030px) { .board-tools .seg.tools .lbl { display: none; } }
 @container (max-width: 560px) { .board-tools .seg.nav { display: none; } }
 .board-tools::-webkit-scrollbar { display: none; }
 .board-tools > * { flex: none; }
@@ -1889,7 +1894,7 @@ html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
 /* 工作台中栏标签条右边的「课后优化笔记」 */
 /* 标签自己横向滚动，AI 按钮永远露在外面；放不下就换到第二行，不会被挤出栏外 */
 #dk-mtabs { flex-wrap: wrap; overflow: visible; row-gap: 0; }
-#dk-mtabs .dk-tablist { display: flex; gap: 4px; flex: 1 1 200px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+#dk-mtabs .dk-tablist { display: flex; gap: 4px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 #dk-mtabs .dk-tablist::-webkit-scrollbar { width: 0; height: 0; }
 #dk-mtabs .dk-enhance { margin-left: auto; flex: none; white-space: nowrap; padding: 3px 0; }
 

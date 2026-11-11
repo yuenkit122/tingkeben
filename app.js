@@ -71,7 +71,7 @@ async function loadCourses() {
 function renderSide() {
   const r = location.hash.slice(1) || 'home';
   const items = [['home', '课程主页', ICON.home], ['review', '复习', ICON.book], ['ask', '问 AI', ICON.chat], ['settings', '设置', ICON.gear]];
-  const isOn = id => r === id || (id === 'ask' && r.startsWith('ask')) || (id === 'review' && r.startsWith('review')) || (id === 'settings' && r.startsWith('settings')) ||
+  const isOn = id => r === id || (id === 'ask' && r.startsWith('ask')) || (id === 'review' && /^(review|vocab|wrong|marks)/.test(r)) || (id === 'settings' && r.startsWith('settings')) ||
     (id === 'home' && (r.startsWith('course') || r.startsWith('note') || r.startsWith('desk') || r.startsWith('session') || r.startsWith('live')));
   $('#nav').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}" title="${label}">${ic}<span class="lbl">${label}</span>${id === 'home' && State.live ? ' <span class="pill bad">REC</span>' : ''}</a>`).join('');
   $('#tabbar').innerHTML = items.map(([id, label, ic]) => `<a href="#${id}" class="${isOn(id) ? 'on' : ''}">${ic}${label}</a>`).join('');
@@ -162,7 +162,10 @@ const GNav = (() => {
   function mount() {
     const r = location.hash.slice(1) || 'home';
     const old = document.getElementById('gnav');
-    if (r === 'home') { if (old) old.remove(); return; }
+    // 侧栏直达的顶层页（复习 / 问 AI / 设置）不放：侧栏本身就是导航，再放一组「返回 / 主页」是重复的。
+    // 从课程页点进来的「问 AI」还是留着返回键。
+    const top = r === 'home' || r === 'review' || r.startsWith('review~') || r === 'settings' || r === 'ask' || (r.startsWith('ask-') && !(Nav.prev() || '').startsWith('course-'));
+    if (top) { if (old) old.remove(); return; }
     const host = view.querySelector('.desk-top') || view;
     if (old && old.parentNode === host && host.firstElementChild === old) return;
     if (old) old.remove();
@@ -172,6 +175,7 @@ const GNav = (() => {
   }
   // 页面自己重画（切标签、生成完刷新）时也要补上
   new MutationObserver(() => { if (!document.getElementById('gnav') || !view.contains(document.getElementById('gnav'))) mount(); }).observe(view, { childList: true });
+  // 注意：mount 自己判断这一页要不要放，顶层页会直接跳过
   return { mount };
 })();
 document.addEventListener('click', e => {
@@ -211,6 +215,9 @@ async function route() {
   view.classList.remove('tk-in');
   void view.offsetWidth;
   view.classList.add('tk-in');
+  // 入场动画只在换页时播一次：播完就摘掉，否则页面里每次局部重画（答题、标已掌握、切标签）卡片都会再闪一遍
+  clearTimeout(route.inT);
+  route.inT = setTimeout(() => view.classList.remove('tk-in'), 700);
 }
 window.addEventListener('hashchange', route);
 
@@ -456,7 +463,7 @@ async function renderCourse(id, tab) {
         <div class="grow"><h1>${esc(course.name)} <button class="del-x ren-x" data-rename="course:${course.id}" title="重命名这门课" aria-label="重命名这门课"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"/></svg></button></h1><div class="meta">${course.examDate ? `考试 ${esc(course.examDate)} · ${examCountdown(course.examDate)}` : '还没设考试日期'}</div></div>
         <!-- 常用的放外面：上课、生成笔记、问 AI；考前才用的收进「考前复习」；设置和删除收进「⋯」 -->
         <div class="row"><a class="btn small" href="#ask-${id}" title="AI 读这门课所有笔记、掌握情况和截止日期">${ICON.chat}问 AI</a>
-          <details class="more"><summary class="btn small">考前复习</summary><div class="more-menu"><button id="c-points">知识点总结</button><button id="c-mock">模拟考试</button><a href="#vocab~${id}">生词本</a><a href="#marks~${id}">我标记的重点</a></div></details>
+          <details class="more"><summary class="btn small">考前复习</summary><div class="more-menu"><button id="c-points">知识点总结</button><button id="c-mock">模拟考试</button><a href="#vocab~${id}">生词本</a><a href="#marks~${id}">考前重点</a></div></details>
           <details class="more"><summary class="btn small" aria-label="更多" title="课程设置 / 删除">⋯</summary><div class="more-menu"><button data-rename="course:${id}">重命名</button><button id="c-edit">课程设置</button><button class="danger-text" data-del-course="${id}">删除课程</button></div></details>
           <button class="btn" id="c-desk">${ICON.mic}上课</button><button class="btn primary" id="c-gen">${ICON.spark}生成笔记</button></div>
       </div>
@@ -567,8 +574,10 @@ async function renderFilesTab(course, body) {
           ${f.status === 'scanned' || f.status === 'error' ? '<button class="btn small" data-act="ocr">AI 识图读文字</button>' : ''}
           ${f.status === 'link' || (f.url && f.status === 'ready') ? '<button class="btn small primary" data-act="openlink">打开网页</button>' : ''}
           ${f.status === 'ready' || /\.pdf$/i.test(f.name) ? '<button class="btn small ghost" data-act="view">打开</button>' : ''}${f.status === 'ready' ? `<button class="btn small ghost" data-act="prep" title="5 分钟预习卡 + 术语表">${f.prep ? '课前包 ✓' : '课前包'}</button>` : ''}${f.status === 'ready' ? '<button class="btn small ghost" data-act="class" title="用这份课件上课：左边课件、中间笔记、右边翻译">上课</button>' : ''}
-          <button class="btn small ghost" data-rename="file:${f.id}">重命名</button>
-          <button class="btn small ghost" data-act="del">删除</button>
+          <details class="more"><summary class="btn small ghost" aria-label="更多" title="重命名 / 删除">⋯</summary><div class="more-menu">
+            <button data-rename="file:${f.id}">重命名</button>
+            <button class="danger-text" data-keep data-act="del">删除</button>
+          </div></details>
         </div>
       </div>`).join('')}</div>` : `<div class="empty"><strong>这门课还没有课件</strong>
         <div style="margin:6px 0 12px">课件可以以后再补 —— 手写板和课堂录音都不需要课件。</div>
@@ -1870,7 +1879,6 @@ function noteActsHTML(note, view) {
     ${(note.sessionIds || []).length || note.sessionId ? '' : '<button class="btn small" id="n-link">关联课堂录音</button>'}
     <button class="btn small" id="n-files" title="给这份笔记加课件 / 去掉课件，可以随时加新的">＋ 课件${(note.sourceFileIds || []).length ? ' · ' + note.sourceFileIds.length : ''}</button>
     <button class="btn small" id="n-ai" title="把笔记 + 错题 + 没搞懂的打包成一段 prompt">复制给 AI</button>
-    <button class="btn small ghost danger-text" data-del-note="${note.id}" title="删除这份笔记">删除笔记</button>
     <details class="more">
       <summary class="btn small">更多</summary>
       <div class="more-menu">
@@ -1878,7 +1886,8 @@ function noteActsHTML(note, view) {
         <button id="n-copy">复制 Markdown</button>
         ${view === 'board' ? `<a href="#note-${note.id}~text">复盘</a>` : `<a href="#note-${note.id}">笔记 + 手写</a>`}
         <button id="n-pdf">导出 PDF</button>
-        <button id="n-regen">${note.markdown ? '重新生成' : '生成'}</button>
+        <a href="#review-${note.id}" title="只读的大字版，适合考前过一遍">复习阅读（只读）</a>
+        <button class="danger-text" data-keep data-del-note="${note.id}">删除笔记</button>
       </div>
     </details>`;
 }
@@ -2932,7 +2941,7 @@ async function renderReview(courseId) {
         <span class="hint">只刷做错的，连对两次自动出本</span>
       </a>
       <a class="hub-card" href="#marks${courseId ? '~' + courseId : ''}">
-        <b>老师亲口划的重点</b><span class="hub-n">考前一张纸</span>
+        <b>考前重点</b><span class="hub-n">老师亲口划的</span>
         <span class="hint">课上标记 + 自动识别的高亮，合成一页</span>
       </a>
       <a class="hub-card" href="#course-${(courses[0] && courses[0].id) || ''}~notes" data-mock>
@@ -3068,7 +3077,7 @@ async function renderMarks(courseId) {
   const sessions = cid ? await DB.byIndex('sessions', 'courseId', cid) : [];
   const raw = Learn.gatherMarks(sessions);
   const m = course && course.marks;
-  view.innerHTML = `<div class="head"><div><h1>老师亲口划的重点</h1><div class="meta">课上按的标记 + 系统识别的 exam / due / important，合成考前只看这一页</div></div>${Nav.crumb('review', '复习', 'btn small ghost')}</div>
+  view.innerHTML = `<div class="head"><div><h1>考前重点</h1><div class="meta">课上按的标记 + 系统识别的 exam / due / important，合成考前只看这一页</div></div>${Nav.crumb('review', '复习', 'btn small ghost')}</div>
     <div class="chips">${courses.map(c => `<a class="chip ${cid === c.id ? 'on' : ''}" href="#marks~${c.id}">${esc(c.name)}</a>`).join('')}</div>
     ${!course ? '<div class="empty"><strong>还没有课程</strong></div>' : !raw.length ? `<div class="empty"><strong>这门课还没有可整理的内容</strong>上课时按「标记重点」，或者让实时翻译跑起来 —— 说到考试、作业、重点的句子会自动高亮，这里就能收进来。</div>`
     : `<div class="card pad"><div class="row" style="justify-content:space-between"><div class="grow"><b>${raw.length} 条原始标记</b><div class="hint">来自 ${new Set(raw.map(x => x.sid)).size} 节课；按「必考 / 可能考 / 了解」整理成一张纸</div></div><button class="btn primary" id="mk-go">${m ? '重新整理' : '整理成一张纸'}</button></div>
@@ -3102,9 +3111,10 @@ async function renderReviewNote(id, tab) {
     <div class="rv">
       <div class="rv-top noprint">
         ${Nav.crumb('review~' + note.courseId, '复习', 'btn small ghost')}
-        <div class="rv-title"><small>${esc(course ? course.name : '')}</small><b>${esc(note.title)}</b></div>
+        <div class="rv-title"><small>${esc(course ? course.name + ' · ' : '')}复习阅读（只读）</small><b>${esc(note.title)}</b></div>
         <div class="seg rv-tabs" role="tablist">${REVIEW_TABS.map(([k, l]) => `<button data-rt="${k}" class="${tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
         <div class="seg" role="group" aria-label="字号"><button data-fs="-1" title="字小一点">A−</button><button data-fs="1" title="字大一点">A+</button></div>
+        <a class="btn small" href="#note-${id}" title="去笔记页：可以手写、编辑、重新生成">去编辑 / 手写</a>
       </div>
       <div class="rv-body" id="rv-body" style="--rv-size:${P.size}px"></div>
       <div class="rv-nav noprint">

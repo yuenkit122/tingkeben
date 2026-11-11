@@ -1386,12 +1386,16 @@ const Board = (() => {
       return wd.blocks.some(bl => bl.y < y1 && bl.y + 160 > y0 && COL > x0 - 40 && 0 < x1 + 40);
     };
     resize();
-    if (!savedView || !anyVisible()) {
-      // 第一次打开：缩到文字那一列刚好放得下（手机上也不会被切掉一半）
+    // 自动贴合宽度：缩到文字那一列刚好放得下（手机上也不会被切掉一半）。
+    // 记下贴合时的宽度和视图：之后画布宽度变了（左边课件栏收起 / 展开、拖窗口），
+    // 只要你还没自己缩放或左右拖过，就重新贴合一次 —— 以前只算一次，栏一变内容就缩在左半边。
+    let auto = null;
+    const autoFit = () => {
       view.z = Math.min(1, Math.max(.55, (stage.clientWidth - 28) / COL));
       view.x = centerX();
-      view.y = -24;
-    }
+      auto = { w: stage.clientWidth, z: view.z, x: view.x };
+    };
+    if (!savedView || !anyVisible()) { autoFit(); view.y = -24; }
     renderBlocks();
     relayout();
     syncTools();
@@ -1403,7 +1407,11 @@ const Board = (() => {
 
     const onTheme = () => { if (!stage.isConnected) { document.removeEventListener('tk-theme', onTheme); return; } syncTools(); paint(); renderTexts(); };
     document.addEventListener('tk-theme', onTheme);
-    const ro = new ResizeObserver(() => { if (stage.isConnected) resize(); else cleanup(); });
+    const ro = new ResizeObserver(() => {
+      if (!stage.isConnected) { cleanup(); return; }
+      resize();
+      if (auto && stage.clientWidth !== auto.w && view.z === auto.z && view.x === auto.x) { autoFit(); applyView(); }
+    });
     ro.observe(stage);
     // 上面那块「还没搞懂的」展开/收起、窗口缩放，画布都跟着重新贴合
     let fitT = null;
@@ -1838,32 +1846,46 @@ const Chat = (() => {
 
   function segText(segs) { return segs.map(g => `[${fmtTime(g.t)}] ${g.en}${g.zh ? '\n　' + g.zh : ''}`).join('\n'); }
 
+  /* 返回 { text, used }：used 是「这次真的读了哪些东西」，原样显示在回答下面。
+     以前不管读没读到，一律写「读了笔记和课件」，空白笔记、没关联课件时也这么写，看着像引用了其实没有。 */
   async function buildContext({ note, course, fileIds, session, sessions, pageHint }) {
-    const parts = [];
-    if (note && note.markdown) parts.push(`## 笔记：${note.title}\n${note.markdown.slice(0, 50000)}`);
+    const parts = [], used = [];
+    const hasMd = !!(note && String(note.markdown || '').trim());
+    if (hasMd) {
+      const cut = note.markdown.length > 50000;
+      parts.push(`## 笔记：${note.title}\n${note.markdown.slice(0, 50000)}${cut ? '\n……（笔记太长，后面的省略了）' : ''}`);
+      used.push('笔记' + (cut ? '（太长，只读了前面）' : ''));
+    }
     const ids = [...new Set([...(fileIds || []), ...((note && note.sourceFileIds) || [])])];
     const files = (await Promise.all(ids.map(id => DB.get('files', id)))).filter(f => f && f.text);
-    let budget = note && note.markdown ? 50000 : 120000;
-    for (const f of files) { const t = f.text.slice(0, Math.max(4000, Math.floor(budget / files.length))); parts.push(`## 课件：${f.name}\n${t}`); }
-    if (pageHint) parts.push(`## 学生正在看的课件页：${pageHint.name} 第${pageHint.page}页\n${pageHint.text || ''}`);
+    const budget = hasMd ? 50000 : 120000;
+    let cutFiles = 0;
+    for (const f of files) {
+      const lim = Math.max(4000, Math.floor(budget / files.length));
+      const cut = f.text.length > lim; if (cut) cutFiles++;
+      parts.push(`## 课件：${f.name}\n${f.text.slice(0, lim)}${cut ? '\n……（这份课件太长，后面的页没有给你，不要引用没给的页）' : ''}`);
+    }
+    if (files.length) used.push(`课件 ${files.length} 份` + (cutFiles ? `（${cutFiles} 份太长，只读了前面几页）` : ''));
+    if (pageHint) { parts.push(`## 学生正在看的课件页：${pageHint.name} 第${pageHint.page}页\n${pageHint.text || '（这一页没有读到文字）'}`); used.push(`正在看的第 ${pageHint.page} 页`); }
     // 一份笔记可以录好几段（每节课一段）：按时间顺序全部带上，总长超了就从最早那段开始省略，最近那段保证完整
     const list = (sessions && sessions.length ? sessions : session ? [session] : []).filter(x => x && (x.segments || []).length);
     if (list.length) {
-      let budget = 40000;
+      let left = 40000;
       const blocks = [];
-      for (let i = list.length - 1; i >= 0 && budget > 0; i--) {
+      for (let i = list.length - 1; i >= 0 && left > 0; i--) {
         let t = segText(list[i].segments);
-        if (t.length > budget) t = '……（前面省略）\n' + t.slice(-budget);
-        budget -= t.length;
+        if (t.length > left) t = '……（前面省略）\n' + t.slice(-left);
+        left -= t.length;
         blocks.unshift(`### 第 ${i + 1} 段${list.length > 1 && i === list.length - 1 ? '（最近一段）' : ''}${list[i].title ? '：' + list[i].title : ''}\n${t}`);
       }
       parts.push(`## 课堂录音转写（共 ${list.length} 段${blocks.length < list.length ? '，最早的几段太长省略了' : ''}）\n${blocks.join('\n\n')}`);
+      used.push(`录音 ${blocks.length} 段` + (blocks.length < list.length ? `（共 ${list.length} 段，最早的省略了）` : ''));
     }
-    return parts.join('\n\n') || '（还没有材料）';
+    return { text: parts.join('\n\n'), used };
   }
 
   /* host: 放聊天框的元素；opts.getLive() 返回正在录的 LiveSession；opts.getPage() 返回 {fileId,name,page,text} */
-  function mount(host, { note, course, getLive, getPage, getFileIds, getExtra, compact, suggestions, scope: scopeText } = {}) {
+  function mount(host, { note, course, getLive, getPage, getFileIds, getExtra, extraLabel, compact, suggestions, scope: scopeText } = {}) {
     const store = note || course; // 聊天记录存在笔记里；没有笔记就存在课程里
     store.chat = store.chat || [];
     let busy = null;
@@ -1893,11 +1915,20 @@ const Chat = (() => {
         </div>
       </div>`;
     const log = $('#chat-log', host), input = $('#chat-text', host);
+    const sn = note ? 'notes' : 'courses';
+    // 只存聊天记录这一栏：先读库里最新的那条再写回去。以前直接把手上这份（可能是旧的）整条写回，
+    // 会把这期间在别处改的东西（画板手写、掌握进度、改名）盖掉。
+    const saveChat = async () => {
+      let fresh = null; try { fresh = await DB.get(sn, store.id); } catch (e) {}
+      if (fresh && fresh !== store) { fresh.chat = store.chat; await DB.put(sn, fresh); } else await DB.put(sn, store);
+    };
     const paint = () => {
+      const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 60;   // 你往上翻着看的时候，新出来的字不把你拽回底部
+      const sb = $('#chat-send', host); if (sb) { sb.textContent = busy ? '停止' : '发送'; sb.classList.toggle('primary', !busy); }
       log.innerHTML = store.chat.length ? store.chat.map(m => `<div class="msg ${m.role}">${m.role === 'user' ? esc(m.content) : md(m.content)}${m.note ? `<div class="hint">${esc(m.note)}</div>` : ''}</div>`).join('')
         : `<div class="chat-empty"><b>围绕${note ? '这份笔记' : '这门课'}提问</b><br>解释、总结、翻译、出题都行。上课时点「老师刚才问了什么」，只用最近一分钟的录音来回答，又快又省。</div>`;
       if (busy) log.insertAdjacentHTML('beforeend', `<div class="msg assistant">${busy.text ? md(busy.text) : busy.think ? `<div class="hint"><span class="spin"></span> 正在思考…（${busy.think.length} 字）</div>` : '<span class="spin"></span>'}</div>`);
-      log.scrollTop = log.scrollHeight;
+      if (stick || !busy) log.scrollTop = log.scrollHeight;
     };
     const qbox = $('#chat-quote', host);
     $('button', qbox).onclick = () => { quote = ''; qbox.hidden = true; };
@@ -1905,6 +1936,9 @@ const Chat = (() => {
 
     // 选项：老师讲的时间范围 + 快速/详细思考，记在本机
     const opt = ChatOpt.get();
+    // 「老师讲的 N 秒」是上课时用的。没在录音就回到「全部」：以前这个选择记在本机、所有页面共用，
+    // 上课时选过「1分」，之后在课程的「问 AI」页（那里连这排按钮都没有）每次提问都被当成「只看最近 1 分钟录音」，直接问不了。
+    if (!(getLive && getLive())) opt.win = 0;
     const syncOpts = () => {
       $$('#chat-win [data-w]', host).forEach(b => b.classList.toggle('on', Number(b.dataset.w) === opt.win));
       $$('#chat-mode [data-m]', host).forEach(b => b.classList.toggle('on', b.dataset.m === opt.mode));
@@ -1917,12 +1951,14 @@ const Chat = (() => {
     $$('#chat-src [data-s2]', host).forEach(b => b.onclick = () => { opt.src = b.dataset.s2; ChatOpt.set({ src: opt.src }); syncOpts(); });
     syncOpts();
 
-    async function send(text, { scope, label, win } = {}) {
+    /* read: true = 这个问题必须看资料才能答（快捷问题都是），即使选了「直接聊」也读 */
+    async function send(text, { scope, label, win, read } = {}) {
       if (busy) return;
       if (!Settings.load().deepseekKey) { toast('先去设置里填 DeepSeek key'); return; }
-      if (opt.src !== 'none' && await blockIfUnread([].concat((getFileIds && getFileIds()) || [], (note && note.sourceFileIds) || []))) return;
-      const w = win != null ? win : opt.win; // 秒；0 = 全部材料
-      scope = scope || (w ? 'recent' : 'all');
+      const wantRead = read || opt.src !== 'none';
+      if (wantRead && await blockIfUnread([].concat((getFileIds && getFileIds()) || [], (note && note.sourceFileIds) || []))) return;
+      const w = win != null ? win : (hasRec ? opt.win : 0); // 秒；0 = 全部材料
+      scope = scope || (wantRead && w ? 'recent' : 'all');   // 选了「直接聊」就不再偷偷按时间范围去读录音
       const live = getLive && getLive();
       // 这份笔记的所有录音段：「老师讲的 N 秒/分钟」只看正在录的、或者最近那一段；「全部」把每一段都带上
       const sids = note ? [...new Set([].concat(note.sessionIds || [], note.sessionId || []).filter(Boolean))] : [];
@@ -1932,7 +1968,7 @@ const Chat = (() => {
       const session = liveSeg || saved.find(x => x.id === (note && note.sessionId)) || saved[saved.length - 1] || null;
       const allSessions = liveSeg ? saved.filter(x => x.id !== liveId).concat(liveSeg) : saved;
       let context, noteLine = '';
-      const pure = opt.src === 'none' && scope !== 'recent';
+      const pure = !wantRead && scope !== 'recent';
       if (pure) {
         context = '';
         noteLine = '直接聊 · 没读资料';
@@ -1944,18 +1980,24 @@ const Chat = (() => {
         const recent = segs.filter(g => g.t >= end - secs);
         const interim = live && live.turn ? `\n[正在说] ${live.turn.text || ''}` : '';
         if (!recent.length && !interim.trim()) { toast(live ? `最近 ${human}还没有转写内容` : '现在没有在听课本里录音，用不了「老师讲的」时间范围。选「全部」就会看笔记和课件来回答。', 6000); return; }
-        context = `## 老师最近 ${human}说的话（语音识别，可能有错字）\n${segText(recent)}${interim}` + (note && note.markdown ? `\n\n## 这节课的笔记（参考）\n${note.markdown.slice(0, 12000)}` : '');
-        noteLine = `用了老师最近 ${human}讲的（${recent.length} 句${live ? '，正在录的这段' : allSessions.length > 1 ? '，最近一段录音' : ''}）`;
+        const pg = getPage ? await getPage() : null;   // 老师多半在讲你正在看的这一页，带上它回答才对得上
+        context = `## 老师最近 ${human}说的话（语音识别，可能有错字）\n${segText(recent)}${interim}`
+          + (pg && pg.text ? `\n\n## 学生正在看的课件页：${pg.name} 第${pg.page}页\n${pg.text}` : '')
+          + (note && note.markdown ? `\n\n## 这节课的笔记（参考）\n${note.markdown.slice(0, 12000)}` : '');
+        noteLine = `用了老师最近 ${human}讲的（${recent.length} 句${live ? '，正在录的这段' : allSessions.length > 1 ? '，最近一段录音' : ''}）${pg && pg.text ? ` + 正在看的第 ${pg.page} 页` : ''}`;
       } else {
-        context = await buildContext({ note, course, fileIds: getFileIds && getFileIds(), session, sessions: allSessions, pageHint: getPage && await getPage() });
-        noteLine = '读了笔记和课件' + (allSessions.length ? `，${allSessions.length} 段录音` : '');
-        if (getExtra) context += '\n\n' + await getExtra();
+        const built = await buildContext({ note, course, fileIds: getFileIds && getFileIds(), session, sessions: allSessions, pageHint: getPage && await getPage() });
+        const used = built.used.slice();
+        context = built.text;
+        if (getExtra) { context = [context, await getExtra()].filter(Boolean).join('\n\n'); used.push(extraLabel || '这门课的笔记摘要'); }
+        noteLine = used.length ? '读了：' + used.join('、') : '没有可读的资料（笔记是空的，也没关联课件和录音），按常识答的';
       }
       const q = quote ? `关于这段：「${quote}」\n${text}` : text;
       quote = ''; qbox.hidden = true;
       store.chat.push({ role: 'user', content: label || q, t: Date.now() });
       busy = { text: '', ctl: new AbortController() }; paint();
-      const history = store.chat.slice(-9, -1).filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }));
+      // 上文：最近 8 条。出错 / 被停掉的那几条不带，免得 AI 把「（出错了）」当成自己说过的话接着聊
+      const history = store.chat.slice(0, -1).filter(m => (m.role === 'user' || m.role === 'assistant') && !m.err && !/^（(出错了|已停止)/.test(m.content || '')).slice(-8).map(m => ({ role: m.role, content: m.content }));
       try {
         const ans = await AI.deepseekStream({
           system: AI.chatSystem({ courseName: course && course.name, context, free: pure }) + (opt.mode === 'deep' ? '\n\n【详细思考模式】把道理讲透：先给结论，再分步骤解释，必要时举例、指出容易混淆的地方。' : '\n\n【快速模式】回答要短：先一句话给结论，最多再补 3 个要点，不要铺垫。'),
@@ -1966,30 +2008,35 @@ const Chat = (() => {
         });
         store.chat.push({ role: 'assistant', content: ans, t: Date.now(), note: [noteLine, opt.mode === 'deep' ? '详细思考' : '快速'].filter(Boolean).join(' · ') });
       } catch (e) {
-        store.chat.push({ role: 'assistant', content: '（出错了：' + e.message + '）', t: Date.now() });
+        if (busy.ctl.signal.aborted) {
+          // 自己点的「停止」：已经写出来的留着，标一下没写完
+          if (busy.text) store.chat.push({ role: 'assistant', content: busy.text, t: Date.now(), note: [noteLine, '已停止，没写完'].filter(Boolean).join(' · ') });
+          else store.chat.push({ role: 'assistant', content: '（已停止）', t: Date.now(), err: true });
+        } else store.chat.push({ role: 'assistant', content: '（出错了：' + e.message + '）', t: Date.now(), err: true });
       }
       if (store.chat.length > 80) store.chat = store.chat.slice(-80);
       busy = null; paint();
-      await DB.put(note ? 'notes' : 'courses', store);
+      await saveChat();
     }
-    $('#chat-send', host).onclick = () => { const t = input.value.trim(); if (!t) { toast('先在框里输入问题，或者点上面的快捷问题'); input.focus(); return; } input.value = ''; send(t); };
-    input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#chat-send', host).click(); } };
-    confirmClick($('#chat-clear', host), '确认清空', async () => { store.chat = []; await DB.put(note ? 'notes' : 'courses', store); paint(); });
-    $$('[data-s]', host).forEach(b => b.onclick = () => send(b.dataset.s));
+    $('#chat-send', host).onclick = () => { if (busy) { busy.ctl.abort(); return; } const t = input.value.trim(); if (!t) { toast('先在框里输入问题，或者点上面的快捷问题'); input.focus(); return; } input.value = ''; send(t); };
+    input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (busy) { toast('上一个问题还在回答，等它写完，或者点「停止」'); return; } $('#chat-send', host).click(); } };
+    confirmClick($('#chat-clear', host), '确认清空', async () => { if (busy) busy.ctl.abort(); store.chat = []; await saveChat(); paint(); });
+    $$('[data-s]', host).forEach(b => b.onclick = () => send(b.dataset.s, { read: true }));
     $$('[data-q]', host).forEach(b => b.onclick = async () => {
       const k = b.dataset.q;
       if (k === 'teacher') return send('老师刚才问了什么问题？请先用一句中文复述老师的问题（附英文原话），再给出答案和简单解释；如果老师是在让大家讨论或做练习，也说清楚要做什么。如果最近没有提问，就用三句话总结老师刚才讲了什么。', { scope: 'recent', win: opt.win || 60, label: '🙋 老师刚才问了什么？' });
-      if (k === 'hard') return send('这份材料里最难懂的 3 个概念是什么？每个用大白话解释，再举一个例子。');
+      if (k === 'hard') return send('这份材料里最难懂的 3 个概念是什么？每个用大白话解释，再举一个例子。', { read: true });
       if (k === 'page') {
         const p = getPage && await getPage();
-        if (!p) return send('用要点总结这份笔记的核心内容（不超过 8 条）。', { label: '总结这一页' });
-        return send(`总结我正在看的课件《${p.name}》第 ${p.page} 页：讲了什么、关键词、可能怎么考。`, { label: `总结这一页（${p.name} 第 ${p.page} 页）` });
+        if (!p) return send('用要点总结这份笔记的核心内容（不超过 8 条）。', { label: '总结这份笔记', read: true });
+        return send(`总结我正在看的课件《${p.name}》第 ${p.page} 页：讲了什么、关键词、可能怎么考。`, { label: `总结这一页（${p.name} 第 ${p.page} 页）`, read: true });
       }
-      if (k === 'quiz') return send('根据材料出 3 道考试风格的题（选择或计算），答案和解析直接写在每道题下面。');
+      if (k === 'quiz') return send('根据材料出 3 道考试风格的题（选择或计算），答案和解析直接写在每道题下面。', { read: true });
     });
     paint();
     return { send };
   }
+  window.addEventListener('hashchange', () => { quote = ''; });   // 换了页面，上一页选中的那段引用不再跟过去
   function setQuote(t) { quote = t; const q = $('#chat-quote'); if (q) { q.hidden = false; $('span', q).textContent = t.length > 60 ? t.slice(0, 60) + '…' : t; } }
   return { mount, setQuote };
 })();
@@ -2724,7 +2771,7 @@ document.addEventListener('tkb-ask', async e => {
   Chat.setQuote(e.detail.text);
   if (document.body.classList.contains('desk-mode')) { const b = $('#dk-rtabs [data-r="chat"]'); if (b) { if (b.classList.contains('on')) Chat.setQuote(e.detail.text); else b.click(); setTimeout(() => $('#chat-text')?.focus(), 100); } return; }
   const h = location.hash.slice(1);
-  if (h.startsWith('note-')) { const note = await DB.get('notes', h.slice(5).split('~')[0]); if (note) chatDrawer({ note, course: await DB.get('courses', note.courseId), scope: '这份笔记 + 它的课件 + 它关联的课堂录音' }); }
+  if (h.startsWith('note-')) { const nid = h.slice(5).split('~')[0]; const note = (Board.current && Board.current.note && Board.current.note.id === nid) ? Board.current.note : await DB.get('notes', nid); if (note) chatDrawer({ note, course: await DB.get('courses', note.courseId), scope: '这份笔记 + 它的课件 + 它关联的课堂录音' }); }
   else toast('打开一份笔记或上课工作台再问 AI');
 });
 
@@ -3158,6 +3205,7 @@ async function renderAsk(courseId) {
     course,
     scope: `「${esc(course.name)}」所有笔记和知识点掌握情况 + 截止日期（不读课件原文；问具体某一讲，去那份笔记里问更准）`,
     suggestions: ['最近有什么作业或考试要准备？', '我这门课的学习进度怎么样？哪些还没掌握？', '帮我安排下周的复习计划', '把这门课到现在的重点串起来讲一遍'],
+    extraLabel: `这门课 ${notes.length} 份笔记的内容和掌握情况、截止日期`,
     getExtra: async () => {
       const dl = Deadlines.upcoming(12).map(d => `- ${new Date(d.due).toLocaleString('zh-CN')} · ${d.course || ''} · ${d.name}`).join('\n');
       let notesTxt = '', budget = 60000;
