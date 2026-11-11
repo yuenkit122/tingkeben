@@ -2187,6 +2187,7 @@ async function renderLive(courseId) {
         <div><strong>开始录音</strong><div class="hint" style="color:var(--muted);font-size:13px">识别语言：${esc(langLabel(s.liveLanguage))} · ${s.liveEnglishOnly !== false ? '只存英文转写' : '英文 + 中文字幕'} · 可在设置里改</div></div>
       </div>
       <label class="switch"><input type="checkbox" id="l-enonly" ${s.liveEnglishOnly !== false ? 'checked' : ''}>只录英文，不翻中文（录音主要用来课后整理笔记，省额度）</label>
+      ${audioSourcePickerHTML('l-asrc')}
     </div>
     <div class="card pad" style="font-size:14px;color:var(--muted);line-height:1.7">
       <strong style="color:var(--ink)">上课时这样用</strong><br>
@@ -2200,8 +2201,9 @@ async function renderLive(courseId) {
     </div>`;
   const eo = $('#l-enonly');
   if (eo) eo.onchange = () => { Settings.save({ liveEnglishOnly: eo.checked }); renderLive(courseId); };
+  bindAudioSourcePicker(view, 'l-asrc', () => renderLive(courseId));
   $('#l-start').onclick = async () => {
-    if (await micState() === 'denied') { micHelp(() => $('#l-start').click()); return; }
+    if (needsMic() && await micState() === 'denied') { micHelp(() => $('#l-start').click()); return; }
     // 必须在点击当下（还没 await 之前）准备 Chrome 内置翻译，否则 Chrome 不让下载模型
     if ((Settings.load().draftMode || 'free') === 'free') AI.prepareLocalTranslator();
     const cid = $('#l-course').value;
@@ -2223,7 +2225,8 @@ async function renderLive(courseId) {
       renderLiveRunning();
     } catch (e) {
       btn.disabled = false;
-      if (e.name === 'NotAllowedError' || /permission|denied/i.test(String(e.message || ''))) micHelp(() => $('#l-start').click());
+      if (e.name === 'SysAudioError') toast(sysAudioHelp(e), 9000);
+      else if (e.name === 'NotAllowedError' || /permission|denied/i.test(String(e.message || ''))) micHelp(() => $('#l-start').click());
       else toast(e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message, 6000);
       try { sess.capture && sess.capture.stop(); } catch (x) {}
     }

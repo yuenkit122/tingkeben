@@ -3126,17 +3126,19 @@ function deskLive(note, course, el) {
         <div><strong>开始录音</strong><div class="hint">${enOnly ? '只转写英文（不翻中文），录完用来整理笔记' : '实时转写英文 + 中文字幕'}；这是一段新的录音，之前的都留着</div></div>
       </div>
       <label class="switch small" style="margin-top:10px"><input type="checkbox" id="dk-enonly" ${enOnly ? 'checked' : ''}>只录英文，不翻中文（省额度，笔记照样能整理）</label>
+      ${audioSourcePickerHTML('dk-asrc')}
       ${!s.geminiKey ? '<div class="banner"><div class="grow">还没填 Gemini API key</div><a class="btn small primary" href="#settings~ai">去设置</a></div>' : ''}
       <div class="hint" style="margin-top:10px">开始录音后，这里会出现「★ 重点」和「❓ 没听懂」两个按钮。老师讲到关键处点一下，课后会单独列出来。</div>
       <div id="dk-prev" class="dk-prev"></div>`;
     $('#dk-enonly', el).onchange = e => { Settings.save({ liveEnglishOnly: e.target.checked }); deskLive(note, course, el); };
+    bindAudioSourcePicker(el, 'dk-asrc', () => deskLive(note, course, el));
     (async () => {
       const list = await noteSessions(note);
       const host = $('#dk-prev', el); if (!host) return;
       host.innerHTML = list.length ? `<div class="hint" style="margin:14px 0 6px">${list.length > 1 ? `这份笔记以前录过 ${list.length} 段（都还在）。` : '这份笔记录过音。'}再点开始会<b>接着最近那一段继续录</b>，不会再分新的一段：</div>${list.slice().reverse().map((x, i) => `<a class="dk-prev-item" href="#session-${x.id}"><span class="grow">第 ${list.length - i} 段 · ${fmtTime(x.duration)} · ${(x.segments || []).length} 句</span><span class="hint">${fmtDate(x.startedAt)}</span></a>`).join('')}` : '';
     })();
     $('#dk-start', el).onclick = async () => {
-      if (await micState() === 'denied') { micHelp(() => $('#dk-start', el).click()); return; }
+      if (needsMic() && await micState() === 'denied') { micHelp(() => $('#dk-start', el).click()); return; }
       if ((Settings.load().liveEnglishOnly !== false) === false && (Settings.load().draftMode || 'free') === 'free') AI.prepareLocalTranslator();
       const btn = $('#dk-start', el); btn.disabled = true;
       // 这份笔记录过音：接着最近那一段继续录，不分新的一段
@@ -3147,7 +3149,8 @@ function deskLive(note, course, el) {
       try { await live.start(); live.noteId = note.id; State.live = live; renderSide(); deskLive(note, course, el); }
       catch (e) {
         btn.disabled = false;
-        if (e.name === 'NotAllowedError' || /permission|denied/i.test(String(e.message || ''))) micHelp(() => $('#dk-start', el).click());
+        if (e.name === 'SysAudioError') toast(sysAudioHelp(e), 9000);
+        else if (e.name === 'NotAllowedError' || /permission|denied/i.test(String(e.message || ''))) micHelp(() => $('#dk-start', el).click());
         else toast(e.name === 'NotFoundError' ? '没找到麦克风。检查麦克风有没有接好，或在「设置」里换一个麦克风。' : e.message, 6000);
         try { live.capture && live.capture.stop(); } catch (x) {}
       }

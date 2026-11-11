@@ -1951,3 +1951,8 @@ html.dev-ipad.portrait .nb-split.doc-on .nb-pages { max-height: 36vh; }
 .course-card .ren-x { right: 42px; }
 h1 .ren-x { vertical-align: middle; opacity: .5; }
 h1 .ren-x:hover { opacity: 1; }
+
+/* 录什么：麦克风 / 电脑声音 / 两个一起（只在桌面版出现） */
+.field.asrc { margin: 4px 0 0; }
+.field.asrc .seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.field.asrc .seg button { flex: 1 1 auto; white-space: nowrap; }

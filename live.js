@@ -50,6 +50,36 @@ class PCM16 extends AudioWorkletProcessor {
 registerProcessor('pcm16', PCM16);
 `;
 
+/* 录什么：mic = 麦克风（默认）；system = 电脑里播放的声音（上网课）；both = 两个混在一起（网课上自己也要发言）
+   只有桌面版能录电脑声音；网页版 / iPad 一律当麦克风。 */
+function sysAudioMode() { try { return (window.tkDesktop && tkDesktop.sysAudio && tkDesktop.sysAudio.mode) || 'none'; } catch (e) { return 'none'; } }
+function audioSource() {
+  let v = 'mic'; try { v = Settings.load().audioSource || 'mic'; } catch (e) {}
+  if (v !== 'system' && v !== 'both') return 'mic';
+  return sysAudioMode() === 'none' ? 'mic' : v;
+}
+const AUDIO_SOURCE_LABEL = { mic: '麦克风', system: '电脑里的声音', both: '麦克风 + 电脑声音' };
+/* 录音页 / 工作台共用的「录什么」选择。网页版、iPad 不显示（录不了电脑声音） */
+function audioSourcePickerHTML(id) {
+  if (sysAudioMode() === 'none') return '';
+  const cur = audioSource();
+  const opts = [['mic', '🎙 麦克风', '在教室上课'], ['system', '💻 电脑里的声音', '上网课：录 Zoom、Teams、浏览器里放的声音'], ['both', '🎙＋💻 两个一起', '网课上你也要发言']];
+  return `<div class="field asrc"><label>录什么</label><div class="seg" id="${id}" role="radiogroup" aria-label="录什么">${opts.map(([v, l, t]) => `<button type="button" data-asrc="${v}" class="${cur === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>
+    <span class="hint">${cur === 'mic' ? '录麦克风收到的声音。' : cur === 'system' ? '直接录电脑正在播放的声音，不用外放，戴耳机也行。' : '电脑声音和你的麦克风混在一起录。'}${cur !== 'mic' && sysAudioMode() === 'helper' ? '第一次用时 macOS 会问能不能录制系统声音，点「允许」。' : ''}</span></div>`;
+}
+function bindAudioSourcePicker(root, id, after) {
+  const box = root.querySelector('#' + id); if (!box) return;
+  box.querySelectorAll('[data-asrc]').forEach(b => b.onclick = () => { Settings.save({ audioSource: b.dataset.asrc }); after && after(); });
+}
+/* 只录电脑声音时不用麦克风，开始前别去查麦克风权限 */
+const needsMic = () => audioSource() !== 'system';
+/* 电脑声音没开起来的错误：给一句能照着做的话 */
+function sysAudioHelp(e) {
+  const m = String((e && e.message) || e || '');
+  if (/权限|permission|denied|-?\d{3,}/i.test(m) && sysAudioMode() === 'helper') return '没能录到电脑声音：' + m + '。请到「系统设置 → 隐私与安全性 → 录屏与系统录音」里打开听课本，然后重新开始。';
+  return '没能录到电脑声音：' + m;
+}
+
 /* 只录英文：录音的唯一用途是课后整理笔记，实时中文翻译用别的软件就够了 */
 function liveEnglishOnly() { try { return Settings.load().liveEnglishOnly !== false; } catch (e) { return true; } }
 
@@ -57,21 +87,91 @@ class AudioCapture {
   constructor(onChunk, onLost) { this.onChunk = onChunk; this.onLost = onLost; }
   async start() {
     this.stopped = false;
+    this.source = audioSource();
+    this.mixQ = [];   // Mac 电脑声音：助手送来的 16k 样本先排队，和麦克风一块一块对齐着混
+    if (this.source !== 'mic' && sysAudioMode() === 'helper') await this.startHelper();
+    if (this.source === 'system' && sysAudioMode() === 'helper') return;   // 只录电脑声音：不用开麦克风
+    if (this.source !== 'mic' && sysAudioMode() === 'loopback') {
+      // Windows：系统声音走 getDisplayMedia（主进程直接给 loopback），画面那一路马上关掉
+      const ds = await navigator.mediaDevices.getDisplayMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: true });
+      ds.getVideoTracks().forEach(t => t.stop());
+      if (!ds.getAudioTracks().length) throw Object.assign(new Error('没拿到电脑的声音。'), { name: 'SysAudioError' });
+      this.sysStream = ds;
+      ds.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (!this.stopped && this.onLost) this.onLost('system'); }));
+    }
+    if (this.source === 'system') { await this.startGraph(null); return; }
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: Object.assign({ channelCount: 1, echoCancellation: false, noiseSuppression: !Settings.load().micRaw, autoGainControl: true }, Settings.load().micId ? { deviceId: { ideal: Settings.load().micId } } : {}),
     });
     // 麦克风中途没了（AirPods 断开、拔掉耳机、系统换了输入设备）：以前没人知道，界面还显示在录，其实后面全是空的
-    this.stream.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (!this.stopped && this.onLost) this.onLost(); }));
+    this.stream.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (!this.stopped && this.onLost) this.onLost('mic'); }));
+    await this.startGraph(this.stream);
+  }
+  /* Mac：启动 tkb-syscap 助手，等它说 READY（最多 6 秒）。第一次用时 macOS 会弹窗要「录制系统声音」的权限 */
+  async startHelper() {
+    const sa = tkDesktop.sysAudio;
+    this.offData = sa.onData(buf => this.onHelperData(new Int16Array(buf)));
+    let ready, failed;
+    const wait = new Promise((res, rej) => { ready = res; failed = rej; });
+    this.offStatus = sa.onStatus(line => {
+      if (/^READY/.test(line)) ready();
+      else if (/^LEVEL\s/.test(line)) this.sysLevel = Number(line.split(/\s+/)[1]) || 0;
+      else if (/^ERROR/.test(line)) { const m = line.replace(/^ERROR\s*/, ''); this.helperErr = m; failed(Object.assign(new Error(m), { name: 'SysAudioError' })); }
+      else if (/^EXIT/.test(line)) { failed(Object.assign(new Error(this.helperErr || '电脑声音采集意外退出了'), { name: 'SysAudioError' })); if (!this.stopped && this.helperOn && this.onLost) this.onLost('system'); this.helperOn = false; }
+    });
+    const r = await sa.start();
+    if (!r || !r.ok) { this.cleanHelper(); throw Object.assign(new Error((r && r.error) || '电脑声音采集启动失败'), { name: 'SysAudioError' }); }
+    try { await Promise.race([wait, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('电脑声音采集 6 秒没有响应。第一次用请在弹出的窗口里点「允许」，然后再点一次开始。'), { name: 'SysAudioError' })), 6000))]); }
+    catch (e) { this.cleanHelper(); throw e; }
+    this.helperOn = true;
+  }
+  cleanHelper() {
+    this.helperOn = false;
+    try { this.offData && this.offData(); } catch (e) {}
+    try { this.offStatus && this.offStatus(); } catch (e) {}
+    this.offData = this.offStatus = null;
+    try { tkDesktop.sysAudio.stop(); } catch (e) {}
+  }
+  /* 助手送来的 PCM：只录电脑声音时每 1600 个样本交出去；和麦克风一起录时先排队，等麦克风那一块来了再混 */
+  onHelperData(int16) {
+    if (this.stopped) return;
+    if (this.source === 'both') {
+      for (let i = 0; i < int16.length; i++) this.mixQ.push(int16[i]);
+      if (this.mixQ.length > 16000 * 3) this.mixQ.splice(0, this.mixQ.length - 16000 * 3);   // 最多压 3 秒，免得越积越多、对不上
+      return;
+    }
+    if (this.pend && this.pend.length) { const m = new Int16Array(this.pend.length + int16.length); m.set(this.pend); m.set(int16, this.pend.length); this.pend = m; } else this.pend = int16;
+    while (this.pend.length >= 1600) {
+      const out = this.pend.slice(0, 1600); this.pend = this.pend.slice(1600);
+      let sq = 0; for (let i = 0; i < out.length; i++) { const v = out[i] / 32768; sq += v * v; }
+      this.onChunk(out, Math.sqrt(sq / 1600));
+    }
+  }
+  /* 麦克风一块（1600 个样本）+ 排队里同样多的电脑声音，相加后限幅 */
+  mix(pcm) {
+    if (this.source !== 'both' || sysAudioMode() !== 'helper') return null;
+    const out = new Int16Array(pcm.length); let sq = 0;
+    const n = Math.min(pcm.length, this.mixQ.length), sys = this.mixQ.splice(0, n);
+    for (let i = 0; i < pcm.length; i++) {
+      const v = Math.max(-32768, Math.min(32767, pcm[i] + (i < n ? sys[i] : 0)));
+      out[i] = v; const f = v / 32768; sq += f * f;
+    }
+    return { pcm: out, rms: Math.sqrt(sq / pcm.length) };
+  }
+  /* 把一个或两个声音源接进降采样的 worklet（Windows 的电脑声音也在这里一起混） */
+  async startGraph(micStream) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     this.ctx = new Ctx();
     if (this.ctx.state === 'suspended') await this.ctx.resume();
-    this.src = this.ctx.createMediaStreamSource(this.stream);
+    const streams = [micStream, this.sysStream].filter(Boolean);
+    this.srcs = streams.map(st => this.ctx.createMediaStreamSource(st));
+    this.src = this.srcs[0];
     if (this.ctx.audioWorklet) {
       const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
       await this.ctx.audioWorklet.addModule(url);
       this.node = new AudioWorkletNode(this.ctx, 'pcm16');
-      this.node.port.onmessage = e => this.onChunk(e.data.pcm, e.data.rms);
-      this.src.connect(this.node);
+      this.node.port.onmessage = e => { const m = this.mix(e.data.pcm); if (m) this.onChunk(m.pcm, m.rms); else this.onChunk(e.data.pcm, e.data.rms); };
+      this.srcs.forEach(x => x.connect(this.node));
       // 接一个静音输出，保证 Safari 持续处理
       const mute = this.ctx.createGain(); mute.gain.value = 0;
       this.node.connect(mute).connect(this.ctx.destination);
@@ -87,16 +187,19 @@ class AudioCapture {
           const part = acc.splice(0, 1600); let sq = 0;
           const out = new Int16Array(1600);
           part.forEach((v, i) => { v = Math.max(-1, Math.min(1, v)); sq += v * v; out[i] = v < 0 ? v * 0x8000 : v * 0x7fff; });
-          this.onChunk(out, Math.sqrt(sq / 1600));
+          const m = this.mix(out); if (m) this.onChunk(m.pcm, m.rms); else this.onChunk(out, Math.sqrt(sq / 1600));
         }
       };
-      this.src.connect(this.node); this.node.connect(this.ctx.destination);
+      this.srcs.forEach(x => x.connect(this.node)); this.node.connect(this.ctx.destination);
     }
   }
   /* 切到别的 App 再回来、来电话之后，音频可能被系统暂停：回来时接着跑 */
   wake() { try { if (this.ctx && this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume(); } catch (e) {} }
   stop() {
     this.stopped = true;
+    if (this.helperOn || this.offData) this.cleanHelper();
+    try { (this.srcs || []).forEach(x => x.disconnect()); } catch (e) {}
+    try { this.sysStream && this.sysStream.getTracks().forEach(t => t.stop()); } catch (e) {}
     try { this.src && this.src.disconnect(); } catch (e) {}
     try { this.node && this.node.disconnect(); } catch (e) {}
     try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
@@ -291,7 +394,7 @@ class LiveSession {
     this.record = {
       id: DB.uid('s_'), courseId: this.course ? this.course.id : null,
       title: `${today} ${hm} 课堂录音`,
-      startedAt: Date.now(), duration: 0, segments: [], highlights: [], confused: [], glossary: {}, hasAudio: s.saveAudio,
+      startedAt: Date.now(), duration: 0, segments: [], highlights: [], confused: [], glossary: {}, hasAudio: s.saveAudio, audioSource: audioSource(),
     };
     if (this.seedGlossary) Object.assign(this.glossary, this.seedGlossary);
     this.t0 = Date.now();
@@ -321,10 +424,10 @@ class LiveSession {
       if (s.saveAudio) { this.audioChunks.push(pcm); if (this.audioChunks.length >= 600) this.flushAudio(); }
     };
     // 麦克风中途断了：自动重新打开一次（会用系统当前的输入设备），打不开就明说
-    const onLost = async () => {
+    const onLost = async which => {
       if (this.stopped || this.reopening) return;
       this.reopening = true;
-      this.onError && this.onError('麦克风断开了（耳机没电 / 拔掉了？），正在重新打开…');
+      this.onError && this.onError(which === 'system' ? '电脑声音采集断开了，正在重新打开…' : '麦克风断开了（耳机没电 / 拔掉了？），正在重新打开…');
       try { this.capture.stop(); } catch (e) {}
       await new Promise(r => setTimeout(r, 800));
       try {
@@ -333,9 +436,9 @@ class LiveSession {
         await cap.start();
         if (this.stopped) { cap.stop(); return; }
         this.capture = cap;
-        this.onError && this.onError('麦克风重新接上了，继续录。中间断开的那几秒没有录到。');
+        this.onError && this.onError((which === 'system' ? '电脑声音' : '麦克风') + '重新接上了，继续录。中间断开的那几秒没有录到。');
       } catch (e) {
-        this.onError && this.onError('麦克风断开后重新打不开：' + (e.message || e) + '。现在没有在录音，请检查麦克风后停止再重新开始。');
+        this.onError && this.onError((which === 'system' ? '电脑声音' : '麦克风') + '断开后重新打不开：' + (e.message || e) + '。现在没有在录音，请停止后再重新开始。');
         this.onStatus && this.onStatus('error');
       } finally { this.reopening = false; }
     };
