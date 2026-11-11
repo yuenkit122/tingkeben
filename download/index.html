@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>听课本 · 下载和安装</title>
+<meta name="description" content="听课本：把 Moodle 课件、课堂录音和笔记放在一起的上课工具。Mac、Windows、iPad 都能用。">
+<link rel="icon" href="icon.png">
+<style>
+:root{
+  --bg:#f8f7f2; --card:#ffffff; --ink:#1b2033; --mute:#5d6478; --line:#e4e2d8;
+  --brand:#3346a8; --brand-ink:#ffffff; --soft:#eceffb; --warn-bg:#fff7e0; --warn-line:#ecd58a; --code:#f1f0ea;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#10131f; --card:#181c2c; --ink:#e9ebf5; --mute:#a0a6bd; --line:#2a3048;
+    --brand:#8497ff; --brand-ink:#0e1220; --soft:#1f2540; --warn-bg:#2b2612; --warn-line:#6b5a1c; --code:#222840;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;-webkit-text-size-adjust:100%}
+a{color:var(--brand)}
+.wrap{max-width:980px;margin:0 auto;padding:0 20px}
+header.top{display:flex;align-items:center;justify-content:space-between;padding:18px 0}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:var(--ink);text-decoration:none}
+.logo img{width:34px;height:34px;border-radius:9px}
+nav a{margin-left:18px;color:var(--mute);text-decoration:none;font-size:15px}
+nav a:hover{color:var(--brand)}
+.hero{padding:36px 0 20px;text-align:center}
+.hero h1{font-size:clamp(30px,6vw,46px);line-height:1.2;margin:0 0 14px;letter-spacing:-.5px;text-wrap:balance}
+.hero p{color:var(--mute);font-size:18px;max-width:640px;margin:0 auto 26px;text-wrap:pretty}
+.btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;min-width:190px;padding:12px 22px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--ink);text-decoration:none;font-weight:600}
+.btn small{font-weight:400;color:var(--mute);font-size:12.5px}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}
+.btn.primary small{color:inherit;opacity:.8}
+.btn:hover{filter:brightness(1.05)}
+.ver{margin-top:14px;color:var(--mute);font-size:13.5px}
+.shot{margin:34px auto 0;border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 18px 50px rgba(20,25,60,.12);background:var(--card)}
+.shot img{display:block;width:100%;height:auto}
+section{padding:54px 0 0}
+h2{font-size:26px;margin:0 0 6px}
+.sub{color:var(--mute);margin:0 0 22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+.card h3{margin:0 0 6px;font-size:17px}
+.card p{margin:0;color:var(--mute);font-size:15px}
+.note{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:12px;padding:12px 16px;font-size:15px;margin:16px 0}
+details{background:var(--card);border:1px solid var(--line);border-radius:14px;margin-bottom:12px}
+summary{cursor:pointer;padding:15px 20px;font-weight:600;font-size:17px;list-style:none;display:flex;justify-content:space-between;align-items:center}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"＋";color:var(--mute);font-weight:400}
+details[open] summary::after{content:"－"}
+.body{padding:0 20px 18px}
+ol,ul{padding-left:22px;margin:8px 0}
+li{margin:6px 0}
+code,pre{background:var(--code);border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px}
+code{padding:2px 6px}
+pre{padding:12px 14px;overflow-x:auto;margin:8px 0}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:600}
+.tw{overflow-x:auto}
+.pill{display:inline-block;background:var(--soft);color:var(--brand);border-radius:99px;padding:1px 10px;font-size:13px;font-weight:600;margin-left:6px}
+footer{margin-top:64px;padding:26px 0 40px;border-top:1px solid var(--line);color:var(--mute);font-size:14px;text-align:center}
+@media (max-width:600px){ nav a{margin-left:12px;font-size:14px} .btn{min-width:100%} section{padding-top:42px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <a class="logo" href="#"><img src="icon.png" alt="">听课本</a>
+  <nav><a href="#download">下载</a><a href="#install">安装</a><a href="#cloud">云同步</a><a href="#faq">问题</a></nav>
+</header>
+
+<div class="hero">
+  <h1>课件、录音、笔记，放在同一个本子里</h1>
+  <p>听课本把 Moodle 上的课件拉下来，上课时边录音边转写，课后让 AI 帮你整理成中英对照的笔记。Mac、Windows、iPad 都能用，数据存在你自己的设备上。</p>
+  <div class="btns">
+    <a class="btn primary" data-dl="mac" href="#download">下载 Mac 版<small>Apple 芯片（M1 及以后）</small></a>
+    <a class="btn" data-dl="win" href="#download">下载 Windows 版<small>Windows 10 / 11，64 位</small></a>
+    <a class="btn" data-dl="web" href="#download">iPad / 网页版<small>不用安装，浏览器打开</small></a>
+  </div>
+  <div class="ver">当前版本 <span data-v="app"></span> · 免费 · 个人学习项目</div>
+  <div class="shot"><img src="shot-home.png" alt="听课本主页截图" width="1600" height="1004"></div>
+</div>
+
+<section id="features">
+  <h2>它能做什么</h2>
+  <p class="sub">为「用英文上课、课后要复习」的学生做的。</p>
+  <div class="grid">
+    <div class="card"><h3>课件自动拉取</h3><p>登录一次 Moodle，勾选课程，课件按周归类下载。已有的不重下，老师改过的自动更新。目前适配 Monash Moodle。</p></div>
+    <div class="card"><h3>上课录音，实时转写</h3><p>边听边出文字，可以同时出中文翻译。录音和转写跟着对应的课件走。</p></div>
+    <div class="card"><h3>AI 整理笔记</h3><p>把课件和录音整理成中英对照的笔记，标出重点；看不懂的地方直接问 AI。</p></div>
+    <div class="card"><h3>在课件上手写</h3><p>PPT、Word、Keynote 会转成 PDF 按原样显示，iPad 上用笔直接写。</p></div>
+    <div class="card"><h3>复习和测验</h3><p>按课程出复习题，记录做题进度；主页会列出快到期的作业和测验。</p></div>
+    <div class="card"><h3>多设备同步</h3><p>Mac、Windows、iPad 之间自动同步课程、课件、笔记和手写。可选，不登录也能用。</p></div>
+  </div>
+  <div class="note"><b>用之前要知道：</b>AI 功能（转写、翻译、整理笔记）需要你自己申请 API key，填在「设置 → AI 和 API key」里。Gemini、Groq 等有免费额度，DeepSeek 按用量付费。听课本本身不收费，也不经手你的 key。</div>
+</section>
+
+<section id="download">
+  <h2>下载</h2>
+  <p class="sub">选你的设备。</p>
+  <div class="tw"><table>
+    <tr><th>设备</th><th>下载</th><th>说明</th></tr>
+    <tr><td><b>Mac</b></td><td><a data-dl="mac" href="#">听课本 Mac 版（.dmg）</a></td><td>只支持 Apple 芯片（M1 及以后）。Intel 的 Mac 请用网页版。约 120 MB。</td></tr>
+    <tr><td><b>Windows</b><span class="pill">测试版</span></td><td><a data-dl="win" href="#">听课本 Windows 版（.exe）</a></td><td>Windows 10 / 11，64 位。约 120 MB。还没在很多电脑上试过，遇到问题请反馈。</td></tr>
+    <tr><td><b>iPad / 其他</b></td><td><a data-dl="web" href="#">打开网页版</a></td><td>不用安装。iPad 用 Safari 打开后「添加到主屏幕」。</td></tr>
+    <tr><td><b>浏览器插件</b></td><td><a data-dl="ext" href="#">听课本助手 <span data-v="ext"></span>（.zip）</a></td><td>只有<b>网页版</b>需要：用来从 Moodle 拉课件。Mac / Windows 版已经内置，不用装。</td></tr>
+  </table></div>
+  <p class="sub" style="margin-top:12px" id="mirror" hidden>GitHub 下载太慢？<a data-dl="mirror" href="#">用网盘下载</a></p>
+</section>
+
+<section id="install">
+  <h2>安装教程</h2>
+  <p class="sub">听课本是个人项目，没有花钱买苹果和微软的开发者签名，所以第一次打开时系统会多问一句。照下面做就行。</p>
+
+  <details open>
+    <summary>Mac</summary>
+    <div class="body">
+      <ol>
+        <li>双击下载的 <code>.dmg</code>，把「听课本」拖到旁边的「应用程序」文件夹。</li>
+        <li>到「应用程序」里双击打开。系统会提示「无法验证开发者」或「Apple 无法检查」——先点「完成」。</li>
+        <li>打开 <b>系统设置 → 隐私与安全性</b>，往下翻到「安全性」，能看到「已阻止打开“听课本”」，点旁边的 <b>仍要打开</b>，输入开机密码。</li>
+        <li>第一次录音时会问能不能用麦克风，点「允许」。</li>
+      </ol>
+      <p>如果提示的是「“听课本”已损坏，无法打开」（文件其实没坏，是系统给网上下载的应用打的标记）：打开「终端」，粘贴下面这行回车，再重新打开。</p>
+      <pre>xattr -cr /Applications/听课本.app</pre>
+      <p>较老的系统（macOS 14 及以前）更简单：在「应用程序」里<b>右键</b>点听课本 → 打开 → 再点「打开」。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Windows</summary>
+    <div class="body">
+      <ol>
+        <li>双击下载的 <code>.exe</code>。如果浏览器说「不常下载此文件」，选「保留」。</li>
+        <li>出现蓝色的「Windows 已保护你的电脑」窗口：点 <b>更多信息</b> → <b>仍要运行</b>。</li>
+        <li>按提示选安装位置，装完桌面上会有「听课本」图标。</li>
+        <li>第一次录音时允许使用麦克风。如果没弹窗又录不到声音：<b>设置 → 隐私和安全性 → 麦克风</b>，打开「允许桌面应用访问麦克风」。</li>
+      </ol>
+      <p>PPT / Word 课件要按原样显示，需要电脑上装了 Microsoft Office（听课本用它在后台转成 PDF）。没装的话仍然能读出文字，只是版式不保留。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>iPad / 网页版</summary>
+    <div class="body">
+      <ol>
+        <li>用 <b>Safari</b> 打开网页版。</li>
+        <li>点分享按钮 →「添加到主屏幕」。之后从主屏幕图标打开，是全屏的独立应用。</li>
+        <li>电脑上用网页版：请用 <b>Chrome</b>（插件只支持 Chrome），不要在 Safari 和 Chrome 之间换着用，两边的数据是分开存的。</li>
+      </ol>
+    </div>
+  </details>
+
+  <details>
+    <summary>浏览器插件「听课本助手」（只有网页版需要）</summary>
+    <div class="body">
+      <p>作用：你在 Chrome 里登录 Monash Moodle 之后，点一下插件，就把课件、作业要求、测验信息、截止日期同步进听课本。账号密码只在学校页面里输入，插件不保存。</p>
+      <ol>
+        <li>下载 <code>tingkeben-helper.zip</code>，解压，得到 <code>tingkeben-helper</code> 文件夹。</li>
+        <li>Chrome 地址栏输入 <code>chrome://extensions</code> 回车。</li>
+        <li>打开右上角的 <b>开发者模式</b>。</li>
+        <li>点左上角 <b>加载已解压的扩展程序</b>，选刚才那个 <code>tingkeben-helper</code> 文件夹。</li>
+        <li>这个文件夹<b>不要删、不要移动</b>，删了插件就失效。建议放在「文稿」里。</li>
+      </ol>
+      <p>更新插件：下载新的 zip，解压覆盖原来的文件夹，回到 <code>chrome://extensions</code> 点插件卡片上的刷新按钮。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>装好之后第一次用</summary>
+    <div class="body">
+      <ol>
+        <li><b>填 API key</b>：设置 → AI 和 API key。至少填一个（推荐先申请免费的 Gemini）。</li>
+        <li><b>拉课件</b>：主页右上角「从 Moodle 同步」，登录学校账号，勾选课程。不是 Monash 的同学：点「新建课程」，把 PDF / PPT 拖进去。</li>
+        <li><b>确认麦克风</b>：设置 → 讲课录音 →「扫描麦克风」，能看到设备名就行。</li>
+        <li><b>（可选）开云同步</b>：见下一节。</li>
+      </ol>
+    </div>
+  </details>
+</section>
+
+<section id="cloud">
+  <h2>云同步怎么用</h2>
+  <p class="sub">只有一台设备可以跳过这一节。不登录云服务，所有功能照常能用，数据只在本机。</p>
+  <div class="grid">
+    <div class="card"><h3>① 有人给了你邀请码</h3><p>设置 → 云同步 →「我有邀请码，注册」→ 填邀请码，自己定用户名和密码。换设备时用同一个用户名密码登录。</p></div>
+    <div class="card"><h3>② 自己建一个云</h3><p>用自己的 Cloudflare 账号建，数据完全在自己手里。免费额度 10 GB，开通要绑一张卡或 PayPal。约 15 分钟。</p></div>
+    <div class="card"><h3>③ 不用云</h3><p>在「设置 → 数据和备份」里导出备份文件，拷到另一台设备导入。</p></div>
+  </div>
+
+  <details style="margin-top:14px">
+    <summary>用邀请码：需要知道的事</summary>
+    <div class="body">
+      <ul>
+        <li>一个邀请码只能注册一个账号，注册完就作废。</li>
+        <li>你的数据和别的用户分开存，互相看不到。</li>
+        <li><b>但发邀请码的人在技术上能看到</b>你存在云端的内容（数据放在他的 Cloudflare 存储里），包括你同步上去的 API key。信得过对方再用，介意就选 ② 或 ③。</li>
+        <li>有空间上限（一般 1 GB），在「设置 → 云同步」能看到用量。录音音频不同步，不占空间。</li>
+        <li>忘了密码：请对方重置，会给你一个临时密码，登录后在「设置 → 云同步 → 改密码」换掉。</li>
+        <li>这是朋友之间的分享，不是商业服务。重要的东西定期在「数据和备份」里导出一份。</li>
+      </ul>
+    </div>
+  </details>
+
+  <details>
+    <summary>自己建一个云服务（Cloudflare，约 15 分钟）</summary>
+    <div class="body">
+      <ol>
+        <li>注册 <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Cloudflare</a>（可以用 Gmail）。</li>
+        <li>左边 <b>R2 对象存储</b> → 按提示开通（绑卡或 PayPal，10 GB 以内不扣钱）→ <b>创建存储桶</b>，名字填 <code>tingkeben</code>。</li>
+        <li>左边 <b>Workers 和 Pages</b> → <b>创建</b> → 选「Hello World」→ 名字填 <code>tingkeben-cloud</code> → 部署。</li>
+        <li>点 <b>编辑代码</b>，把里面的代码全部换成 <a href="worker.js" download>worker.js</a> 的内容 → <b>部署</b>。</li>
+        <li>回到这个 Worker 的 <b>设置</b>：
+          <ul>
+            <li><b>绑定</b> → 添加 → R2 存储桶 → 变量名 <code>BUCKET</code>，存储桶选 <code>tingkeben</code>。</li>
+            <li><b>变量和机密</b> → 添加 → 类型「机密」→ 名称 <code>APP_PASSWORD</code>，值是你自己定的密码（至少 10 位）。</li>
+          </ul>
+        </li>
+        <li>记下 Worker 的网址（形如 <code>https://tingkeben-cloud.你的名字.workers.dev</code>）。浏览器打开它，看到 <code>"ready":true</code> 就好了。</li>
+        <li>听课本 → 设置 → 云同步 → <b>登录</b> → 展开「云服务网址」换成你的网址 → 用户名留空，密码填 <code>APP_PASSWORD</code>。</li>
+      </ol>
+      <p>建好之后你就是这个云的主人，可以在「设置 → 云同步 → 邀请朋友 / 管理账号」给别人发邀请码。完整说明：<a href="cloud.md" target="_blank">云服务说明</a>（App 里「帮助」菜单也有）。</p>
+    </div>
+  </details>
+</section>
+
+<section id="faq">
+  <h2>常见问题</h2>
+  <p class="sub"></p>
+  <details><summary>要钱吗？</summary><div class="body"><p>听课本不收费。AI 功能用的是你自己的 API key：Gemini、Groq 有免费额度，一般上课够用；DeepSeek 按用量付费，在「设置 → 用量和费用」能看到这个月花了多少。</p></div></details>
+  <details><summary>我的数据存在哪？</summary><div class="body"><p>在你自己的设备上。Mac 在 <code>~/Library/Application Support/听课本</code>，Windows 在 <code>%APPDATA%\听课本</code>。只有登录了云同步，数据才会传到云端。卸载应用不会删数据，要删请手动删这个文件夹。</p></div></details>
+  <details><summary>不是 Monash 的学生能用吗？</summary><div class="body"><p>能。只有「从 Moodle 同步」是为 Monash 的 Moodle 写的，别的学校用不了。其余功能都一样：新建课程，把课件拖进去就行。</p></div></details>
+  <details><summary>登录云同步时提示「连不上」</summary><div class="body"><p>先检查网络。默认的云服务地址在 <code>workers.dev</code> 上，中国大陆的网络通常直接打不开它，需要能访问外网的网络环境。校园网偶尔也会拦，换手机热点试一次。</p></div></details>
+  <details><summary>怎么更新？</summary><div class="body"><p>回到这个页面下载新版，直接覆盖安装。数据不受影响。</p></div></details>
+  <details><summary>怎么卸载？</summary><div class="body"><p>Mac：把「听课本」从「应用程序」拖到废纸篓。Windows：设置 → 应用 → 找到听课本 → 卸载。数据文件夹见上面「我的数据存在哪」。</p></div></details>
+</section>
+
+<footer>
+  听课本 · 个人学习项目，按现状提供，不保证没有问题 · <a data-dl="repo" href="#">GitHub</a>
+</footer>
+</div>
+
+<script>
+/* ===== 下载地址：换地方放安装包时只改这里 =====
+   现在用 GitHub Releases 的「latest」地址：以后每次发新版，只要上传的文件名不变，这个页面不用改。
+   mirror 填了网盘分享链接后，页面上会自动出现「用网盘下载」。 */
+const SITE = {
+  version: { app: '2.3.0', ext: '1.6.0' },
+  mac: 'https://github.com/yuenkit122/tingkeben/releases/latest/download/Tingkeben-Mac-AppleSilicon.dmg',
+  win: 'https://github.com/yuenkit122/tingkeben/releases/latest/download/Tingkeben-Windows-x64-Setup.exe',
+  ext: 'https://github.com/yuenkit122/tingkeben/releases/latest/download/tingkeben-helper.zip',
+  web: 'https://yuenkit122.github.io/tingkeben/',
+  repo: 'https://github.com/yuenkit122/tingkeben',
+  mirror: '',
+};
+document.querySelectorAll('[data-dl]').forEach(a => { const u = SITE[a.dataset.dl]; if (u) a.href = u; });
+document.querySelectorAll('[data-v]').forEach(e => { e.textContent = 'v' + SITE.version[e.dataset.v]; });
+if (SITE.mirror) document.getElementById('mirror').hidden = false;
+// 按访客的系统把对应的下载按钮设成主按钮
+const ua = navigator.userAgent, os = /Windows/.test(ua) ? 'win' : /iPad|iPhone|Android/.test(ua) || (navigator.maxTouchPoints > 1 && /Mac/.test(ua)) ? 'web' : 'mac';
+document.querySelectorAll('.hero .btn').forEach(b => b.classList.toggle('primary', b.dataset.dl === os));
+</script>
+</body>
+</html>
