@@ -70,7 +70,7 @@ self.addEventListener('fetch', e => {
       try {
         const r = await fetch(req);
         const c = await caches.open(CACHE);
-        c.put(abs('index.html'), r.clone()).catch(() => {});
+        if (!u.pathname.includes('/download/')) c.put(abs('index.html'), r.clone()).catch(() => {}); // 下载页不是 App 本体，别把它存成离线首页
         return r;
       } catch (err) {
         const c = await caches.open(CACHE);
