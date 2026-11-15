@@ -554,11 +554,12 @@ async function renderCourse(id, tab) {
   if (tab === 'files') renderFilesTab(course, body);
   else if (tab === 'notes') {
     notes.sort((a, b) => b.createdAt - a.createdAt);
-    body.innerHTML = notes.length ? `<div class="row" style="justify-content:flex-end;margin-bottom:10px"><button class="btn small primary" id="c-newnote">＋ 空白笔记</button></div><div class="card list">${notes.map(noteItem).join('')}</div>`
+    body.innerHTML = notes.length ? `<div class="row" style="justify-content:flex-end;margin-bottom:10px"><button class="btn small" id="c-export" title="选课件、笔记、录音，导出成 Word 讲义或者喂给 AI 的资料包">导出学习资料</button><button class="btn small primary" id="c-newnote">＋ 空白笔记</button></div><div class="card list">${notes.map(noteItem).join('')}</div>`
       : `<div class="empty"><strong>还没有笔记</strong>
           <div style="margin:6px 0 14px">不用等课件：可以先建一份空白笔记，进去手写或录音，课件以后再补。</div>
           <div class="row" style="justify-content:center"><button class="btn" id="c-newnote">＋ 空白笔记</button><button class="btn primary" id="c-newnote2">${ICON.mic}手写 + 录音</button></div></div>`;
     const nb = $('#c-newnote', body); if (nb) nb.onclick = async () => { const n = await newBlankNote(course); location.hash = 'note-' + n.id; };
+    const ce = $('#c-export', body); if (ce) ce.onclick = () => ExportPack.open({ course });
     const nb2 = $('#c-newnote2', body); if (nb2) nb2.onclick = () => studyFlow({ courseId: course.id });
   } else {
     sessions.sort((a, b) => b.startedAt - a.startedAt);
@@ -656,6 +657,7 @@ async function renderFilesTab(course, body) {
     <div class="bar noprint" id="selbar" ${State.selected.length ? '' : 'hidden'}>
       <span class="grow">已选 <b id="selcount">${State.selected.length}</b> 个课件</span>
       <button class="btn small" id="sel-clear">取消</button>
+      <button class="btn small" id="sel-export" title="把选中的课件，连同它们的笔记和课堂录音，导出成 Word 讲义或者喂给 AI 的资料包">导出学习资料</button>
       <button class="btn small primary" id="sel-gen">${ICON.spark}用选中的生成笔记</button>
     </div>`;
 
@@ -704,6 +706,7 @@ async function renderFilesTab(course, body) {
   });
   $('#sel-clear', body).onclick = () => { State.selected = []; renderFilesTab(course, body); };
   $('#sel-gen', body).onclick = () => generateModal({ course, preselect: State.selected });
+  $('#sel-export', body).onclick = () => ExportPack.open({ course, fileIds: State.selected });
 }
 
 /* Moodle 里除了文件还有视频和网页：挂成一条链接，点开就能看 */
@@ -1896,7 +1899,7 @@ async function renderRecap(note, course, pane, id, rerender) {
   pane.innerHTML = `<div class="row noprint recap-bar">
       <div class="grow"><b>复盘</b> <span class="hint">${note.recap ? '整理于 ' + fmtDate(note.recapAt || Date.now()) + (note.recapSig && note.recapSig !== recapSig(note) ? ' · 笔记后来改过，可以重新整理' : '') : '课后把这节课重新理一遍逻辑、重新排版，专门用来复习'}</span></div>
       <button class="btn small primary" id="rc-enhance" title="先用录音、手写和补充笔记把原来的 AI 笔记补完整，再复盘会更准">${ICON.spark}课后优化笔记</button>
-      ${note.recap && !busy ? `<button class="btn small" id="rc-copy">复制</button><button class="btn small" id="rc-pdf">导出 PDF</button><button class="btn small" id="rc-redo">重新整理</button>` : ''}
+      ${note.recap && !busy ? `<button class="btn small" id="rc-copy">复制</button><button class="btn small" id="rc-docx">导出 Word</button><button class="btn small" id="rc-pdf">导出 PDF</button><button class="btn small" id="rc-redo">重新整理</button>` : ''}
       ${rerender ? '' : '<button class="btn small ghost" id="rc-raw" title="看 / 改原来的笔记文字">原始笔记</button>'}
     </div>
     <div class="recap-host"><div class="recap-wrap">
@@ -1939,6 +1942,7 @@ async function renderRecap(note, course, pane, id, rerender) {
   body.innerHTML = md(note.recap);
   $('#rc-redo', pane).onclick = start;
   $('#rc-copy', pane).onclick = async () => { try { await navigator.clipboard.writeText(note.recap); toast('已复制'); } catch (e) { toast('复制失败'); } };
+  $('#rc-docx', pane).onclick = async () => { try { await Docx.save(note.recap, { title: note.title + ' 复盘', meta: [course && course.name, '复盘讲义', fmtDate(note.recapAt || Date.now())].filter(Boolean).join('　·　'), footer: note.title }); toast('Word 文件已下载'); } catch (e) { toast('导出 Word 失败：' + e.message, 6000); } };
   $('#rc-pdf', pane).onclick = () => { toast('在打印窗口选「存储为 PDF」'); setTimeout(() => window.print(), 300); };
 }
 const recapSig = n => { const s = String(n.markdown || '') + '|' + (n.todo || []).length + '|' + (n.wrong || []).length; let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return s.length + ':' + h; };
@@ -1955,6 +1959,7 @@ function noteActsHTML(note, view) {
         <button id="n-edit">编辑正文</button>
         <button id="n-copy">复制 Markdown</button>
         ${view === 'board' ? `<a href="#note-${note.id}~text">复盘</a>` : `<a href="#note-${note.id}">笔记 + 手写</a>`}
+        <button id="n-export" title="和课件、课堂录音一起整合成讲义，或者打包喂给 AI">导出 Word / 学习资料</button>
         <button id="n-pdf">导出 PDF</button>
         <a href="#review-${note.id}" title="只读的大字版，适合考前过一遍">复习阅读（只读）</a>
         <button class="danger-text" data-keep data-del-note="${note.id}">删除笔记</button>
@@ -1964,6 +1969,7 @@ function noteActsHTML(note, view) {
 function bindNoteActs(note, course, id, view) {
   const copy = $('#n-copy'); if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(note.markdown); toast('已复制 Markdown，可以粘贴到 Goodnotes / Notion'); } catch (e) { toast('复制失败，长按文字手动复制'); } };
   const ai = $('#n-ai'); if (ai) ai.onclick = () => aiPackModal(note, course);
+  const xp = $('#n-export'); if (xp) xp.onclick = async () => { xp.closest('details')?.removeAttribute('open'); ExportPack.open({ course: course || await DB.get('courses', note.courseId), noteIds: [note.id] }); };
   const pdf = $('#n-pdf'); if (pdf) pdf.onclick = () => { toast('在打印窗口选「存储为 PDF」'); setTimeout(() => window.print(), 300); };
   const re = $('#n-regen'); if (re) re.onclick = async () => {
     if (!course) return;
