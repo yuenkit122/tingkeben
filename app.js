@@ -563,8 +563,9 @@ async function renderCourse(id, tab) {
     const nb2 = $('#c-newnote2', body); if (nb2) nb2.onclick = () => studyFlow({ courseId: course.id });
   } else {
     sessions.sort((a, b) => b.startedAt - a.startedAt);
-    body.innerHTML = sessions.length ? `<div class="card list">${sessions.map(s => `<a class="item" href="#session-${s.id}"><div class="grow"><div class="t">${esc(s.title)}</div><div class="s">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句</div></div></a>`).join('')}</div>`
-      : `<div class="empty"><strong>还没有课堂录音</strong>上课时点「录这门课」，会实时转写英文并翻译成中文。</div>`;
+    body.innerHTML = `<div class="row" style="justify-content:flex-end;margin-bottom:10px"><button class="btn small" id="c-import-tr" title="听悟等软件导出的转写文稿（Word / txt / 字幕），导进来当一段课堂录音">导入转写文稿</button></div>` + (sessions.length ? `<div class="card list">${sessions.map(s => `<a class="item" href="#session-${s.id}"><div class="grow"><div class="t">${esc(s.title)}</div><div class="s">${fmtDate(s.startedAt)} · ${fmtTime(s.duration)} · ${s.segments.length} 句</div></div></a>`).join('')}</div>`
+      : `<div class="empty"><strong>还没有课堂录音</strong>上课时点「录这门课」，会实时转写英文并翻译成中文；用听悟等软件录的，可以点右上角「导入转写文稿」。</div>`);
+    $('#c-import-tr', body).onclick = () => TranscriptImport.open({ courseId: course.id });
   }
 }
 
@@ -2195,6 +2196,7 @@ async function renderLive(courseId) {
       <label class="switch"><input type="checkbox" id="l-enonly" ${s.liveEnglishOnly !== false ? 'checked' : ''}>只录英文，不翻中文（录音主要用来课后整理笔记，省额度）</label>
       ${audioSourcePickerHTML('l-asrc')}
     </div>
+    <div class="card pad row" style="gap:12px"><div class="grow"><strong>已经用别的软件录好了？</strong><div class="hint">听悟等软件导出的转写文稿（Word「原文和译文」、txt、srt / vtt 字幕）可以直接导进来，当一段课堂录音用</div></div><button class="btn" id="l-import-tr">导入转写文稿</button></div>
     <div class="card pad" style="font-size:14px;color:var(--muted);line-height:1.7">
       <strong style="color:var(--ink)">上课时这样用</strong><br>
       · 手机或 iPad 放在离老师近一点的桌上，第一次会问你要麦克风权限，点「允许」。<br>
@@ -2208,6 +2210,7 @@ async function renderLive(courseId) {
   const eo = $('#l-enonly');
   if (eo) eo.onchange = () => { Settings.save({ liveEnglishOnly: eo.checked }); renderLive(courseId); };
   bindAudioSourcePicker(view, 'l-asrc', () => renderLive(courseId));
+  $('#l-import-tr').onclick = () => TranscriptImport.open({ courseId: $('#l-course').value });
   $('#l-start').onclick = async () => {
     if (needsMic() && await micState() === 'denied') { micHelp(() => $('#l-start').click()); return; }
     // 必须在点击当下（还没 await 之前）准备 Chrome 内置翻译，否则 Chrome 不让下载模型
